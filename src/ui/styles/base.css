@@ -1,0 +1,465 @@
+/**
+ * Base styles: reset, typography, and shared component styles.
+ * All components use tbs- prefixed class names.
+ */
+
+@import './tokens.css';
+
+/* ─── Reset ───────────────────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-family);
+  font-size: var(--font-size-md);
+  line-height: 1.4;
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100%;
+}
+
+/* ─── Focus Ring ──────────────────────────────────────────────────────────── */
+
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ─── Button ──────────────────────────────────────────────────────────────── */
+
+.tbs-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--duration-fast) var(--easing),
+              border-color var(--duration-fast) var(--easing),
+              color var(--duration-fast) var(--easing);
+}
+
+.tbs-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tbs-btn--sm { padding: 4px 8px; font-size: var(--font-size-sm); }
+.tbs-btn--md { padding: 6px 12px; font-size: var(--font-size-md); }
+.tbs-btn--lg { padding: 8px 16px; font-size: var(--font-size-base); }
+
+.tbs-btn--primary {
+  background: var(--color-primary);
+  color: var(--color-primary-fg);
+}
+.tbs-btn--primary:hover:not(:disabled) { background: var(--color-primary-hover); }
+.tbs-btn--primary:active:not(:disabled) { background: var(--color-primary-active); }
+
+.tbs-btn--secondary {
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+}
+.tbs-btn--secondary:hover:not(:disabled) { background: var(--color-bg-hover); }
+
+.tbs-btn--danger {
+  background: var(--color-error);
+  color: #ffffff;
+}
+.tbs-btn--danger:hover:not(:disabled) { opacity: 0.9; }
+
+.tbs-btn--ghost {
+  background: transparent;
+  color: var(--color-primary);
+}
+.tbs-btn--ghost:hover:not(:disabled) { background: var(--color-bg-hover); }
+
+/* ─── Icon Button ─────────────────────────────────────────────────────────── */
+
+.tbs-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  transition: background-color var(--duration-fast) var(--easing),
+              color var(--duration-fast) var(--easing);
+}
+.tbs-icon-btn:hover { background: var(--color-bg-hover); color: var(--color-text); }
+.tbs-icon-btn--sm { width: 24px; height: 24px; font-size: 12px; }
+.tbs-icon-btn--md { width: 32px; height: 32px; font-size: 16px; }
+.tbs-icon-btn--lg { width: 40px; height: 40px; font-size: 20px; }
+
+/* ─── Tooltip ─────────────────────────────────────────────────────────────── */
+
+.tbs-tooltip-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.tbs-tooltip {
+  position: absolute;
+  z-index: 600;
+  padding: 4px 8px;
+  background: var(--color-text);
+  color: var(--color-bg);
+  font-size: var(--font-size-xs);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-fast) var(--easing);
+}
+
+.tbs-tooltip-wrapper:hover .tbs-tooltip,
+.tbs-tooltip-wrapper:focus-within .tbs-tooltip {
+  opacity: 1;
+}
+
+.tbs-tooltip--top { bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 4px; }
+.tbs-tooltip--bottom { top: 100%; left: 50%; transform: translateX(-50%); margin-top: 4px; }
+.tbs-tooltip--left { right: 100%; top: 50%; transform: translateY(-50%); margin-right: 4px; }
+.tbs-tooltip--right { left: 100%; top: 50%; transform: translateY(-50%); margin-left: 4px; }
+
+/* ─── Dialog ──────────────────────────────────────────────────────────────── */
+
+.tbs-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.tbs-dialog {
+  background: var(--color-bg);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  max-width: 480px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: var(--space-xl);
+}
+
+.tbs-dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-lg);
+}
+
+.tbs-dialog__title {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.tbs-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  margin-top: var(--space-xl);
+}
+
+/* ─── Toast ───────────────────────────────────────────────────────────────── */
+
+.tbs-toast {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  box-shadow: var(--shadow-md);
+  margin: var(--space-sm) var(--space-md);
+}
+
+.tbs-toast--success { background: var(--color-success-bg); color: var(--color-text); }
+.tbs-toast--warning { background: var(--color-warning-bg); color: var(--color-text); }
+.tbs-toast--error { background: var(--color-error-bg); color: var(--color-text); }
+.tbs-toast--info { background: var(--color-info-bg); color: var(--color-text); }
+
+.tbs-toast__icon { font-weight: bold; }
+.tbs-toast__message { flex: 1; }
+.tbs-toast__action {
+  background: none;
+  border: none;
+  color: var(--color-primary);
+  cursor: pointer;
+  font-weight: 500;
+  text-decoration: underline;
+}
+
+/* ─── Form Field ──────────────────────────────────────────────────────────── */
+
+.tbs-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.tbs-form-field__label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.tbs-form-field__required { color: var(--color-error); }
+
+.tbs-form-field__hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.tbs-form-field__error {
+  font-size: var(--font-size-xs);
+  color: var(--color-error);
+}
+
+.tbs-form-field input,
+.tbs-form-field select {
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  background: var(--color-bg);
+  transition: border-color var(--duration-fast) var(--easing);
+}
+
+.tbs-form-field input:focus,
+.tbs-form-field select:focus {
+  border-color: var(--color-primary);
+}
+
+/* ─── Inline Field (input + embedded reset button) ────────────────────────── */
+/* The wrapper fills the available width and the inner input expands to the
+   maximum reachable width; only the small reset button stays fixed. */
+.tbs-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+  width: 100%;
+}
+.tbs-inline-field > input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
+.tbs-inline-field__reset {
+  background: none;
+  border: none;
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  flex-shrink: 0;
+}
+.tbs-inline-field__reset:hover {
+  color: var(--color-text);
+}
+
+/* ─── Status Badge ────────────────────────────────────────────────────────── */
+
+.tbs-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xxs);
+  font-size: var(--font-size-xs);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+.tbs-status-badge--active { background: var(--color-success-bg); color: var(--color-success); }
+.tbs-status-badge--inactive { background: var(--color-bg-secondary); color: var(--color-text-tertiary); }
+.tbs-status-badge--error { background: var(--color-error-bg); color: var(--color-error); }
+.tbs-status-badge--pending { background: var(--color-warning-bg); color: var(--color-warning); }
+
+/* ─── Card ────────────────────────────────────────────────────────────────── */
+
+.tbs-card {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.tbs-card__title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+}
+
+.tbs-card__hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.tbs-card__actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+/* ─── Dual Cards ──────────────────────────────────────────────────────────── */
+
+.tbs-dual-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+}
+
+@media (max-width: 299px) {
+  .tbs-dual-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─── Icon Editor (reusable component) ────────────────────────────────────── */
+
+.tbs-icon-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.tbs-icon-editor__preview {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-sm);
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.tbs-icon-editor__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.tbs-icon-editor__label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.tbs-icon-editor__colors {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.tbs-icon-editor__color-input {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 0;
+}
+
+.tbs-icon-editor__swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--easing),
+              transform var(--duration-fast) var(--easing);
+}
+
+.tbs-icon-editor__swatch:hover {
+  transform: scale(1.15);
+}
+
+.tbs-icon-editor__swatch--active {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 1px var(--color-primary);
+}
+
+.tbs-icon-editor__swatch--none,
+.tbs-icon-editor__swatch--auto {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.tbs-icon-editor__text-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  background: var(--color-bg);
+  transition: border-color var(--duration-fast) var(--easing);
+}
+
+.tbs-icon-editor__text-input:focus {
+  border-color: var(--color-primary);
+}
+
+.tbs-icon-editor__collapse-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  padding: var(--space-xxs) 0;
+  transition: color var(--duration-fast) var(--easing);
+}
+
+.tbs-icon-editor__collapse-toggle:hover {
+  color: var(--color-text);
+}
+
+.tbs-icon-editor__upload {
+  padding: var(--space-xs) 0;
+}
+
+/* ─── Modal Wide Variant ──────────────────────────────────────────────────── */
+
+.tbs-modal--wide {
+  max-height: 90vh;
+  overflow-y: auto;
+}

@@ -1,0 +1,506 @@
+/**
+ * Settings page styles — left nav + right content layout.
+ * Follows UI/UX design doc tokens.
+ */
+
+/* ─── Settings Layout ─────────────────────────────────────────────────────── */
+
+.tbs-settings {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ─── Left Navigation ─────────────────────────────────────────────────────── */
+
+.tbs-settings__nav {
+  width: 220px;
+  min-width: 220px;
+  background: var(--color-bg-secondary);
+  border-right: 1px solid var(--color-border);
+  padding: var(--space-lg) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  overflow-y: auto;
+}
+
+.tbs-settings__nav-item {
+  display: block;
+  width: 100%;
+  padding: var(--space-sm) var(--space-lg);
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: var(--font-size-base);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background-color var(--duration-fast) var(--easing),
+              color var(--duration-fast) var(--easing);
+}
+
+.tbs-settings__nav-item:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.tbs-settings__nav-item--active {
+  color: var(--color-primary);
+  background: var(--color-info-bg);
+  border-right: 3px solid var(--color-primary);
+  font-weight: 600;
+}
+
+/* ─── Content Area ────────────────────────────────────────────────────────── */
+
+.tbs-settings__content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-xxl) var(--space-xxl);
+}
+
+.tbs-settings__content h2 {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  margin-bottom: var(--space-lg);
+  color: var(--color-text);
+}
+
+.tbs-settings__content h3 {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  margin-top: var(--space-xl);
+  margin-bottom: var(--space-md);
+  color: var(--color-text);
+}
+
+.tbs-settings__hint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-lg);
+  line-height: 1.5;
+}
+
+/* ─── Settings Table ──────────────────────────────────────────────────────── */
+
+.tbs-settings__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-md);
+  margin-bottom: var(--space-xl);
+}
+
+.tbs-settings__table th {
+  text-align: left;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 2px solid var(--color-border-strong);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.tbs-settings__table td {
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+}
+
+.tbs-settings__table tr:hover td {
+  background: var(--color-bg-hover);
+}
+
+.tbs-settings__sortable {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tbs-settings__sortable:hover {
+  color: var(--color-text);
+}
+.tbs-settings__actions-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.tbs-settings__sort-reset {
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+.tbs-settings__sort-reset:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-secondary);
+}
+
+/* Data Dashboard URL show/hide toggle (issue 4) */
+.tbs-settings__url-toggle {
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+.tbs-settings__url-toggle:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-secondary);
+}
+.tbs-settings__url-toggle.is-active {
+  background: var(--color-primary);
+  color: #fff;
+  border-color: var(--color-primary);
+}
+
+/* URL shown after the Source label (inactive toggle) */
+.tbs-settings__dashboard-url {
+  display: block;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Row action buttons (Edit / Reset) */
+.tbs-settings__row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.tbs-settings__table select {
+  padding: 4px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+/* ─── Conflict Banner ─────────────────────────────────────────────────────── */
+
+.tbs-settings__conflict-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-lg);
+  font-size: var(--font-size-sm);
+}
+
+/* ─── Slot Cards Grid ─────────────────────────────────────────────────────── */
+
+.tbs-settings__slots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-md);
+  margin-bottom: var(--space-xl);
+}
+
+.tbs-settings__slot-card {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.tbs-settings__slot-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.tbs-settings__slot-card-number {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  color: #fff;
+}
+
+.tbs-settings__slot-card-title {
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+.tbs-settings__slot-card-url {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ─── Rules Toolbar ───────────────────────────────────────────────────────── */
+
+.tbs-settings__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.tbs-settings__search {
+  flex: 1;
+  min-width: 160px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+.tbs-settings__search:focus {
+  border-color: var(--color-primary);
+  outline: none;
+}
+
+/* ─── Strategy Radio Cards ────────────────────────────────────────────────── */
+
+.tbs-settings__strategy-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin-bottom: var(--space-xl);
+}
+
+.tbs-settings__strategy-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--easing),
+              background-color var(--duration-fast) var(--easing);
+}
+
+.tbs-settings__strategy-card:hover {
+  background: var(--color-bg-hover);
+}
+
+.tbs-settings__strategy-card--active {
+  border-color: var(--color-primary);
+  background: var(--color-info-bg);
+}
+
+.tbs-settings__strategy-card input[type="radio"] {
+  margin-top: 2px;
+}
+
+.tbs-settings__strategy-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.tbs-settings__strategy-card-title {
+  font-weight: 600;
+  font-size: var(--font-size-base);
+}
+
+.tbs-settings__strategy-card-desc {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* ─── Import/Export Section ───────────────────────────────────────────────── */
+
+.tbs-settings__import-zone {
+  border: 2px dashed var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  padding: var(--space-xxl);
+  text-align: center;
+  margin-bottom: var(--space-lg);
+  transition: border-color var(--duration-fast) var(--easing);
+}
+
+.tbs-settings__import-zone:hover {
+  border-color: var(--color-primary);
+}
+
+.tbs-settings__import-zone p {
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-md);
+}
+
+/* ─── Diagnostics Section ─────────────────────────────────────────────────── */
+
+.tbs-settings__diag-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-lg);
+}
+
+/* ─── Detail Drawer ───────────────────────────────────────────────────────── */
+
+.tbs-settings__drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 380px;
+  background: var(--color-bg);
+  border-left: 1px solid var(--color-border);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-xl);
+  overflow-y: auto;
+  z-index: 300;
+  transform: translateX(100%);
+  transition: transform var(--duration-normal) var(--easing);
+}
+
+.tbs-settings__drawer--open {
+  transform: translateX(0);
+}
+
+/* ─── Rule Form (Problem 6) ──────────────────────────────────────────────── */
+
+.tbs-settings__rule-form {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+  margin-bottom: var(--space-lg);
+}
+
+.tbs-settings__rule-form h3 {
+  margin-top: 0;
+  margin-bottom: var(--space-md);
+}
+
+.tbs-settings__rule-form-error {
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-sm);
+}
+
+/* Bug 2: inline success notice below rule forms (same style family as success feedback) */
+.tbs-settings__inline-success {
+  color: var(--color-success, #16a34a);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  margin: 0 0 var(--space-sm);
+}
+
+.tbs-settings__rule-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.tbs-settings__rule-form-radio {
+  display: flex;
+  gap: var(--space-lg);
+  font-size: var(--font-size-md);
+  padding: 6px 0;
+}
+
+.tbs-settings__rule-form-radio label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  cursor: pointer;
+}
+
+.tbs-settings__rule-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+/* ─── Inline Rule Editor Row (Module 2) ─────────────────────────────────── */
+
+.tbs-settings__inline-editor-row td {
+  background: var(--color-bg-secondary);
+  padding: var(--space-md);
+}
+
+.tbs-settings__inline-editor-row .tbs-settings__rule-form {
+  margin-bottom: 0;
+  border-color: var(--color-primary);
+}
+
+.tbs-settings__inline-editor-saved {
+  color: var(--color-success, #16a34a);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  margin-right: auto;
+}
+
+/* ─── Responsive ──────────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .tbs-settings {
+    flex-direction: column;
+  }
+
+  .tbs-settings__nav {
+    width: 100%;
+    min-width: unset;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: var(--space-sm);
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .tbs-settings__nav-item {
+    white-space: nowrap;
+    border-right: none;
+    border-radius: var(--radius-sm);
+  }
+
+  .tbs-settings__nav-item--active {
+    border-right: none;
+    border-bottom: 2px solid var(--color-primary);
+  }
+
+  .tbs-settings__content {
+    padding: var(--space-lg);
+  }
+
+  .tbs-settings__drawer {
+    width: 100%;
+  }
+}

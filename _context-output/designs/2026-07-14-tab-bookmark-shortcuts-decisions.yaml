@@ -1,0 +1,572 @@
+decisions:
+  - layer: goal
+    node: browser-target
+    decision: Chrome + Edge + Firefox，基于 WebExtensions
+    alternatives:
+      - option: 仅 Chromium
+        rejected_reason: 不满足首版跨浏览器兼容目标
+      - option: 先 Chrome 再预留兼容
+        rejected_reason: 用户要求首版即覆盖三浏览器
+    rationale: 用户明确要求首版兼容三浏览器
+    implications: 需要最小适配层处理 API 差异
+    status: RESOLVED
+
+  - layer: goal
+    node: slot-command-model
+    decision: 10 个槽位，每个有保存和切换两个命令，共 20 个命令 + 1 个"下一个匹配页"命令
+    alternatives:
+      - option: 仅切换命令
+        rejected_reason: 不满足快捷键保存当前页的核心需求
+      - option: 模式切换
+        rejected_reason: 操作语义不够清晰
+    rationale: 操作语义清晰，全程可用键盘完成
+    implications: 用户需在浏览器快捷键管理页配置按键
+    status: RESOLVED
+
+  - layer: goal
+    node: slot-binding-content
+    decision: 保存 tabId + 精确 URL 快照 + 标题/favicon；用户可改为正则
+    alternatives:
+      - option: 仅精确 URL
+        rejected_reason: 无法支持动态页面匹配
+      - option: 仅 tabId
+        rejected_reason: 跨会话不可靠
+    rationale: 会话优先 + 快照回退 + 规则升级
+    implications: 需要三层匹配逻辑
+    status: RESOLVED
+
+  - layer: goal
+    node: match-strategy
+    decision: 三种策略（会话优先 / 会话+规则校验 / 严格规则），全局默认 B，槽位可覆盖
+    alternatives:
+      - option: 单一策略
+        rejected_reason: 不同场景需要不同行为
+    rationale: 显式继承模型满足灵活性与可理解性
+    implications: 需要全局默认 + 槽位覆盖的 UI 和存储
+    status: RESOLVED
+
+  - layer: goal
+    node: recovery-flow
+    decision: 所有失效映射弹出恢复窗口，选择 1/2 后自动更新绑定
+    alternatives:
+      - option: 固定回退策略
+        rejected_reason: 不足以覆盖不同失效场景
+      - option: 仅具体标签页映射恢复
+        rejected_reason: 用户要求所有映射统一处理
+    rationale: 用户明确要求统一恢复流程
+    implications: 需要恢复窗口 UI 和恢复会话管理
+    status: RESOLVED
+
+  - layer: goal
+    node: multi-match-behavior
+    decision: 当前窗口优先 → 标签栏从左至右 → 其他窗口；提供"下一个匹配页"命令循环
+    alternatives:
+      - option: 最近使用顺序
+        rejected_reason: 用户偏好窗口+标签顺序
+      - option: 仅弹出选择器
+        rejected_reason: 不符合快速切换目标
+    rationale: 用户明确选择窗口+标签顺序 + 循环命令
+    implications: 需要循环游标和最近成功槽位状态
+    status: RESOLVED
+
+  - layer: goal
+    node: visual-rewrite-model
+    decision: 双层识别：页面级修改 title/favicon；插件级 UI 标记
+    alternatives:
+      - option: 仅页面改写
+        rejected_reason: 浏览器 API 无法稳定保证
+      - option: 仅插件标记
+        rejected_reason: 用户需要页面内视觉区分
+    rationale: 稳定识别 + 页面增强
+    implications: 两套独立系统
+    status: RESOLVED
+
+  - layer: goal
+    node: slot-ui-markers
+    decision: 槽位自定义标题/图标/背景色仅影响插件 UI，不修改网页
+    alternatives:
+      - option: 同时修改网页
+        rejected_reason: 用户明确仅插件 UI 标记
+    rationale: 用户明确选择仅插件 UI 标记
+    implications: 槽位标记与页面重写规则完全独立
+    status: RESOLVED
+
+  - layer: goal
+    node: config-storage
+    decision: 浏览器同步存储为主 + 导入/导出
+    alternatives:
+      - option: 仅本地存储
+        rejected_reason: 不满足跨设备便利性
+      - option: 仅同步存储
+        rejected_reason: 无法覆盖跨浏览器迁移
+    rationale: 日常便利 + 迁移兜底
+    implications: 需要导入/导出 UI 和合并策略
+    status: RESOLVED
+
+  - layer: goal
+    node: overwrite-behavior
+    decision: 直接覆盖 + 5 秒撤销条
+    alternatives:
+      - option: 每次确认
+        rejected_reason: 用户偏好快速操作
+      - option: 禁止覆盖
+        rejected_reason: 操作流程过长
+    rationale: 操作最快，撤销兜底
+    implications: 需要撤销条 UI 和旧配置暂存
+    status: RESOLVED
+
+  - layer: goal
+    node: manual-selector
+    decision: 仅通过扩展弹窗/设置页唤起
+    alternatives:
+      - option: 新增全局命令
+        rejected_reason: 命令负担过重
+      - option: 每槽位选择命令
+        rejected_reason: 命令数量过多
+    rationale: 已有 21 个命令，避免进一步增加
+    implications: 候选选择器仅在 UI 中打开
+    status: RESOLVED
+
+  - layer: goal
+    node: v1-scope-exclusions
+    decision: 不做分组/排序、云端账号、多用户共享、会话历史、自动推荐
+    rationale: 避免把快速切换工具扩张为会话管理器
+    implications: 首版功能边界明确
+    status: RESOLVED
+
+  - layer: goal
+    node: multi-window-priority
+    decision: 单窗口与多窗口工作流同等优先
+    rationale: 用户明确要求两者同等关键体验
+    implications: 跨窗口激活、候选归属展示、恢复流程须纳入验收
+    status: RESOLVED
+
+  - layer: goal
+    node: rule-conflict-detection
+    decision: 保守校验：明显冲突阻止，不可判定重叠确认后保存
+    rationale: 保留正则能力，诚实处理不可判定边界
+    implications: 需要分级校验 UI
+    status: RESOLVED
+
+  - layer: goal
+    node: rewrite-timing
+    decision: 仅在页面加载/URL 变化时执行一次
+    rationale: 最低开销，不与网站脚本持续争夺
+    implications: 被网站覆盖后不恢复
+    status: RESOLVED
+
+  - layer: goal
+    node: restart-recovery
+    decision: 重启后首次触发再发现目标并回绑 tabId
+    rationale: 无需后台扫描，与回退语义一致
+    implications: 首次触发可能有短暂延迟
+    status: RESOLVED
+
+  - layer: constraint
+    node: permissions-model
+    decision: 安装时请求 <all_urls>
+    alternatives:
+      - option: 运行时按需授权
+        rejected_reason: 用户要求安装时一次性授权
+    rationale: 用户明确要求安装时全站权限
+    implications: 安装页须透明说明用途
+    status: RESOLVED
+
+  - layer: constraint
+    node: protected-pages
+    decision: 可切换但不可页面改写；规则编辑时禁止匹配此类 URL
+    rationale: 保留内部页管理实用性，避免承诺不可注入能力
+    implications: 规则编辑需校验 URL 范围
+    status: RESOLVED
+
+  - layer: constraint
+    node: incognito
+    decision: 默认不支持；用户手动授权后纳入全部功能
+    rationale: 尊重浏览器默认隐私保护
+    implications: 需检测授权状态并适配
+    status: RESOLVED
+
+  - layer: constraint
+    node: recovery-ui
+    decision: 专用小型独立弹出窗口
+    rationale: 跨浏览器行为最一致
+    implications: 需要恢复窗口 UI
+    status: RESOLVED
+
+  - layer: constraint
+    node: import-export-format
+    decision: 明文 JSON，导入前展示摘要并确认
+    rationale: 可审阅、可迁移，不上传服务
+    implications: 需要导入预览 UI
+    status: RESOLVED
+
+  - layer: constraint
+    node: icon-storage
+    decision: URL 图标本地缓存；本地上传仅 storage.local；模板可同步
+    rationale: 隐私与容量边界
+    implications: 跨设备占位提示
+    status: RESOLVED
+
+  - layer: constraint
+    node: remote-icon-privacy
+    decision: 设置时下载缓存，后续不请求远程
+    rationale: 避免 UI 展示泄露使用行为
+    implications: 图标不自动更新
+    status: RESOLVED
+
+  - layer: constraint
+    node: icon-download-failure
+    decision: 保留 URL 配置并显示占位图，手动重试
+    rationale: 避免网络短暂失败阻断配置
+    implications: 需要重试入口
+    status: RESOLVED
+
+  - layer: constraint
+    node: tab-customization-scope
+    decision: 弹窗创建/更新独立页面重写规则 + tabId 临时个性化
+    rationale: 用户明确要求两种自定义
+    implications: 需要两个独立编辑入口
+    status: RESOLVED
+
+  - layer: constraint
+    node: tabid-override-lifecycle
+    decision: 会话临时，关闭/重启即清除
+    rationale: 避免临时命名意外施加到未来页面
+    implications: 持久需求通过页面规则处理
+    status: RESOLVED
+
+  - layer: constraint
+    node: override-priority
+    decision: tabId 临时覆盖优先于页面规则
+    rationale: 临时个性化正是为当前实例提供例外
+    implications: 需要字段级继承链
+    status: RESOLVED
+
+  - layer: constraint
+    node: partial-override
+    decision: 标题、图标可分别启用；未设置字段继承下一级
+    rationale: 符合自定义直觉
+    implications: 需要字段级覆盖状态管理
+    status: RESOLVED
+
+  - layer: constraint
+    node: remove-restore
+    decision: 不主动恢复 DOM；刷新/跳转后网站自行恢复
+    rationale: 轻量边界，避免 DOM 快照复杂度
+    implications: 删除后需提示用户刷新
+    status: RESOLVED
+
+  - layer: constraint
+    node: rule-default-url
+    decision: 精确完整 URL（含路径和查询参数）
+    rationale: 标题改写有可见副作用，初始范围应尽可能窄
+    implications: 用户需显式改为正则
+    status: RESOLVED
+
+  - layer: constraint
+    node: rule-immediate-apply
+    decision: 保存后立即应用到当前标签页
+    rationale: 用户从当前页发起自定义，立即看到结果最符合直觉
+    implications: 需要保存后立即注入
+    status: RESOLVED
+
+  - layer: architecture
+    node: module-structure
+    decision: MV3 Service Worker 中心 + React/TS 多入口 UI + 静态内容脚本 + 最小适配器
+    rationale: 与 MV3 对齐，Firefox 兼容
+    implications: 需要适配层和构建配置
+    status: RESOLVED
+
+  - layer: architecture
+    node: storage-layering
+    decision: sync 持久配置 + local 运行时状态
+    rationale: tabId/游标/临时覆盖本质是设备/会话状态
+    implications: 需要分层读写和同步变更检测
+    status: RESOLVED
+
+  - layer: architecture
+    node: sync-conflict
+    decision: 最后写入胜出 + 变更提示
+    rationale: 浏览器同步不提供可靠事务基础
+    implications: 需要变更检测和 UI 提示
+    status: RESOLVED
+
+  - layer: architecture
+    node: recovery-session
+    decision: 一次性 recoveryId + storage.local 持久化 + 5 分钟超时
+    rationale: 可处理并发恢复，避免 URL 泄露
+    implications: 需要恢复会话管理
+    status: RESOLVED
+
+  - layer: architecture
+    node: recovery-realtime-query
+    decision: 点击时重新查询并验证
+    rationale: 以用户点击时的真实浏览器状态为准
+    implications: 恢复窗口需调用后台查询
+    status: RESOLVED
+
+  - layer: architecture
+    node: next-match-context
+    decision: 最近成功切换的槽位
+    rationale: 操作链最自然
+    implications: 需要记录最近槽位 ID 和循环游标
+    status: RESOLVED
+
+  - layer: architecture
+    node: exact-url-normalization
+    decision: 忽略锚点，统一主机名大小写和默认端口
+    rationale: 避免锚点导航或等价 URL 导致无谓失效
+    implications: 需要规范化比较函数
+    status: RESOLVED
+
+  - layer: architecture
+    node: regex-safety
+    decision: JavaScript RegExp，最大 500 字符，创建时验证
+    rationale: 保留表达能力，以长度和验证降低风险
+    implications: 需要 UI 风险提示
+    status: RESOLVED
+
+  - layer: architecture
+    node: import-merge
+    decision: 完全替换或合并导入；合并时槽位冲突逐项选择
+    rationale: 适合完整迁移和部分补充
+    implications: 需要导入预览表格 UI
+    status: RESOLVED
+
+  - layer: architecture
+    node: export-local-icons
+    decision: 导出占位引用，不包含 data URI
+    rationale: 与本地图标不参与同步的边界一致
+    implications: 导入后需重新选择文件
+    status: RESOLVED
+
+  - layer: architecture
+    node: spa-navigation-detection
+    decision: 内容脚本监听 popstate/hashchange + 包装 history API
+    rationale: 及时且不需要轮询
+    implications: 需要内容脚本导航上报
+    status: RESOLVED
+
+  - layer: architecture
+    node: manual-rule-apply
+    decision: 打开跨窗口候选列表，用户选择目标
+    rationale: 与跨窗口候选页体验一致
+    implications: 需要候选选择器 UI
+    status: RESOLVED
+
+  - layer: architecture
+    node: browser-adapter
+    decision: 自建最小适配器，封装本项目使用的 API
+    rationale: 避免额外依赖，防止浏览器判断泄漏
+    implications: 需要适配器测试
+    status: RESOLVED
+
+  - layer: architecture
+    node: ui-framework
+    decision: React + TypeScript 多入口架构
+    rationale: 动态表单、冲突预览、候选选择交互复杂
+    implications: 需要构建配置支持多入口
+    status: RESOLVED
+
+  - layer: architecture
+    node: content-script-deployment
+    decision: 静态声明 + 消息驱动
+    rationale: 可靠捕捉 SPA 路由，避免动态注入时机差异
+    implications: 需要 document_start 注入配置
+    status: RESOLVED
+
+  - layer: architecture
+    node: message-protocol
+    decision: 类型化请求/响应协议 + 领域错误码
+    rationale: 编译期发现载荷错误，规范错误提示
+    implications: 需要共享类型定义
+    status: RESOLVED
+
+  - layer: architecture
+    node: notification-strategy
+    decision: 仅跨窗口/恢复成功/无目标/失败时系统通知
+    rationale: 避免高频操作连续通知干扰
+    implications: 同窗口切换静默
+    status: RESOLVED
+
+  - layer: architecture
+    node: write-consistency
+    decision: 单写入服务 + 乐观版本校验
+    rationale: 避免同设备静默覆盖
+    implications: 需要配置版本管理
+    status: RESOLVED
+
+  - layer: architecture
+    node: rule-priority
+    decision: 整数 -100 至 100，默认 0；优先级降序 → 创建时间降序
+    rationale: 精确处理例外规则覆盖通用规则
+    implications: 需要优先级 UI 和排序逻辑
+    status: RESOLVED
+
+  - layer: architecture
+    node: config-cache
+    decision: 内存缓存 + storage.onChanged 失效
+    rationale: 避免高频操作重复读取存储
+    implications: 需要缓存缺失重载逻辑
+    status: RESOLVED
+
+  - layer: architecture
+    node: state-cleanup
+    decision: 事件驱动 + 启动兜底清理
+    rationale: 及时释放会话状态，覆盖事件遗漏
+    implications: 需要 tabs.onRemoved 监听和启动校验
+    status: RESOLVED
+
+  - layer: architecture
+    node: build-strategy
+    decision: 单代码库，按浏览器生成独立包
+    rationale: 共享核心逻辑，正视 Manifest/API 差异
+    implications: 需要浏览器专属 manifest 覆盖
+    status: RESOLVED
+
+  - layer: architecture
+    node: diagnostics
+    decision: 仅本地日志，不含 URL/标题/规则内容
+    rationale: 排查兼容问题，不上传数据
+    implications: 需要日志查看/清除/导出 UI
+    status: RESOLVED
+
+  - layer: architecture
+    node: recovery-snapshot
+    decision: 恢复后更新本地 tabId 和最近恢复快照，不修改匹配定义
+    rationale: 保留正则槽位的动态匹配能力
+    implications: 快照仅本地，不参与同步
+    status: RESOLVED
+
+  - layer: architecture
+    node: recovery-no-candidate
+    decision: 按钮始终可点，无结果时显示错误
+    rationale: 用户明确选择
+    implications: 需要实时查询和错误提示
+    status: RESOLVED
+
+  - layer: architecture
+    node: test-strategy
+    decision: 分层自动化 + 三浏览器人工验收矩阵
+    rationale: E2E 自动化在三浏览器中脆弱且维护成本高
+    implications: 需要验收清单
+    status: RESOLVED
+
+  - layer: detail
+    node: main-ui
+    decision: 侧边栏形式，工具栏按钮仅打开/聚焦侧边栏
+    rationale: 与侧边栏主界面设计一致
+    implications: 需要 Chrome Side Panel / Firefox Sidebar 适配
+    status: RESOLVED
+
+  - layer: detail
+    node: sidebar-layout
+    decision: 当前标签页优先：顶部面板 → 10 槽位 → 规则入口 → 工具入口
+    rationale: 用户明确选择当前标签页优先布局
+    implications: 需要锁定/跟随模式切换
+    status: RESOLVED
+
+  - layer: detail
+    node: tab-panel-cards
+    decision: 页面规则 + 仅此标签页两张并列卡片
+    rationale: 生命周期和副作用不同，明确分离
+    implications: 需要两个独立编辑入口
+    status: RESOLVED
+
+  - layer: detail
+    node: slot-cards
+    decision: 10 个统一卡片，状态分层
+    rationale: 与浏览器快捷键页一一对应
+    implications: 空/已绑定状态切换
+    status: RESOLVED
+
+  - layer: detail
+    node: overwrite-undo
+    decision: 侧边栏保持打开，5 秒撤销条
+    rationale: 覆盖操作在弹窗中发起，即时撤销最可靠
+    implications: 需要旧配置暂存
+    status: RESOLVED
+
+  - layer: detail
+    node: rule-editing-split
+    decision: 侧边栏快速编辑 + 设置页完整编辑
+    rationale: 保留高频体验，高风险配置在充足空间完成
+    implications: 需要两个编辑界面
+    status: RESOLVED
+
+  - layer: detail
+    node: settings-nav
+    decision: 左侧固定分区：槽位/规则/策略/导入导出/诊断
+    rationale: 功能模型已明确分为槽位与规则两套系统
+    implications: 需要分区导航
+    status: RESOLVED
+
+  - layer: detail
+    node: shortcut-page
+    decision: 命令状态列表 + 跳转浏览器快捷键管理页
+    rationale: 不越过浏览器权限边界
+    implications: 需要读取命令状态 API
+    status: RESOLVED
+
+  - layer: detail
+    node: rule-validation
+    decision: 分级内联校验 + 二次确认
+    rationale: 遵守明显冲突阻止、不可判定确认的策略
+    implications: 需要冲突检测和确认对话框
+    status: RESOLVED
+
+  - layer: detail
+    node: context-switch-guard
+    decision: 存在未保存内容时确认
+    rationale: 避免半成品误保存或丢失
+    implications: 需要草稿状态追踪
+    status: RESOLVED
+
+  - layer: detail
+    node: icon-upload-limits
+    decision: PNG/JPEG/WebP，原文件 2MB/512px，压缩 128px/64KB WebP
+    rationale: 槽位图标小尺寸足够，降低存储增长
+    implications: 需要前端压缩和校验
+    status: RESOLVED
+
+  - layer: detail
+    node: import-preview
+    decision: 统一预览表格，逐项选择 + 快捷全选
+    rationale: 横向比较，整体决策
+    implications: 需要预览表格 UI
+    status: RESOLVED
+
+  - layer: detail
+    node: recovery-window
+    decision: 小型独立弹出窗口，关闭/超时静默结束
+    rationale: 短期决策，不制造额外通知
+    implications: 需要弹出窗口 UI
+    status: RESOLVED
+
+  - layer: detail
+    node: destructive-confirm
+    decision: 按风险分级：槽位解绑/规则删除需确认；临时个性化立即执行
+    rationale: 长期配置保护，临时操作轻量
+    implications: 需要分级确认逻辑
+    status: RESOLVED
+
+  - layer: detail
+    node: feedback-strategy
+    decision: 页面内轻提示 + 重要事件系统通知
+    rationale: 高频操作反馈限制在发起界面内
+    implications: 需要可访问提示条组件
+    status: RESOLVED
+
+  - layer: detail
+    node: accessibility
+    decision: WCAG 2.1 AA 基础
+    rationale: 确保键盘与色觉差异用户可用
+    implications: 需要颜色+文字双重状态、键盘导航、AA 对比度
+    status: RESOLVED
+
+  - layer: detail
+    node: strategy-inheritance
+    decision: 显式继承模型：全局默认 + 槽位覆盖
+    rationale: 准确落实全局默认+单独设置
+    implications: 需要继承/覆盖状态展示
+    status: RESOLVED

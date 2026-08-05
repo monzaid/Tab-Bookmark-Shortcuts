@@ -1,0 +1,151 @@
+/**
+ * Design tokens as CSS custom properties.
+ * Follows UI/UX design doc: 2026-07-14-tab-bookmark-shortcuts-ui-ux-design.md
+ * Supports light/dark via prefers-color-scheme and prefers-reduced-motion.
+ */
+
+:root {
+  /* ─── Colors: Light theme (default) ─────────────────────────────────── */
+  --color-primary: #2563EB;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-active: #1e40af;
+  --color-primary-fg: #ffffff;
+
+  --color-bg: #ffffff;
+  --color-bg-secondary: #f8fafc;
+  --color-bg-tertiary: #f1f5f9;
+  --color-bg-hover: #f1f5f9;
+  --color-bg-active: #e2e8f0;
+
+  --color-text: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-tertiary: #94a3b8;
+
+  --color-border: #e2e8f0;
+  --color-border-strong: #cbd5e1;
+
+  --color-focus-ring: #93C5FD;
+
+  --color-success: #16a34a;
+  --color-success-bg: #f0fdf4;
+  --color-warning: #d97706;
+  --color-warning-bg: #fffbeb;
+  --color-error: #dc2626;
+  --color-error-bg: #fef2f2;
+  --color-info: #2563eb;
+  --color-info-bg: #eff6ff;
+
+  /* ─── Slot palette (10 colors) ──────────────────────────────────────── */
+  --slot-1: #2563eb;
+  --slot-2: #16a34a;
+  --slot-3: #ea580c;
+  --slot-4: #dc2626;
+  --slot-5: #9333ea;
+  --slot-6: #0891b2;
+  --slot-7: #db2777;
+  --slot-8: #ca8a04;
+  --slot-9: #64748b;
+  --slot-10: #4f46e5;
+
+  /* ─── Typography ────────────────────────────────────────────────────── */
+  --font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 13px;
+  --font-size-base: 14px;
+  --font-size-lg: 15px;
+  --font-size-xl: 20px;
+
+  /* ─── Spacing ───────────────────────────────────────────────────────── */
+  --space-xxs: 2px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-xxl: 24px;
+
+  /* ─── Radius ────────────────────────────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* ─── Animation ─────────────────────────────────────────────────────── */
+  --duration-fast: 120ms;
+  --duration-normal: 160ms;
+  --easing: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ─── Shadows ───────────────────────────────────────────────────────── */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.12);
+
+  /* ─── Layout ────────────────────────────────────────────────────────── */
+  --slot-row-height: 52px;
+  --slot-color-bar-width: 3px;
+}
+
+/* ─── Dark theme ──────────────────────────────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-primary: #60A5FA;
+    --color-primary-hover: #93c5fd;
+    --color-primary-active: #3b82f6;
+    --color-primary-fg: #0B1220;
+
+    --color-bg: #0f172a;
+    --color-bg-secondary: #1e293b;
+    --color-bg-tertiary: #334155;
+    --color-bg-hover: #1e293b;
+    --color-bg-active: #334155;
+
+    --color-text: #f1f5f9;
+    --color-text-secondary: #94a3b8;
+    --color-text-tertiary: #64748b;
+
+    --color-border: #334155;
+    --color-border-strong: #475569;
+
+    --color-focus-ring: #1D4ED8;
+
+    --color-success: #4ade80;
+    --color-success-bg: #052e16;
+    --color-warning: #fbbf24;
+    --color-warning-bg: #451a03;
+    --color-error: #f87171;
+    --color-error-bg: #450a0a;
+    --color-info: #60a5fa;
+    --color-info-bg: #172554;
+
+    --slot-1: #60a5fa;
+    --slot-2: #4ade80;
+    --slot-3: #fb923c;
+    --slot-4: #f87171;
+    --slot-5: #c084fc;
+    --slot-6: #22d3ee;
+    --slot-7: #f472b6;
+    --slot-8: #facc15;
+    --slot-9: #94a3b8;
+    --slot-10: #818cf8;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* ─── Reduced motion ──────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    transition-duration: 0ms !important;
+  }
+}

@@ -1,0 +1,84 @@
+/**
+ * Recovery popup window styles.
+ * Small independent window: card layout, 12px radius, soft shadow.
+ */
+
+.tbs-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-xl);
+  min-height: 100vh;
+  justify-content: center;
+  align-items: center;
+}
+
+.tbs-recovery__card {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-xl);
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.tbs-recovery__title {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.tbs-recovery__info {
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.tbs-recovery__url {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--color-bg-tertiary);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  margin: 0;
+}
+
+.tbs-recovery__error {
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+  background: var(--color-error-bg);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  margin: 0;
+}
+
+.tbs-recovery__actions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: var(--space-sm);
+}
+
+.tbs-recovery__actions .tbs-btn {
+  flex: 1;
+  min-width: 90px;
+  justify-content: center;
+}
+
+.tbs-recovery--expired {
+  opacity: 0.7;
+}
+
+.tbs-recovery--expired .tbs-recovery__title {
+  color: var(--color-text-tertiary);
+}

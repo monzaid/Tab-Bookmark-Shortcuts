@@ -1,0 +1,281 @@
+/**
+ * UI Message Client — typed client for all UI pages to communicate with Worker.
+ *
+ * - All UI pages use this client (never direct storage/browser API)
+ * - configVersion write with optimistic conflict detection
+ * - Conflict → refresh/retry banner
+ * - storage.onChanged external change banner
+ * - Sidebar draft isolation
+ * - Domain error → accessible message mapping
+ *
+ * Does NOT: read/write storage directly in React, silently overwrite on conflict
+ */
+
+import type { DomainErrorCode, SyncState, LocalState, SwitchOutcome, TabCandidate, DiagnosticEntry, ImportPreview, ImportSlotConflict } from '@shared/types';
+
+// ─── Error Message Mapping ───────────────────────────────────────────────────
+
+const ERROR_MESSAGES: Record<DomainErrorCode, string> = {
+  INVALID_REQUEST: 'The request was invalid. Please try again.',
+  UNKNOWN_ACTION: 'An unknown operation was attempted.',
+  CONFIG_CONFLICT: 'Configuration was changed elsewhere. Please refresh and retry.',
+  STALE_VERSION: 'Your changes are based on outdated data. Please refresh.',
+  SLOT_NOT_FOUND: 'The specified slot does not exist.',
+  SLOT_EMPTY: 'This slot has not been configured yet.',
+  SLOT_ALREADY_BOUND: 'This slot is already bound to a tab.',
+  NO_MATCH: 'No matching tabs were found.',
+  NO_CANDIDATES: 'No candidate tabs available.',
+  RECOVERY_EXPIRED: 'The recovery session has expired.',
+  RECOVERY_NOT_FOUND: 'Recovery session not found.',
+  RULE_CONFLICT_BLOCK: 'A conflicting rule already exists. Cannot save.',
+  RULE_CONFLICT_WARN: 'These rules may overlap. Please confirm.',
+  DUPLICATE_RULE: 'A rule with the same match pattern already exists.',
+  VERSION_CONFLICT: 'This rule was modified elsewhere. Please refresh and retry.',
+  RULE_INVALID_REGEX: 'The regex pattern is invalid.',
+  RULE_REGEX_TOO_LONG: 'The regex pattern exceeds 500 characters.',
+  RULE_PROTECTED_URL: 'Rules cannot be created for protected browser pages.',
+  RULE_NOT_FOUND: 'The specified rule was not found.',
+  ICON_TOO_LARGE: 'The icon file is too large (max 2MB, 512px).',
+  ICON_INVALID_FORMAT: 'Invalid icon format. Use PNG, JPEG, or WebP.',
+  ICON_DOWNLOAD_FAILED: 'Icon download failed. You can retry manually.',
+  IMPORT_INVALID: 'The import file is invalid or corrupted.',
+  IMPORT_VERSION_MISMATCH: 'The import file version is not supported.',
+  IMPORT_CANCELLED: 'Import was cancelled.',
+  INCOGNITO_NOT_AUTHORIZED: 'Incognito access is not enabled for this extension.',
+  PROTECTED_PAGE: 'This operation cannot be performed on protected pages.',
+  BROWSER_API_ERROR: 'A browser error occurred. Please try again.',
+  TAB_NOT_FOUND: 'The specified tab was not found.',
+  WINDOW_NOT_FOUND: 'The specified window was not found.',
+  COMMAND_NOT_FOUND: 'The specified command was not found.',
+  INTERNAL_ERROR: 'An internal error occurred. Please try again.',
+  TIMEOUT: 'The operation timed out. Please try again.',
+};
+
+export function getErrorMessage(code: DomainErrorCode): string {
+  return ERROR_MESSAGES[code] ?? 'An unexpected error occurred.';
+}
+
+// ─── Client Types ────────────────────────────────────────────────────────────
+
+export interface ClientState {
+  sync: SyncState;
+  local: LocalState;
+  configVersion: number;
+  externalChangeDetected: boolean;
+}
+
+export type ClientResult<T = undefined> =
+  | { success: true; data: T }
+  | { success: false; errorCode: DomainErrorCode; message: string };
+
+// ─── Message Client ──────────────────────────────────────────────────────────
+
+export class MessageClient {
+  private configVersion = 0;
+  private externalChangeListeners: Array<(newVersion: number) => void> = [];
+
+  constructor() {
+    // Listen for external storage changes
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName === 'sync' && changes['syncState']) {
+        const newValue = changes['syncState'].newValue as SyncState | undefined;
+        if (newValue && newValue.configVersion !== this.configVersion) {
+          this.configVersion = newValue.configVersion;
+          this.externalChangeListeners.forEach((l) => l(newValue.configVersion));
+        }
+      }
+    });
+  }
+
+  /**
+   * Register a listener for external config changes.
+   */
+  onExternalChange(listener: (newVersion: number) => void): () => void {
+    this.externalChangeListeners.push(listener);
+    return () => {
+      this.externalChangeListeners = this.externalChangeListeners.filter((l) => l !== listener);
+    };
+  }
+
+  /**
+   * Get current config version for optimistic writes.
+   */
+  getConfigVersion(): number {
+    return this.configVersion;
+  }
+
+  // ─── Core Send ─────────────────────────────────────────────────────────
+
+  private async send<T>(action: string, payload?: unknown, includeVersion = false): Promise<ClientResult<T>> {
+    try {
+      const message: Record<string, unknown> = {
+        requestId: `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        action,
+      };
+      if (payload !== undefined) message.payload = payload;
+      if (includeVersion) message.configVersion = this.configVersion;
+
+      const response = await chrome.runtime.sendMessage(message) as {
+        success?: boolean;
+        errorCode?: DomainErrorCode;
+        message?: string;
+        configVersion?: number;
+      } & Record<string, unknown>;
+
+      if (!response) {
+        return { success: false, errorCode: 'INTERNAL_ERROR', message: getErrorMessage('INTERNAL_ERROR') };
+      }
+
+      // Update version if returned
+      if (response.configVersion !== undefined) {
+        this.configVersion = response.configVersion;
+      }
+
+      if (response.success === false) {
+        const code = (response.errorCode ?? 'INTERNAL_ERROR') as DomainErrorCode;
+        return { success: false, errorCode: code, message: getErrorMessage(code) };
+      }
+
+      return { success: true, data: response as unknown as T };
+    } catch {
+      return { success: false, errorCode: 'BROWSER_API_ERROR', message: getErrorMessage('BROWSER_API_ERROR') };
+    }
+  }
+
+  // ─── State ─────────────────────────────────────────────────────────────
+
+  async getState(): Promise<ClientResult<{ sync: SyncState; local: LocalState }>> {
+    const result = await this.send<{ result: { success: boolean; sync: SyncState; local: LocalState } }>('GET_STATE');
+    if (!result.success) return result;
+    const data = result.data as unknown as { result: { sync: SyncState; local: LocalState } };
+    if (data.result?.sync) {
+      this.configVersion = data.result.sync.configVersion;
+    }
+    return { success: true, data: { sync: data.result.sync, local: data.result.local } };
+  }
+
+  async getCommands(): Promise<ClientResult<Array<{ name: string; shortcut: string | null; description: string }>>> {
+    const result = await this.send<{ result: { success: boolean; commands: Array<{ name: string; shortcut: string | null; description: string }> } }>('GET_COMMANDS');
+    if (!result.success) return result;
+    return { success: true, data: (result.data as unknown as { result: { commands: Array<{ name: string; shortcut: string | null; description: string }> } }).result.commands };
+  }
+
+  // ─── Slot Operations ───────────────────────────────────────────────────
+
+  async saveSlot(slotId: number, urlMatch: { type: string; value: string }, titleSnapshot: string, faviconSnapshot: string): Promise<ClientResult> {
+    return this.send('SAVE_SLOT', { slotId, urlMatch, titleSnapshot, faviconSnapshot }, true);
+  }
+
+  async switchSlot(slotId: number): Promise<ClientResult<{ outcome: SwitchOutcome }>> {
+    return this.send('SWITCH_SLOT', { slotId });
+  }
+
+  async nextMatch(): Promise<ClientResult<{ outcome: SwitchOutcome }>> {
+    return this.send('NEXT_MATCH');
+  }
+
+  async unbindSlot(slotId: number): Promise<ClientResult> {
+    return this.send('UNBIND_SLOT', { slotId });
+  }
+
+  async undoSave(slotId: number): Promise<ClientResult> {
+    return this.send('UNDO_SAVE', { slotId });
+  }
+
+  // ─── Rule Operations ───────────────────────────────────────────────────
+
+  async createRule(payload: { urlMatch: { type: string; value: string }; mode: string; priority: number; title?: string }): Promise<ClientResult> {
+    return this.send('CREATE_RULE', payload);
+  }
+
+  async updateRule(ruleId: string, updates: Record<string, unknown>): Promise<ClientResult> {
+    return this.send('UPDATE_RULE', { ruleId, ...updates });
+  }
+
+  async deleteRule(ruleId: string): Promise<ClientResult> {
+    return this.send('DELETE_RULE', { ruleId });
+  }
+
+  async applyRuleToTab(ruleId: string, tabId: number): Promise<ClientResult> {
+    return this.send('APPLY_RULE_TO_TAB', { ruleId, tabId });
+  }
+
+  // ─── Settings ──────────────────────────────────────────────────────────
+
+  async setGlobalStrategy(strategy: string): Promise<ClientResult> {
+    return this.send('SET_GLOBAL_STRATEGY', { strategy }, true);
+  }
+
+  async setSlotStrategy(slotId: number, strategy: string): Promise<ClientResult> {
+    return this.send('SET_SLOT_STRATEGY', { slotId, strategy }, true);
+  }
+
+  // ─── Recovery ──────────────────────────────────────────────────────────
+
+  async recoveryOpenUrl(recoveryId: string): Promise<ClientResult> {
+    return this.send('RECOVERY_OPEN_URL', { recoveryId });
+  }
+
+  async recoveryNextMatch(recoveryId: string): Promise<ClientResult> {
+    return this.send('RECOVERY_NEXT_MATCH', { recoveryId });
+  }
+
+  async recoveryDismiss(recoveryId: string): Promise<ClientResult> {
+    return this.send('RECOVERY_DISMISS', { recoveryId });
+  }
+
+  // ─── Import/Export ─────────────────────────────────────────────────────
+
+  async exportConfig(): Promise<ClientResult<{ json: string }>> {
+    return this.send('EXPORT_CONFIG');
+  }
+
+  async importPreview(json: string): Promise<ClientResult<{ preview: ImportPreview }>> {
+    return this.send('IMPORT_PREVIEW', { json });
+  }
+
+  async importCommit(preview: ImportPreview, slotDecisions: ImportSlotConflict[]): Promise<ClientResult> {
+    return this.send('IMPORT_COMMIT', { preview, slotDecisions }, true);
+  }
+
+  // ─── Diagnostics ───────────────────────────────────────────────────────
+
+  async getDiagnostics(): Promise<ClientResult<{ entries: DiagnosticEntry[] }>> {
+    return this.send('GET_DIAGNOSTICS');
+  }
+
+  async clearDiagnostics(): Promise<ClientResult> {
+    return this.send('CLEAR_DIAGNOSTICS');
+  }
+
+  async exportDiagnostics(): Promise<ClientResult<{ json: string }>> {
+    return this.send('EXPORT_DIAGNOSTICS');
+  }
+
+  // ─── Candidates ────────────────────────────────────────────────────────
+
+  async getCandidates(ruleId?: string): Promise<ClientResult<{ candidates: TabCandidate[] }>> {
+    return this.send('GET_CANDIDATES', { ruleId });
+  }
+
+  // ─── Tab Override ──────────────────────────────────────────────────────
+
+  async setTabOverride(tabId: number, title?: string): Promise<ClientResult> {
+    return this.send('SET_TAB_OVERRIDE', { tabId, title });
+  }
+
+  async removeTabOverride(tabId: number): Promise<ClientResult> {
+    return this.send('REMOVE_TAB_OVERRIDE', { tabId });
+  }
+}
+
+// ─── Singleton ───────────────────────────────────────────────────────────────
+
+let clientInstance: MessageClient | null = null;
+
+export function getMessageClient(): MessageClient {
+  if (!clientInstance) {
+    clientInstance = new MessageClient();
+  }
+  return clientInstance;
+}

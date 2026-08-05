@@ -1,0 +1,78 @@
+# ── Dependencies ──────────────────────────────────────────────
+node_modules/
+
+# ── Build output ──────────────────────────────────────────────
+dist/
+out/
+build/
+
+# ── Test coverage & reports ──────────────────────────────────
+coverage/
+*.lcov
+*.coverage
+
+# ── Cache ────────────────────────────────────────────────────
+.vite/
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# ── Editor / OS ──────────────────────────────────────────────
+.idea/
+.vscode/
+*.local
+.DS_Store
+Thumbs.db
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Signing keys & packaging artifacts ───────────────────────
+*.pem
+*.crx
+*.xpi
+*.zip
+signing-keys/
+test-profiles/
+local-icons/
+
+# ── Environment / secrets ────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+
+# ── Internal workspace state ────────────────────────────────
+# Agent shared-memory / worktree state (not part of the shipped project).
+_context/
+.context/
+.worktree/
+.codebuddy/
+
+# ── Scratch / dev output files (root-level verification logs) ─
+# Historical TDD / build / lint verification transcripts kept locally.
+*.out.txt
+baseline*.txt
+build-*.txt
+dod-*.txt
+final-*.txt
+full-*.txt
+green*.txt
+red*.txt
+lint-*.txt
+myfiles-*.txt
+src-lint.txt
+test-*.txt
+tsc-*.txt
+typecheck-*.txt
+verify-*.txt
+red2-output.txt
+green2-output.txt
+green-output.txt
+red-output.txt
+test-output.txt
+baseline.txt
