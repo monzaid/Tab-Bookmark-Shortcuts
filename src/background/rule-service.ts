@@ -19,15 +19,21 @@ import type {
   UrlMatchDefinition,
   IconSource,
   TabCandidate,
+  LocalState,
+  SyncState,
 } from '@shared/types';
 import {
   matchesUrl,
   detectRuleConflict,
   isProtectedUrl,
+  isSafeFaviconProtocol,
   validateRegex,
   urlsMatch,
 } from '@shared/url-utils';
 import type { ConflictResult } from '@shared/url-utils';
+
+/** B12: max concurrent `applyFieldsToTab` deliveries per shard. */
+const REAPPLY_SHARD_SIZE = 8;
 
 // ─── Field Computation Result ────────────────────────────────────────────────
 
@@ -91,6 +97,17 @@ export class RuleService {
       }
     }
 
+    // 1. Validate the favicon protocol (T33 / B9-8). The compute layer skips
+    //    unsafe values, but rejecting them at the WRITE layer stops the bad
+    //    value from being persisted and re-surfacing on every read.
+    if (params.favicon && !isSafeFaviconProtocol(params.favicon.value)) {
+      return {
+        success: false,
+        errorCode: 'RULE_INVALID_REGEX',
+        message: 'Unsupported favicon protocol. Use http(s) or a data: image.',
+      };
+    }
+
     // 1. Validate priority bounds (clamp)
     const priority = Math.max(-100, Math.min(100, params.priority));
 
@@ -112,7 +129,7 @@ export class RuleService {
       return {
         success: false,
         errorCode: 'DUPLICATE_RULE',
-        message: '已存在相同匹配规则的规则，请勿重复添加',
+        message: 'A rule with the same match pattern already exists.',
       };
     }
 
@@ -149,7 +166,7 @@ export class RuleService {
       return {
         success: false,
         errorCode: 'DUPLICATE_RULE',
-        message: '已存在相同匹配规则的规则，请勿重复添加',
+        message: 'A rule with the same match pattern already exists.',
       };
     }
 
@@ -188,7 +205,7 @@ export class RuleService {
       return {
         success: false,
         errorCode: 'VERSION_CONFLICT',
-        message: '规则已被其他渠道修改，请刷新后重试',
+        message: 'This rule was modified elsewhere. Please refresh and retry.',
       };
     }
 
@@ -209,6 +226,16 @@ export class RuleService {
       }
     }
 
+    // T33 (B9-8): a favicon arriving through update must clear the same
+    // protocol gate as createRule, otherwise the write layer is bypassable.
+    if (updates.favicon && !isSafeFaviconProtocol(updates.favicon.value)) {
+      return {
+        success: false,
+        errorCode: 'RULE_INVALID_REGEX',
+        message: 'Unsupported favicon protocol. Use http(s) or a data: image.',
+      };
+    }
+
     // Duplicate + conflict checks (exclude self) when urlMatch is being changed
     if (updates.urlMatch) {
       // Duplicate detection — identical URL pattern as ANOTHER rule (exclude self)
@@ -224,7 +251,7 @@ export class RuleService {
         return {
           success: false,
           errorCode: 'DUPLICATE_RULE',
-          message: '已存在相同匹配规则的规则，请勿重复添加',
+          message: 'A rule with the same match pattern already exists.',
         };
       }
 
@@ -304,7 +331,23 @@ export class RuleService {
   async computeFields(tabId: number, tabUrl: string, _siteTitle: string, _siteFavicon: string): Promise<FieldComputation> {
     const local = await this.repo.getLocalState();
     const sync = await this.repo.getSyncState();
+    return this.computeFieldsFrom(local, sync, tabId, tabUrl);
+  }
 
+  /**
+   * Pure field computation over an already-resolved state snapshot (B7b / T11).
+   *
+   * Callers that process many tabs (e.g. `reapplyToMatchingTabs`) read the state
+   * ONCE and reuse it, turning an N× fan-out into a single read. This carries the
+   * entire priority chain — it is the same implementation `computeFields` uses,
+   * so `computeFields` behaviour is unchanged by construction.
+   */
+  computeFieldsFrom(
+    local: LocalState,
+    sync: SyncState,
+    tabId: number,
+    tabUrl: string,
+  ): FieldComputation {
     // Slot tier: applies ONLY to the slot's bound tabId.
     const slotField = this.resolveSlotField(tabId, local.bindings, sync.slots);
 
@@ -340,14 +383,22 @@ export class RuleService {
     let favicon: string | null = null;
     let faviconSource: FieldComputation['faviconSource'] = 'site';
 
-    if (override?.favicon) {
-      favicon = override.favicon.value;
+    // T33 (B9-8): EVERY tier must clear the protocol allowlist, not just the
+    // slot tier. A rule or a tab override can carry `javascript:` / `file:` /
+    // `data:text/html`, and this value ends up in `link.href` in the page. An
+    // unsafe value is skipped and the chain keeps falling through, exactly like
+    // the slot tier above.
+    const overrideFavicon = override?.favicon?.value;
+    const ruleFavicon = winningRule?.favicon?.value;
+
+    if (overrideFavicon && isSafeFaviconProtocol(overrideFavicon)) {
+      favicon = overrideFavicon;
       faviconSource = 'override';
     } else if (slotField?.favicon) {
       favicon = slotField.favicon;
       faviconSource = 'slot';
-    } else if (winningRule?.favicon) {
-      favicon = winningRule.favicon.value;
+    } else if (ruleFavicon && isSafeFaviconProtocol(ruleFavicon)) {
+      favicon = ruleFavicon;
       faviconSource = 'rule';
     }
 
@@ -377,11 +428,19 @@ export class RuleService {
     // User-modified uiMarker wins over the stale snapshot (current page > snapshot).
     const title = slot.uiMarker.customTitle?.trim() || slot.titleSnapshot.trim() || null;
 
+    // B9: the favicon value flows straight into `link.href` in the page, so it
+    // must pass the protocol allowlist. A rejected value is treated as "no
+    // favicon" (null) and the chain keeps falling through — it is never
+    // silently downgraded to a different value.
     let favicon: string | null = null;
-    if (slot.uiMarker.icon?.value.trim()) {
-      favicon = slot.uiMarker.icon.value;
-    } else if (slot.faviconSnapshot.trim()) {
-      favicon = slot.faviconSnapshot;
+    const iconValue = slot.uiMarker.icon?.value.trim();
+    if (iconValue && isSafeFaviconProtocol(iconValue)) {
+      favicon = iconValue;
+    } else {
+      const snapshot = slot.faviconSnapshot.trim();
+      if (snapshot && isSafeFaviconProtocol(snapshot)) {
+        favicon = snapshot;
+      }
     }
 
     if (!title && !favicon) return null;
@@ -550,21 +609,34 @@ export class RuleService {
   private async reapplyToMatchingTabs(rule: PageRule, clearOnEmpty = false): Promise<void> {
     const allTabs = await this.adapter.tabs.query({});
 
-    for (const tab of allTabs) {
-      if (isProtectedUrl(tab.url)) continue;
-      if (!matchesUrl(tab.url, rule.urlMatch)) continue;
+    // B7b: read the state ONCE for the whole batch instead of once per tab.
+    const local = await this.repo.getLocalState();
+    const sync = await this.repo.getSyncState();
 
-      // Compute the full field chain for this tab (considers override + all rules)
-      const computed = await this.computeFields(tab.id, tab.url, tab.title, tab.favIconUrl);
+    const targets = allTabs.filter(
+      (tab) => !isProtectedUrl(tab.url) && matchesUrl(tab.url, rule.urlMatch)
+    );
 
-      // On delete, if there is nothing computed to set, send an explicit CLEAR so
-      // the removed rule's rewrite is undone (title/favicon revert to the site).
-      const clear = clearOnEmpty && !computed.title && !computed.favicon;
-      await applyFieldsToTab(this.adapter, tab.id, {
-        title: clear ? null : (computed.title ?? undefined),
-        favicon: clear ? null : (computed.favicon ?? undefined),
-        force: true,
-      });
+    // B12: deliver in bounded shards. A plain `Promise.all` over every tab would
+    // fire unbounded `scripting.executeScript` calls at once; staying serial
+    // would keep the N+1 latency. Shards of 8 keep both bounded.
+    for (let i = 0; i < targets.length; i += REAPPLY_SHARD_SIZE) {
+      const shard = targets.slice(i, i + REAPPLY_SHARD_SIZE);
+      await Promise.all(
+        shard.map(async (tab) => {
+          // Compute the full field chain for this tab (considers override + all rules)
+          const computed = this.computeFieldsFrom(local, sync, tab.id, tab.url);
+
+          // On delete, if there is nothing computed to set, send an explicit CLEAR so
+          // the removed rule's rewrite is undone (title/favicon revert to the site).
+          const clear = clearOnEmpty && !computed.title && !computed.favicon;
+          await applyFieldsToTab(this.adapter, tab.id, {
+            title: clear ? null : (computed.title ?? undefined),
+            favicon: clear ? null : (computed.favicon ?? undefined),
+            force: true,
+          });
+        })
+      );
     }
   }
 }

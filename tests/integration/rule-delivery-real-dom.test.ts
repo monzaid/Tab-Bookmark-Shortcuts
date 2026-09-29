@@ -93,6 +93,41 @@ describe('Real-DOM delivery: the injected function genuinely rewrites the tab', 
     expect(iconLinks[0].getAttribute('href')).toBe('https://new.example/icon.png');
   });
 
+  it('B9: refuses to inject a javascript: favicon into the DOM', async () => {
+    // Create a rule to obtain the injected function reference (captured above).
+    await service.createRule({
+      urlMatch: { type: 'exact', value: 'https://example.com/page' },
+      mode: 'auto',
+      priority: 5,
+      title: 'Safe Title',
+      favicon: { type: 'url', value: 'https://new.example/icon.png' },
+    }, 0);
+
+    const c = calls[0];
+    c.func({ favicon: 'javascript:alert(1)' });
+
+    const hrefs = Array.from(document.querySelectorAll('link[rel*="icon"]')).map((l) => l.getAttribute('href'));
+    expect(hrefs).not.toContain('javascript:alert(1)');
+    // The previous (site) icon is removed and NOT replaced with anything unsafe
+    expect(hrefs.filter((h) => h !== null && h.startsWith('javascript:'))).toHaveLength(0);
+  });
+
+  it('B9: still injects an https favicon (legitimate path unaffected)', async () => {
+    await service.createRule({
+      urlMatch: { type: 'exact', value: 'https://example.com/page' },
+      mode: 'auto',
+      priority: 5,
+      title: 'Safe Title',
+      favicon: { type: 'url', value: 'https://unused.example/icon.png' },
+    }, 0);
+
+    const c = calls[0];
+    c.func({ favicon: 'https://new.example/icon.png' });
+
+    const hrefs = Array.from(document.querySelectorAll('link[rel*="icon"]')).map((l) => l.getAttribute('href'));
+    expect(hrefs).toContain('https://new.example/icon.png');
+  });
+
   it('applies the favicon even when document.head is initially null (document_start timing)', async () => {
     const headEl = document.head;
     Object.defineProperty(document, 'head', { configurable: true, value: null });

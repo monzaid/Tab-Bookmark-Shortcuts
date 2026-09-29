@@ -15,6 +15,7 @@ import { IconEditor, renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
 import type { MatchStrategy, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, IconSource, DashboardItem } from '@shared/types';
 import { wildcardToRegex } from '@shared/url-utils';
+import { getMessageClient } from '@ui/shared/message-client';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,15 +46,10 @@ function compareRules(a: PageRule, b: PageRule, key: SortKey): number {
   }
 }
 
-// ─── Message helper ─────────────────────────────────────────────────────────
+// ─── Message helper (B11: all cross-context messaging goes through here) ────
 
 async function sendMessage(action: string, payload?: unknown, configVersion?: number): Promise<unknown> {
-  return chrome.runtime.sendMessage({
-    requestId: `settings-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    action,
-    payload,
-    ...(configVersion !== undefined ? { configVersion } : {}),
-  });
+  return getMessageClient().sendRaw(action, payload, configVersion);
 }
 
 /** Extract result from response (supports both { result: {...} } and flat) */

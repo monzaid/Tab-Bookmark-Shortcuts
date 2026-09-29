@@ -32,6 +32,32 @@ const SYNC_KEY = 'syncState';
 const LOCAL_KEY = 'localState';
 /** Fallback key in local storage when chrome.storage.sync is unavailable */
 const SYNC_FALLBACK_KEY = 'syncStateFallback';
+/** Dedicated local key holding the single-slot undo snapshot (B2) */
+const PENDING_UNDO_KEY = 'pendingUndo';
+
+/** How long an undo snapshot stays valid (mirrors the sidebar's 5-second undo bar). */
+export const PENDING_UNDO_TTL_MS = 5000;
+
+/**
+ * Single-slot undo snapshot, stored in its own `storage.local` key.
+ * `expiresAt` is validated lazily on read so a sleeping service worker
+ * cannot lose the expiry (the timer alone is not sufficient).
+ */
+export interface PendingUndoSnapshot {
+  slotId: number;
+  /**
+   * T34: identity of THIS capture.
+   *
+   * `slotId` alone is not enough to decide ownership: two overwrites of the same
+   * slot in quick succession produce two captures, and the first capture's
+   * cleanup timer used to match on `slotId` and delete the second, still-valid
+   * one. The timer now proves ownership by capture identity.
+   */
+  captureId: number;
+  slotSnapshot: SlotDefinition;
+  bindingSnapshot: SlotBinding | null;
+  expiresAt: number;
+}
 
 // ─── Icon Offloading ─────────────────────────────────────────────────────────
 
@@ -85,6 +111,12 @@ export class StorageRepository {
   private syncWriteQueue: Promise<unknown> = Promise.resolve({ success: true, configVersion: 0 });
   /** Whether chrome.storage.sync is available. If false, "sync" data is stored in local. */
   private syncAvailable = true;
+  /**
+   * Memoized `local-icon:<key>` → data URI resolutions (B7a / T10).
+   * Instance-scoped on purpose: a service-worker restart is expected to drop it.
+   * A `null` value records "resolved but absent" so misses are not retried.
+   */
+  private iconResolutionCache = new Map<string, string | null>();
 
   constructor(private adapter: BrowserAdapter) {}
 
@@ -159,6 +191,10 @@ export class StorageRepository {
     }
     // Local area changes: runtime state + fallback sync config
     if (areaName === 'local') {
+      // B7a: any local-area write may have rewritten an offloaded icon blob
+      // (including our own `setIconCache`), so drop the resolution cache
+      // wholesale rather than trying to diff individual icon keys.
+      this.iconResolutionCache.clear();
       if (changes[LOCAL_KEY]?.newValue) {
         this.localCache = changes[LOCAL_KEY].newValue as LocalState;
       }
@@ -366,40 +402,64 @@ export class StorageRepository {
 
     for (let i = 0; i < resolved.rules.length; i++) {
       const rule = resolved.rules[i];
-      if (rule.favicon?.value.startsWith(ICON_REF_PREFIX)) {
-        const iconKey = rule.favicon.value.slice(ICON_REF_PREFIX.length);
-        try {
-          const data = await this.adapter.storage.get('local', iconKey);
-          const actualUri = data[iconKey] as string | undefined;
-          if (actualUri) {
-            resolved.rules[i] = { ...rule, favicon: { ...rule.favicon, value: actualUri } };
-          }
-        } catch {
-          // Local read failed — keep the reference as-is (icon will show placeholder)
+      const ref = rule.favicon?.value;
+      if (ref?.startsWith(ICON_REF_PREFIX)) {
+        const actualUri = await this.resolveIconRef(ref);
+        if (actualUri) {
+          resolved.rules[i] = { ...rule, favicon: { ...rule.favicon!, value: actualUri } };
         }
       }
     }
 
     for (let i = 0; i < resolved.slots.length; i++) {
       const slot = resolved.slots[i];
-      const iconValue = slot.uiMarker?.icon?.value;
-      if (iconValue?.startsWith(ICON_REF_PREFIX)) {
-        const iconKey = iconValue.slice(ICON_REF_PREFIX.length);
-        try {
-          const data = await this.adapter.storage.get('local', iconKey);
-          const actualUri = data[iconKey] as string | undefined;
-          if (actualUri) {
+      const ref = slot.uiMarker?.icon?.value;
+      if (ref?.startsWith(ICON_REF_PREFIX)) {
+        const actualUri = await this.resolveIconRef(ref);
+        if (actualUri) {
+          const icon = slot.uiMarker.icon;
+          if (icon) {
             resolved.slots[i] = {
               ...slot,
-              uiMarker: { ...slot.uiMarker, icon: { ...slot.uiMarker.icon!, value: actualUri } },
+              uiMarker: { ...slot.uiMarker, icon: { ...icon, value: actualUri } },
             };
           }
-        } catch {
-          // Local read failed — keep the reference as-is
         }
       }
     }
 
+    return resolved;
+  }
+
+  /**
+   * Resolve a single `local-icon:<key>` reference, memoized (B7a / T10).
+   *
+   * Without the cache every `getSyncState()` re-issued one `storage.get` per
+   * offloaded icon — an N-IPC fan-out on a hot read path. A miss is cached as
+   * `null` too, so a broken reference is not retried on every read.
+   *
+   * Entries are dropped wholesale by `handleStorageChange` on any `local` area
+   * event, so an external write (or a `setIconCache`) can never serve stale data.
+   */
+  private async resolveIconRef(reference: string): Promise<string | null> {
+    const cached = this.iconResolutionCache.get(reference);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const iconKey = reference.slice(ICON_REF_PREFIX.length);
+    let resolved: string | null = null;
+    try {
+      const data = await this.adapter.storage.get('local', iconKey);
+      const actualUri = data[iconKey];
+      if (typeof actualUri === 'string' && actualUri) {
+        resolved = actualUri;
+      }
+    } catch {
+      // Local read failed — leave unresolved (icon will show placeholder)
+    }
+
+    this.iconResolutionCache.set(reference, resolved);
     return resolved;
   }
 
@@ -408,15 +468,22 @@ export class StorageRepository {
   /**
    * Write local state (no version check — local is device-specific).
    * Serialized through a queue to prevent concurrent read-modify-write races (Problem 5).
+   *
+   * Queue resilience (B1): the queue tail never adopts a rejected promise, so a
+   * single failed write cannot poison every subsequent local write. The error is
+   * still surfaced to the caller via the returned `run` promise.
    */
   async writeLocal(updater: (current: LocalState) => LocalState): Promise<void> {
-    this.localWriteQueue = this.localWriteQueue.then(async () => {
+    const run = this.localWriteQueue.then(async () => {
       const current = await this.getLocalState();
       const updated = updater(current);
       await this.adapter.storage.set('local', { [LOCAL_KEY]: updated });
       this.localCache = updated;
     });
-    return this.localWriteQueue;
+    // Keep the queue alive regardless of this operation's outcome.
+    this.localWriteQueue = run.catch(() => undefined);
+    // Propagate the real error (if any) to the caller.
+    return run;
   }
 
   // ─── Simple Rule Mutators (no version check — single-user local extension) ──
@@ -553,109 +620,184 @@ export class StorageRepository {
   }
 
   // ─── Local State Mutators ────────────────────────────────────────────────
+  //
+  // B6: every mutator returns a NEW LocalState object and replaces the affected
+  // collection instead of mutating it in place. The updater contract is "pure
+  // function of `current`" — callers that hold a previously returned snapshot
+  // (e.g. the sidebar's `state.local`) must never observe later writes.
 
   async setBinding(binding: SlotBinding): Promise<void> {
     await this.writeLocal((state) => {
       const idx = state.bindings.findIndex((b) => b.slotId === binding.slotId);
-      if (idx >= 0) {
-        state.bindings[idx] = binding;
-      } else {
-        state.bindings.push(binding);
-      }
-      return state;
+      const bindings =
+        idx >= 0
+          ? state.bindings.map((b, i) => (i === idx ? binding : b))
+          : [...state.bindings, binding];
+      return { ...state, bindings };
     });
   }
 
   async removeBinding(slotId: number): Promise<void> {
-    await this.writeLocal((state) => {
-      state.bindings = state.bindings.filter((b) => b.slotId !== slotId);
-      return state;
-    });
+    await this.writeLocal((state) => ({
+      ...state,
+      bindings: state.bindings.filter((b) => b.slotId !== slotId),
+    }));
   }
 
   async removeBindingByTabId(tabId: number): Promise<void> {
-    await this.writeLocal((state) => {
-      state.bindings = state.bindings.filter((b) => b.tabId !== tabId);
-      state.tabOverrides = state.tabOverrides.filter((o) => o.tabId !== tabId);
-      return state;
-    });
+    await this.writeLocal((state) => ({
+      ...state,
+      bindings: state.bindings.filter((b) => b.tabId !== tabId),
+      tabOverrides: state.tabOverrides.filter((o) => o.tabId !== tabId),
+    }));
   }
 
   async setCycleCursor(cursor: CycleCursor): Promise<void> {
     await this.writeLocal((state) => {
       const idx = state.cycleCursors.findIndex((c) => c.slotId === cursor.slotId);
-      if (idx >= 0) {
-        state.cycleCursors[idx] = cursor;
-      } else {
-        state.cycleCursors.push(cursor);
-      }
-      return state;
+      const cycleCursors =
+        idx >= 0
+          ? state.cycleCursors.map((c, i) => (i === idx ? cursor : c))
+          : [...state.cycleCursors, cursor];
+      return { ...state, cycleCursors };
     });
   }
 
   async setLastSuccessSlot(slotId: number): Promise<void> {
-    await this.writeLocal((state) => {
-      state.lastSuccessSlotId = slotId;
-      return state;
-    });
+    await this.writeLocal((state) => ({ ...state, lastSuccessSlotId: slotId }));
   }
 
   async addRecoverySession(session: RecoverySession): Promise<void> {
-    await this.writeLocal((state) => {
-      state.recoverySessions.push(session);
-      return state;
-    });
+    await this.writeLocal((state) => ({
+      ...state,
+      recoverySessions: [...state.recoverySessions, session],
+    }));
   }
 
   async removeRecoverySession(recoveryId: string): Promise<void> {
-    await this.writeLocal((state) => {
-      state.recoverySessions = state.recoverySessions.filter((s) => s.recoveryId !== recoveryId);
-      return state;
-    });
+    await this.writeLocal((state) => ({
+      ...state,
+      recoverySessions: state.recoverySessions.filter((s) => s.recoveryId !== recoveryId),
+    }));
   }
 
   async setTabOverride(override: TabOverride): Promise<void> {
     await this.writeLocal((state) => {
       const idx = state.tabOverrides.findIndex((o) => o.tabId === override.tabId);
-      if (idx >= 0) {
-        state.tabOverrides[idx] = override;
-      } else {
-        state.tabOverrides.push(override);
-      }
-      return state;
+      const tabOverrides =
+        idx >= 0
+          ? state.tabOverrides.map((o, i) => (i === idx ? override : o))
+          : [...state.tabOverrides, override];
+      return { ...state, tabOverrides };
     });
   }
 
   async removeTabOverride(tabId: number): Promise<void> {
-    await this.writeLocal((state) => {
-      state.tabOverrides = state.tabOverrides.filter((o) => o.tabId !== tabId);
-      return state;
-    });
+    await this.writeLocal((state) => ({
+      ...state,
+      tabOverrides: state.tabOverrides.filter((o) => o.tabId !== tabId),
+    }));
   }
 
   async setIconCache(cacheKey: string, dataUri: string): Promise<void> {
-    await this.writeLocal((state) => {
-      state.iconCache[cacheKey] = dataUri;
-      return state;
-    });
+    await this.writeLocal((state) => ({
+      ...state,
+      iconCache: { ...state.iconCache, [cacheKey]: dataUri },
+    }));
+    // B7a write-through: an offloaded icon is referenced as `local-icon:<key>`,
+    // so seed the resolution cache for that exact reference too.
+    this.iconResolutionCache.set(`${ICON_REF_PREFIX}${cacheKey}`, dataUri);
   }
 
   async addDiagnostic(entry: DiagnosticEntry): Promise<void> {
     await this.writeLocal((state) => {
-      state.diagnostics.push(entry);
+      const appended = [...state.diagnostics, entry];
       // Keep max 500 entries
-      if (state.diagnostics.length > 500) {
-        state.diagnostics = state.diagnostics.slice(-500);
-      }
-      return state;
+      const diagnostics = appended.length > 500 ? appended.slice(-500) : appended;
+      return { ...state, diagnostics };
     });
   }
 
   async clearDiagnostics(): Promise<void> {
-    await this.writeLocal((state) => {
-      state.diagnostics = [];
-      return state;
-    });
+    await this.writeLocal((state) => ({ ...state, diagnostics: [] }));
+  }
+
+  // ─── Pending Undo Snapshot (B2) ──────────────────────────────────────────
+
+  /**
+   * Store the single-slot undo snapshot under its own local storage key.
+   *
+   * Kept OUT of `LocalState` on purpose: it is transient device-local data with
+   * a 5s TTL, and isolating it avoids polluting the persisted runtime state
+   * shape (and its export surface).
+   */
+  async setPendingUndo(snapshot: PendingUndoSnapshot): Promise<void> {
+    await this.adapter.storage.set('local', { [PENDING_UNDO_KEY]: snapshot });
+  }
+
+  /**
+   * Read the pending undo snapshot for `slotId`.
+   *
+   * Returns `null` when the snapshot is missing, belongs to another slot, or has
+   * expired. Expiry is evaluated lazily here so a service-worker restart that
+   * drops the cleanup timer still cannot resurrect a stale snapshot.
+   */
+  async getPendingUndo(slotId: number): Promise<PendingUndoSnapshot | null> {
+    let raw: unknown;
+    try {
+      const data = await this.adapter.storage.get('local', PENDING_UNDO_KEY);
+      raw = data[PENDING_UNDO_KEY];
+    } catch {
+      return null;
+    }
+
+    if (typeof raw !== 'object' || raw === null) return null;
+    const candidate = raw as Record<string, unknown>;
+
+    if (candidate.slotId !== slotId) return null;
+    if (typeof candidate.expiresAt !== 'number' || candidate.expiresAt < Date.now()) return null;
+    if (typeof candidate.slotSnapshot !== 'object' || candidate.slotSnapshot === null) return null;
+
+    return {
+      slotId,
+      // T34: surface the capture identity so callers can clear precisely the
+      // snapshot they consumed. Legacy snapshots without one fall back to 0.
+      captureId: typeof candidate.captureId === 'number' ? candidate.captureId : 0,
+      slotSnapshot: candidate.slotSnapshot as SlotDefinition,
+      bindingSnapshot: (candidate.bindingSnapshot ?? null) as SlotBinding | null,
+      expiresAt: candidate.expiresAt,
+    };
+  }
+
+  /**
+   * Clear the pending undo snapshot (own key — never goes through the local queue).
+   *
+   * T25 (N2): when `slotId` is supplied the key is removed **only if** the stored
+   * snapshot still belongs to that slot. The cleanup timer used to remove the
+   * shared key unconditionally, so an older slot's timer could delete a newer
+   * slot's still-valid snapshot — silently destroying the user's undo.
+   *
+   * The ownership check reads the raw value rather than going through
+   * `getPendingUndo`, because that helper filters out *expired* snapshots and an
+   * expired snapshot is exactly what the timer is meant to clean up.
+   */
+  async clearPendingUndo(slotId?: number, captureId?: number): Promise<void> {
+    try {
+      if (slotId !== undefined) {
+        const data = await this.adapter.storage.get('local', PENDING_UNDO_KEY);
+        const raw = data[PENDING_UNDO_KEY] as { slotId?: unknown; captureId?: unknown } | undefined;
+        // Never clobber a snapshot owned by a different slot.
+        if (!raw || raw.slotId !== slotId) return;
+        // T34: and never clobber a NEWER capture of the same slot. When a
+        // `captureId` is supplied (always, for timers and restores) ownership
+        // must match exactly. Matching on `slotId` alone let the first of two
+        // rapid overwrites destroy the second, still-valid undo snapshot.
+        if (captureId !== undefined && raw.captureId !== captureId) return;
+      }
+      await this.adapter.storage.remove('local', PENDING_UNDO_KEY);
+    } catch {
+      // Removal is best-effort; an expired snapshot is ignored on read anyway.
+    }
   }
 
   // ─── Startup Cleanup ─────────────────────────────────────────────────────
@@ -669,13 +811,16 @@ export class StorageRepository {
     let removedBindings = 0;
     let removedSessions = 0;
 
+    // B12: ONE bulk query replaces the previous N+1 `tabs.get` fan-out.
+    const allTabs = await this.adapter.tabs.query({});
+    const liveTabIds = new Set(allTabs.map((t) => t.id));
+
     // Validate tabIds
     const validBindings: SlotBinding[] = [];
     for (const binding of local.bindings) {
-      try {
-        await this.adapter.tabs.get(binding.tabId);
+      if (liveTabIds.has(binding.tabId)) {
         validBindings.push(binding);
-      } catch {
+      } else {
         removedBindings++;
       }
     }
@@ -689,15 +834,9 @@ export class StorageRepository {
     });
 
     // Also clean tab overrides for non-existent tabs
-    const validOverrides: TabOverride[] = [];
-    for (const override of local.tabOverrides) {
-      try {
-        await this.adapter.tabs.get(override.tabId);
-        validOverrides.push(override);
-      } catch {
-        // Tab no longer exists
-      }
-    }
+    const validOverrides: TabOverride[] = local.tabOverrides.filter((override) =>
+      liveTabIds.has(override.tabId)
+    );
 
     if (removedBindings > 0 || removedSessions > 0 || validOverrides.length !== local.tabOverrides.length) {
       await this.writeLocal((state) => {

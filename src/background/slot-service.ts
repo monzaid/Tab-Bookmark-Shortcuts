@@ -12,7 +12,8 @@
  */
 
 import type { BrowserAdapter, NormalizedTab } from '@adapters/contract';
-import type { StorageRepository } from './storage-repository';
+import type { StorageRepository, WriteResult } from './storage-repository';
+import { PENDING_UNDO_TTL_MS } from './storage-repository';
 import type {
   SlotDefinition,
   MatchStrategy,
@@ -22,6 +23,19 @@ import type {
 import { matchesUrl, sortCandidates, normalizeUrl } from '@shared/url-utils';
 
 // ─── Slot Service ────────────────────────────────────────────────────────────
+
+/**
+ * T34: monotonically increasing identity for undo captures.
+ *
+ * Module-level (not per-instance) so identity stays unique even if more than
+ * one SlotService exists, and monotonic within a service-worker lifetime —
+ * which is all the TTL window requires.
+ */
+let captureIdCounter = 0;
+function nextCaptureId(): number {
+  captureIdCounter += 1;
+  return captureIdCounter;
+}
 
 export class SlotService {
   constructor(
@@ -59,6 +73,12 @@ export class SlotService {
       createdAt: now,
       updatedAt: now,
     };
+
+    // T24 (N1): capture the about-to-be-overwritten state BEFORE the write, so
+    // UNDO_SAVE can restore it. This is the single shared capture point for the
+    // sidebar SAVE_SLOT path and the keyboard-command path; CONFLICT_OVERWRITE
+    // funnels through `saveSlotFromData` below and is covered the same way.
+    await this.captureBeforeOverwrite(slotId);
 
     const result = await this.repo.saveSlot(slot, expectedVersion);
     if (!result.success) {
@@ -100,6 +120,10 @@ export class SlotService {
       updatedAt: now,
     };
 
+    // T24 (N1): same shared capture point as `saveSlot` — an overwrite reached
+    // through the conflict dialog must be undoable too.
+    await this.captureBeforeOverwrite(slotId);
+
     const result = await this.repo.saveSlot(slot, expectedVersion);
     if (!result.success) {
       return { success: false, errorCode: result.errorCode, message: result.message };
@@ -114,6 +138,22 @@ export class SlotService {
     });
 
     return { success: true, slot };
+  }
+
+  /**
+   * T24 (N1): best-effort snapshot of the slot that is about to be overwritten.
+   *
+   * Centralized so every overwrite route (sidebar SAVE_SLOT, keyboard command,
+   * conflict overwrite) shares one capture point. A capture failure must never
+   * block the save — the worst case degrades UNDO_SAVE to its delete semantics.
+   * No-ops when the slot is empty (nothing to restore).
+   */
+  private async captureBeforeOverwrite(slotId: number): Promise<void> {
+    try {
+      await this.captureUndoSnapshot(slotId);
+    } catch {
+      // Non-fatal: the save proceeds without an undo snapshot.
+    }
   }
 
   // ─── Switch Slot ───────────────────────────────────────────────────────
@@ -467,12 +507,96 @@ export class SlotService {
 
   // ─── Unbind Slot ───────────────────────────────────────────────────────
 
-  async unbindSlot(slotId: number): Promise<void> {
+  async unbindSlot(slotId: number): Promise<WriteResult> {
     // Remove local binding
     await this.repo.removeBinding(slotId);
     // Remove slot definition from sync storage (Problem 1: ✕ must fully reset)
     const version = this.repo.getConfigVersion();
-    await this.repo.removeSlot(slotId, version);
+    const result = await this.repo.removeSlot(slotId, version);
+    // B3: surface the write outcome — a failed sync removal must not be reported as success.
+    return result;
+  }
+
+  // ─── Undo Snapshot (B2) ────────────────────────────────────────────────
+
+  /**
+   * Capture the state of `slotId` immediately before an overwrite so UNDO_SAVE
+   * can restore it (rather than deleting the slot).
+   *
+   * Writes to a dedicated `storage.local` key with a 5s TTL. A cleanup timer is
+   * armed as a best effort; correctness relies on the lazy `expiresAt` check in
+   * `repo.getPendingUndo` because a service worker may be suspended.
+   */
+  async captureUndoSnapshot(slotId: number): Promise<void> {
+    const sync = await this.repo.getSyncState();
+    const existingSlot = sync.slots.find((s) => s.id === slotId);
+    if (!existingSlot) return;
+
+    const local = await this.repo.getLocalState();
+    const existingBinding = local.bindings.find((b) => b.slotId === slotId) ?? null;
+
+    // Deep enough copy to be immune to later in-place mutation of the live state.
+    const slotSnapshot: SlotDefinition = {
+      ...existingSlot,
+      urlMatch: { ...existingSlot.urlMatch },
+      uiMarker: { ...existingSlot.uiMarker },
+    };
+
+    // T34: stamp this capture with a unique identity so ownership can be proven
+    // later. `slotId` alone cannot distinguish two rapid overwrites of the SAME
+    // slot, which is how the first capture's timer used to destroy the second,
+    // still-valid undo snapshot (and UNDO_SAVE then silently deleted the slot).
+    const captureId = nextCaptureId();
+
+    await this.repo.setPendingUndo({
+      slotId,
+      captureId,
+      slotSnapshot,
+      bindingSnapshot: existingBinding ? { ...existingBinding } : null,
+      expiresAt: Date.now() + PENDING_UNDO_TTL_MS,
+    });
+
+    // Best-effort cleanup — the lazy expiresAt check is the real guarantee.
+    // T25 (N2) + T34: pass BOTH slotId and captureId so this timer can only ever
+    // clear the exact capture it armed; neither a newer slot's snapshot nor a
+    // newer capture of the same slot may be clobbered.
+    setTimeout(() => {
+      void this.repo.clearPendingUndo(slotId, captureId);
+    }, PENDING_UNDO_TTL_MS + 100);
+  }
+
+  /**
+   * Undo a previous overwrite of `slotId`.
+   *
+   * - Snapshot present & unexpired → restore slot definition + binding.
+   * - Otherwise → degrade to the delete semantics (`unbindSlot`, B3-propagated).
+   *
+   * The snapshot is always cleared so a given undo can only be consumed once.
+   */
+  async restoreSlot(slotId: number): Promise<WriteResult> {
+    const pending = await this.repo.getPendingUndo(slotId);
+
+    if (!pending) {
+      // No (valid) snapshot — degrade to deletion; propagate any write failure.
+      return this.unbindSlot(slotId);
+    }
+
+    const version = this.repo.getConfigVersion();
+    const saved = await this.repo.saveSlot(pending.slotSnapshot, version);
+    if (!saved.success) {
+      return saved;
+    }
+
+    if (pending.bindingSnapshot) {
+      await this.repo.setBinding(pending.bindingSnapshot);
+    } else {
+      await this.repo.removeBinding(slotId);
+    }
+
+    // T25 (N2) + T34: conditional clear with BOTH identities — only consume the
+    // exact capture we just restored, never a newer one.
+    await this.repo.clearPendingUndo(slotId, pending.captureId);
+    return saved;
   }
 
   // ─── Private Helpers ───────────────────────────────────────────────────

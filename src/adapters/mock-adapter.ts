@@ -52,6 +52,18 @@ export interface MockAdapter extends BrowserAdapter {
   emitTabActivated(tabId: number, windowId: number): void;
   /** Simulate tab updated event (e.g. status==='complete' on refresh) */
   emitTabUpdated(tabId: number, changeInfo: { url?: string; status?: string }, tab: NormalizedTab): void;
+  /**
+   * Dispatch a runtime message to every registered onMessage listener,
+   * mirroring the browser's broadcast semantics.
+   *
+   * Used to prove listener uniqueness (T18): if two listeners both handle the
+   * same action, the side effect fires twice.
+   */
+  emitRuntimeMessage(
+    message: unknown,
+    sender: unknown,
+    sendResponse: (response?: unknown) => void,
+  ): void;
 }
 
 export function createMockAdapter(initialState?: Partial<MockAdapterState>): MockAdapter {
@@ -147,6 +159,14 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
 
     emitTabUpdated(tabId: number, changeInfo: { url?: string; status?: string }, tab: NormalizedTab) {
       tabUpdatedListeners.forEach((l) => l(tabId, changeInfo, tab));
+    },
+
+    emitRuntimeMessage(message, sender, sendResponse) {
+      // Mirror the browser: every listener sees the message; listeners that
+      // return true claim the async response.
+      messageListeners.forEach((l) => {
+        l(message, sender, sendResponse);
+      });
     },
 
     getBrowserType: () => state.browserType,

@@ -27,6 +27,79 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
     updatedAt: '2026-01-01T00:00:00Z',
   });
 
+  describe('T31 (B4-3) — commitImport re-validates the preview (TOCTOU)', () => {
+    it('should reject a commit whose preview carries a dangerous rule regex', async () => {
+      // A preview that never went through `previewImport` (or was mutated after
+      // it) must not be trusted at commit time.
+      const forged = {
+        valid: true,
+        slotConflicts: [],
+        newSlots: [],
+        rules: [
+          {
+            id: 'evil',
+            urlMatch: { type: 'regex', value: '^(a+){10}$' },
+            mode: 'auto',
+            priority: 0,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        globalStrategy: 'B',
+        configVersion: 1,
+      };
+
+      const result = await service.commitImport(forged as never, [], repo.getConfigVersion());
+      expect(result.success, 'a dangerous regex must not be persisted via commit').toBe(false);
+      if (!result.success) {
+        expect(result.errorCode).toBe('IMPORT_INVALID');
+      }
+      expect((await repo.getSyncState()).rules.find((r) => r.id === 'evil')).toBeUndefined();
+    });
+
+    it('should reject a commit whose preview carries a dangerous slot regex', async () => {
+      const forged = {
+        valid: true,
+        slotConflicts: [],
+        newSlots: [makeSlot(9, '^(.*a){20}$')].map((s) => ({
+          ...s,
+          urlMatch: { type: 'regex' as const, value: '^(.*a){20}$' },
+        })),
+        rules: [],
+        globalStrategy: 'B',
+        configVersion: 1,
+      };
+
+      const result = await service.commitImport(forged as never, [], repo.getConfigVersion());
+      expect(result.success).toBe(false);
+      expect((await repo.getSyncState()).slots.find((s) => s.id === 9)).toBeUndefined();
+    });
+
+    it('should still commit a safe preview', async () => {
+      const safe = {
+        valid: true,
+        slotConflicts: [],
+        newSlots: [],
+        rules: [
+          {
+            id: 'safe',
+            urlMatch: { type: 'regex', value: '^https://example\\.com/.*$' },
+            mode: 'auto',
+            priority: 0,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        globalStrategy: 'B',
+        configVersion: 1,
+      };
+
+      const result = await service.commitImport(safe as never, [], repo.getConfigVersion());
+      expect(result.success).toBe(true);
+      expect((await repo.getSyncState()).rules.find((r) => r.id === 'safe')).toBeDefined();
+    });
+  });
+
   describe('Happy path — export and import with decisions', () => {
     it('should export sync config only (no local data)', async () => {
       await repo.saveSlot(makeSlot(1, 'https://example.com'), 0);
@@ -203,6 +276,106 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
       // Verify nothing was written
       const sync = await repo.getSyncState();
       expect(sync.slots).toHaveLength(1); // Only original slot
+    });
+
+    it('B4: should reject imported rule with catastrophic backtracking regex', async () => {
+      const importJson = JSON.stringify({
+        version: 1,
+        exportedAt: '2026-06-01T00:00:00Z',
+        slots: [],
+        rules: [
+          {
+            id: 'evil-rule',
+            urlMatch: { type: 'regex', value: '(a+)+$' },
+            mode: 'auto',
+            priority: 0,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        globalStrategy: 'B',
+        configVersion: 0,
+      });
+
+      const result = await service.generatePreview(importJson);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.errorCode).toBe('IMPORT_INVALID');
+        // Message must locate the offending rule
+        expect(result.message).toContain('evil-rule');
+      }
+    });
+
+    it('B4: should reject imported slot with catastrophic backtracking regex', async () => {
+      const importJson = JSON.stringify({
+        version: 1,
+        exportedAt: '2026-06-01T00:00:00Z',
+        slots: [
+          {
+            ...makeSlot(1, 'https://example.com'),
+            urlMatch: { type: 'regex', value: '(x+)+' },
+          },
+        ],
+        rules: [],
+        globalStrategy: 'B',
+        configVersion: 0,
+      });
+
+      const result = await service.generatePreview(importJson);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.errorCode).toBe('IMPORT_INVALID');
+      }
+    });
+
+    it('B4: should accept imported regex that is safe', async () => {
+      const importJson = JSON.stringify({
+        version: 1,
+        exportedAt: '2026-06-01T00:00:00Z',
+        slots: [],
+        rules: [
+          {
+            id: 'safe-rule',
+            urlMatch: { type: 'regex', value: '^https://example\\.com/.*$' },
+            mode: 'auto',
+            priority: 0,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        globalStrategy: 'B',
+        configVersion: 0,
+      });
+
+      const result = await service.generatePreview(importJson);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.preview.rules).toHaveLength(1);
+      }
+    });
+
+    it('B4: should NOT reject overly-broad (warn-tier) regex — warning only', async () => {
+      const importJson = JSON.stringify({
+        version: 1,
+        exportedAt: '2026-06-01T00:00:00Z',
+        slots: [],
+        rules: [
+          {
+            id: 'broad-rule',
+            urlMatch: { type: 'regex', value: '.*' },
+            mode: 'auto',
+            priority: 0,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        globalStrategy: 'B',
+        configVersion: 0,
+      });
+
+      const result = await service.generatePreview(importJson);
+      // Warn tier (REGEX_RISK with valid:true) must remain importable
+      expect(result.success).toBe(true);
     });
 
     it('should not write config before confirmation (preview is read-only)', async () => {

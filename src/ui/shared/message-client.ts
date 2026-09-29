@@ -75,8 +75,22 @@ export class MessageClient {
   private externalChangeListeners: Array<(newVersion: number) => void> = [];
 
   constructor() {
+    // B11: guard the subscription. The client is now constructed by every page
+    // entry point, some of which run in environments without chrome.storage
+    // (tests, restricted contexts). Messaging still works without it — only the
+    // external-change signal is unavailable.
+    //
+    // The view is re-typed as optional so this check stays meaningful rather
+    // than being reported as an always-truthy comparison on a non-optional global.
+    const storageApi = (
+      globalThis as {
+        chrome?: { storage?: { onChanged?: typeof chrome.storage.onChanged } };
+      }
+    ).chrome?.storage?.onChanged;
+    if (!storageApi) return;
+
     // Listen for external storage changes
-    chrome.storage.onChanged.addListener((changes, areaName) => {
+    storageApi.addListener((changes, areaName) => {
       if (areaName === 'sync' && changes['syncState']) {
         const newValue = changes['syncState'].newValue as SyncState | undefined;
         if (newValue && newValue.configVersion !== this.configVersion) {
@@ -105,6 +119,32 @@ export class MessageClient {
   }
 
   // ─── Core Send ─────────────────────────────────────────────────────────
+
+  /**
+   * B11: raw pass-through used by the page entry points.
+   *
+   * `send()` normalizes everything into a `ClientResult`, which would change
+   * the response shape each page currently destructures (`response?.result ??
+   * response`). This method keeps the wire semantics identical to a direct
+   * `chrome.runtime.sendMessage` call while centralizing that API access here,
+   * so page code no longer touches `chrome.*` for cross-context messaging.
+   */
+  async sendRaw(action: string, payload?: unknown, configVersion?: number): Promise<unknown> {
+    const message: Record<string, unknown> = {
+      requestId: `ui-${String(Date.now())}-${Math.random().toString(36).slice(2, 8)}`,
+      action,
+    };
+    if (payload !== undefined) message.payload = payload;
+    if (configVersion !== undefined) message.configVersion = configVersion;
+
+    const raw: unknown = await chrome.runtime.sendMessage(message);
+    const response = raw as { configVersion?: unknown } | null;
+    const version = response === null ? undefined : response.configVersion;
+    if (typeof version === 'number') {
+      this.configVersion = version;
+    }
+    return raw;
+  }
 
   private async send<T>(action: string, payload?: unknown, includeVersion = false): Promise<ClientResult<T>> {
     try {

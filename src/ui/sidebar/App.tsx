@@ -18,10 +18,51 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { SlotDefinition, SlotBinding, SyncState, LocalState } from '@shared/types';
 import { Button, IconButton, Toast, Tooltip, StatusBadge } from '@ui/shared/components';
+import { getMessageClient } from '@ui/shared/message-client';
+import { openOrReusePage } from '@shared/open-page';
+import type { PageOpenApi } from '@shared/open-page';
 
 // Import styles
 import '@ui/styles/base.css';
 import '@ui/styles/sidebar.css';
+
+// ─── Fallback tab API (B11b / T17) ───────────────────────────────────────────
+
+/**
+ * The ONLY place in this file that touches `chrome.tabs.*` for page opening.
+ *
+ * The footer fallback needs four raw tab operations, but keeping them inline in
+ * `openPage` invited re-duplication of the reuse logic. Centralizing them here
+ * makes `openOrReusePage` (the shared reuse source of truth) the single caller.
+ *
+ * Returns `null` when the `chrome.tabs` API is missing (restricted context or
+ * test environment) so callers can skip the fallback instead of throwing.
+ */
+export function createChromePageOpenApi(): PageOpenApi | null {
+  // Re-typed as optional so the availability check stays meaningful rather than
+  // being reported as an always-truthy comparison on a non-optional global.
+  const tabsApi = (globalThis as { chrome?: { tabs?: unknown } }).chrome?.tabs;
+  if (!tabsApi) {
+    return null;
+  }
+  const tabs = chrome.tabs;
+
+  return {
+    queryAllTabs: async () => {
+      const all = await tabs.query({});
+      return all.map((t) => ({ id: t.id ?? -1, url: t.url ?? '' }));
+    },
+    activateTab: async (tabId) => {
+      await tabs.update(tabId, { active: true });
+    },
+    navigateTab: async (tabId, targetUrl) => {
+      await tabs.update(tabId, { url: targetUrl });
+    },
+    createTab: async (targetUrl) => {
+      await tabs.create({ url: targetUrl });
+    },
+  };
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -49,10 +90,10 @@ interface CommandInfo {
   description: string;
 }
 
-// ─── Message Client ──────────────────────────────────────────────────────────
+// ─── Message Client (B11: all cross-context messaging goes through here) ────
 
 async function sendMessage(action: string, payload?: unknown): Promise<unknown> {
-  return chrome.runtime.sendMessage({ requestId: `ui-${Date.now()}`, action, payload });
+  return getMessageClient().sendRaw(action, payload);
 }
 
 // ─── Slot color palette ──────────────────────────────────────────────────────
@@ -392,7 +433,6 @@ function UndoBar({ undo, onUndo, onExpire }: UndoBarProps) {
 import { IconEditor, renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
 import { wildcardToRegex, matchesUrl } from '@shared/url-utils';
-import { openOrReusePage } from '@shared/open-page';
 
 interface IconEditorModalProps {
   onApply: (iconData: string) => void;
@@ -945,21 +985,37 @@ export function SidebarApp() {
 
   const handleUnbind = useCallback(async (slotId: number) => {
     try {
-      await sendMessage('UNBIND_SLOT', { slotId });
-      setToast({ variant: 'info', message: `Slot ${slotId} unbound` });
-      void loadState();
+      // T26 (N3): a rejected write must not be reported as success.
+      const result = (await sendMessage('UNBIND_SLOT', { slotId })) as
+        | { success?: boolean; result?: { success?: boolean } }
+        | undefined;
+      const ok = result?.result?.success ?? result?.success ?? false;
+      if (ok) {
+        setToast({ variant: 'info', message: `Slot ${String(slotId)} unbound` });
+        void loadState();
+      } else {
+        setToast({ variant: 'error', message: `Failed to unbind slot ${String(slotId)}` });
+      }
     } catch {
-      setToast({ variant: 'error', message: `Failed to unbind slot ${slotId}` });
+      setToast({ variant: 'error', message: `Failed to unbind slot ${String(slotId)}` });
     }
   }, [loadState]);
 
   const handleUndo = useCallback(async () => {
     if (!undo?.previousSlot) return;
     try {
-      await sendMessage('UNDO_SAVE', { slotId: undo.slotId });
-      setUndo(null);
-      setToast({ variant: 'info', message: `Undo: slot ${undo.slotId} restored` });
-      void loadState();
+      // T26 (N3): same contract — only claim the undo succeeded if it did.
+      const result = (await sendMessage('UNDO_SAVE', { slotId: undo.slotId })) as
+        | { success?: boolean; result?: { success?: boolean } }
+        | undefined;
+      const ok = result?.result?.success ?? result?.success ?? false;
+      if (ok) {
+        setUndo(null);
+        setToast({ variant: 'info', message: `Undo: slot ${String(undo.slotId)} restored` });
+        void loadState();
+      } else {
+        setToast({ variant: 'error', message: 'Undo failed' });
+      }
     } catch {
       setToast({ variant: 'error', message: 'Undo failed' });
     }
@@ -973,32 +1029,24 @@ export function SidebarApp() {
     });
   }, []);
 
-  // ─── Footer navigation (Problem 1) ───────────────────────────────────
+  // ─── Footer navigation (Problem 1 / B11b) ────────────────────────────
 
   const openPage = useCallback(async (path: string) => {
     const url = chrome.runtime.getURL(path);
     try {
-      // Bug 1: let background open the page, reusing an already-open tab
+      // Main path (B11b): let the background open the page so it can reuse an
+      // already-open tab. No chrome.tabs access happens here.
       await sendMessage('OPEN_PAGE', { url });
     } catch {
-      // Fallback: local chrome.tabs reuse logic (same hash-insensitive rule)
+      // Fallback (B11b): the background is unavailable (SW not yet woken /
+      // extension reloading / restricted context). This is REQUIRED behaviour —
+      // without it the footer buttons would silently do nothing. It reuses the
+      // shared open-or-reuse logic and obtains its chrome.tabs operations from
+      // the single helper below, so the fallback cannot be re-duplicated.
       try {
-        if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
-          await openOrReusePage({
-            queryAllTabs: async () => {
-              const tabs = await chrome.tabs.query({});
-              return tabs.map((t) => ({ id: t.id ?? -1, url: t.url ?? '' }));
-            },
-            activateTab: async (tabId) => {
-              await chrome.tabs.update(tabId, { active: true });
-            },
-            navigateTab: async (tabId, targetUrl) => {
-              await chrome.tabs.update(tabId, { url: targetUrl });
-            },
-            createTab: async (targetUrl) => {
-              await chrome.tabs.create({ url: targetUrl });
-            },
-          }, url);
+        const api = createChromePageOpenApi();
+        if (api) {
+          await openOrReusePage(api, url);
         }
       } catch {
         // Silently fail

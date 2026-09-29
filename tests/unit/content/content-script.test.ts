@@ -169,6 +169,54 @@ describe('T11: Content script — document_start, single rewrite protocol', () =
     });
   });
 
+  describe('T32 (B9-7) — favicon fallback channel enforces the protocol allowlist', () => {
+    it('should NOT create a link for javascript: / file: / blob: favicons', async () => {
+      const { applyRewrite, appliedUrls } = await import('@content/index');
+
+      for (const dangerous of ['javascript:alert(1)', 'file:///etc/passwd', 'blob:https://x/y']) {
+        vi.clearAllMocks();
+        mockQuerySelectorAll.mockReturnValue([]);
+        appliedUrls.clear();
+        mockLocation.href = `https://example.com/t32-${encodeURIComponent(dangerous)}`;
+
+        applyRewrite(undefined, dangerous);
+
+        expect(mockCreateElement, `createElement must not run for ${dangerous}`).not.toHaveBeenCalled();
+        expect(mockHeadAppendChild, `head must not receive a link for ${dangerous}`).not.toHaveBeenCalled();
+      }
+    });
+
+    it('should NOT create a link for data:text/html (script-capable data URI)', async () => {
+      const { applyRewrite, appliedUrls } = await import('@content/index');
+      vi.clearAllMocks();
+      mockQuerySelectorAll.mockReturnValue([]);
+      appliedUrls.clear();
+      mockLocation.href = 'https://example.com/t32-html';
+
+      applyRewrite(undefined, 'data:text/html,<script>alert(1)</script>');
+
+      expect(mockCreateElement).not.toHaveBeenCalled();
+      expect(mockHeadAppendChild).not.toHaveBeenCalled();
+    });
+
+    it('should STILL create a link for http(s) and data:image favicons', async () => {
+      const { applyRewrite, appliedUrls } = await import('@content/index');
+
+      for (const safe of ['https://cdn.example.com/fav.ico', 'http://cdn.example.com/fav.png', 'data:image/png;base64,abc']) {
+        vi.clearAllMocks();
+        mockQuerySelectorAll.mockReturnValue([]);
+        mockCreateElement.mockReturnValue({ rel: '', href: '', type: '' });
+        appliedUrls.clear();
+        mockLocation.href = `https://example.com/t32-safe-${encodeURIComponent(safe)}`;
+
+        applyRewrite(undefined, safe);
+
+        expect(mockCreateElement, `expected a link for ${safe}`).toHaveBeenCalledWith('link');
+        expect(mockHeadAppendChild, `expected appendChild for ${safe}`).toHaveBeenCalled();
+      }
+    });
+  });
+
   describe('Error path — protected URLs and invalid messages', () => {
     it('should not report navigation for protected URLs', async () => {
       const { reportNavigation, reportedUrls } = await import('@content/index');
@@ -207,6 +255,65 @@ describe('T11: Content script — document_start, single rewrite protocol', () =
 
       applyRewrite('Title Only');
       expect(mockTitle.value).toBe('Title Only');
+    });
+  });
+
+  // ─── B13 (T14): bounded URL sets ─────────────────────────────────────────
+  describe('B13 — reported/applied URL sets are bounded', () => {
+    it('should keep reportedUrls bounded at 100 after 200 distinct URLs', async () => {
+      const { reportNavigation, reportedUrls } = await import('@content/index');
+      reportedUrls.clear();
+
+      for (let i = 0; i < 200; i++) {
+        mockLocation.href = `https://example.com/page-${String(i)}`;
+        reportNavigation('pushstate');
+      }
+
+      expect(reportedUrls.size).toBeLessThanOrEqual(100);
+    });
+
+    it('should keep appliedUrls bounded at 100 after 200 distinct URLs', async () => {
+      const { applyRewrite, appliedUrls } = await import('@content/index');
+      appliedUrls.clear();
+
+      for (let i = 0; i < 200; i++) {
+        mockLocation.href = `https://example.com/applied-${String(i)}`;
+        applyRewrite(`Title ${String(i)}`);
+      }
+
+      expect(appliedUrls.size).toBeLessThanOrEqual(100);
+    });
+
+    it('should preserve once-per-URL dedup within capacity (B13 must not change semantics)', async () => {
+      const { reportNavigation, reportedUrls } = await import('@content/index');
+      reportedUrls.clear();
+      mockSendMessage.mockClear();
+
+      mockLocation.href = 'https://example.com/dedup';
+      reportNavigation('initial');
+      reportNavigation('initial');
+      reportNavigation('pushstate');
+
+      // Still exactly one report for the same URL
+      expect(mockSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('should evict the OLDEST entry first (LRU order)', async () => {
+      const { reportNavigation, reportedUrls } = await import('@content/index');
+      reportedUrls.clear();
+
+      mockLocation.href = 'https://example.com/first';
+      reportNavigation('initial');
+
+      // Push the first URL out by filling past the cap
+      for (let i = 0; i < 100; i++) {
+        mockLocation.href = `https://example.com/fill-${String(i)}`;
+        reportNavigation('pushstate');
+      }
+
+      // The oldest URL must have been evicted; the newest must still be present
+      expect(reportedUrls.has('https://example.com/first')).toBe(false);
+      expect(reportedUrls.has('https://example.com/fill-99')).toBe(true);
     });
   });
 });

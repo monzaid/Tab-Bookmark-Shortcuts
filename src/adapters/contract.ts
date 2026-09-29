@@ -175,20 +175,40 @@ export interface BrowserAdapter {
 // ─── Browser Detection ───────────────────────────────────────────────────────
 
 export function detectBrowserType(): BrowserType {
+  const g = globalThis as Record<string, unknown>;
+  const browserNs = g.browser as Record<string, unknown> | undefined;
+  const chromeNs = g.chrome as Record<string, unknown> | undefined;
+
+  // ── Primary judgement: API shape ──────────────────────────────────────────
+  // Capability presence cannot be spoofed by a user-agent string, and it does
+  // not drift as browser version numbers change. `sidebarAction` is the
+  // Firefox-only surface; `sidePanel` is the Chromium-only one.
+  const hasSidebarAction =
+    (browserNs?.sidebarAction as Record<string, unknown> | undefined) !== undefined ||
+    (chromeNs?.sidebarAction as Record<string, unknown> | undefined) !== undefined;
+  const hasSidePanel =
+    (chromeNs?.sidePanel as Record<string, unknown> | undefined) !== undefined ||
+    (browserNs?.sidePanel as Record<string, unknown> | undefined) !== undefined;
+
+  if (hasSidebarAction && !hasSidePanel) return 'firefox';
+
+  if (hasSidePanel) {
+    // Edge exposes `chrome.sidePanel` too; it is distinguished from Chrome by
+    // its UA token, but the API shape alone still proves the Chromium family.
+    if (typeof navigator !== 'undefined' && /edg\//.test(navigator.userAgent.toLowerCase())) {
+      return 'edge';
+    }
+    return 'chrome';
+  }
+
+  // ── Fallback: user-agent (only when no API shape is recognisable) ─────────
+  if (hasSidebarAction) return 'firefox';
+
   if (typeof navigator !== 'undefined') {
     const ua = navigator.userAgent.toLowerCase();
     if (ua.includes('edg/') || ua.includes('edge/')) return 'edge';
     if (ua.includes('firefox/') || ua.includes('fxios/')) return 'firefox';
   }
-  // Check for browser-specific APIs
-  if (typeof globalThis !== 'undefined') {
-    const g = globalThis as Record<string, unknown>;
-    if (g.browser && (g.browser as Record<string, unknown>).runtime) {
-      // Could be Firefox with webextension-polyfill
-      if (typeof (g.browser as Record<string, unknown>).sidebarAction !== 'undefined') {
-        return 'firefox';
-      }
-    }
-  }
+
   return 'chrome';
 }

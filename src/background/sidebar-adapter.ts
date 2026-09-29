@@ -100,7 +100,7 @@ export class SidebarAdapter {
 export class ToolbarActionHandler {
   private sidebarAdapter: SidebarAdapter;
 
-  constructor(private adapter: BrowserAdapter) {
+  constructor(adapter: BrowserAdapter) {
     this.sidebarAdapter = new SidebarAdapter(adapter);
   }
 
@@ -112,23 +112,25 @@ export class ToolbarActionHandler {
   async initialize(): Promise<void> {
     await this.sidebarAdapter.configure();
 
-    const browserType = this.adapter.getBrowserType();
+    // B11c / T18: this class deliberately does NOT register an
+    // `OPEN_SIDEBAR` runtime.onMessage listener any more.
+    //
+    // It used to, via a bare `msg?.action === 'OPEN_SIDEBAR'` check. Once
+    // `OPEN_SIDEBAR` became a first-class action on `WorkerOrchestrator.routeMessage`,
+    // keeping this listener would mean TWO onMessage handlers both responding to
+    // the same message — `sidePanel.open` firing twice and `sendResponse` racing.
+    // The action now has exactly one owner (the orchestrator); this handler
+    // remains as the capability/configuration layer plus an explicit programmatic
+    // entry point via `handleToolbarClick`.
+  }
 
-    if (browserType !== 'firefox') {
-      // Chromium: listen for action click to open side panel
-      // The action.onClicked event fires when no popup is set
-      // We use runtime message from action or commands
-      this.adapter.runtime.onMessage((message, _sender, sendResponse) => {
-        const msg = message as { action?: string };
-        if (msg?.action === 'OPEN_SIDEBAR') {
-          void this.sidebarAdapter.openSidebar().then((result) => {
-            sendResponse(result);
-          });
-          return true;
-        }
-        return false;
-      });
-    }
+  /**
+   * Expose the shared `SidebarAdapter` so callers can probe capability or call
+   * `openSidebar()` directly. Configuration itself happens in `initialize()`;
+   * `OPEN_SIDEBAR` message routing belongs to `WorkerOrchestrator`.
+   */
+  getSidebarAdapter(): SidebarAdapter {
+    return this.sidebarAdapter;
   }
 
   /**

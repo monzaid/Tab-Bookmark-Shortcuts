@@ -20,12 +20,75 @@ import { RuleService } from './rule-service';
 import { IconService } from './icon-service';
 import { ImportExportService } from './import-export-service';
 import { DiagnosticsService, NotificationService, IncognitoService } from './diagnostics-service';
-import type { AnyRequest } from '@shared/messages';
+import { SidebarAdapter } from './sidebar-adapter';
+import type { AnyRequest, ResponseBase } from '@shared/messages';
 import { openOrReusePage } from '@shared/open-page';
-import { isProtectedUrl } from '@shared/url-utils';
+import { isProtectedUrl, isSafeFaviconProtocol, validateRegex } from '@shared/url-utils';
 import { applyFieldsToTab } from './apply-fields';
 
 // ─── Worker Orchestrator ─────────────────────────────────────────────────────
+
+/** T21: how long a routed action may take before the caller gets a TIMEOUT. */
+export const RESPONSE_TIMEOUT_MS = 10_000;
+
+/**
+ * T21: the action whitelist used to decide whether the message port is claimed.
+ *
+ * N4 (known limitation): the `AnyRequest['action']` annotation catches typos and
+ * removed actions, but it does NOT force this list to stay in sync with the union
+ * — adding a new contract action without adding it here compiles fine and the
+ * action would simply be rejected as unknown. Kept as an explicit list rather
+ * than derived from the switch because the guard runs before dispatch.
+ */
+const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
+  'SAVE_SLOT',
+  'SWITCH_SLOT',
+  'NEXT_MATCH',
+  'NEXT_MATCH_SLOT',
+  'PREV_MATCH_SLOT',
+  'NEXT_MATCH_CURRENT',
+  'PREV_MATCH_CURRENT',
+  'UNBIND_SLOT',
+  'UNDO_SAVE',
+  'CREATE_RULE',
+  'UPDATE_RULE',
+  'DELETE_RULE',
+  'APPLY_RULE_TO_TAB',
+  'SET_TAB_OVERRIDE',
+  'REMOVE_TAB_OVERRIDE',
+  'SET_GLOBAL_STRATEGY',
+  'SET_SLOT_STRATEGY',
+  'UPDATE_SLOT_UI_MARKER',
+  'UPDATE_SLOT_URL',
+  'RECOVERY_OPEN_URL',
+  'RECOVERY_NEXT_MATCH',
+  'RECOVERY_DISMISS',
+  'EXPORT_CONFIG',
+  'IMPORT_PREVIEW',
+  'IMPORT_COMMIT',
+  'GET_DIAGNOSTICS',
+  'CLEAR_DIAGNOSTICS',
+  'EXPORT_DIAGNOSTICS',
+  'GET_STATE',
+  'GET_DASHBOARD',
+  'GET_COMMANDS',
+  'GET_CANDIDATES',
+  'DOWNLOAD_ICON',
+  'UPLOAD_ICON',
+  'OPEN_PAGE',
+  'OPEN_SIDEBAR',
+  'CONFLICT_CANCEL',
+  'CONFLICT_OVERWRITE',
+  'CONTENT_NAVIGATION',
+  'CONTENT_READY',
+];
+
+/** T21: whether an inbound message carries an action this worker handles. */
+function isKnownAction(message: unknown): boolean {
+  if (!message || typeof message !== 'object') return false;
+  const action = (message as { action?: unknown }).action;
+  return typeof action === 'string' && KNOWN_ACTIONS.includes(action as AnyRequest['action']);
+}
 
 export class WorkerOrchestrator {
   readonly repo: StorageRepository;
@@ -37,6 +100,8 @@ export class WorkerOrchestrator {
   readonly diagnostics: DiagnosticsService;
   readonly notifications: NotificationService;
   readonly incognito: IncognitoService;
+  /** B11c / T18: sole owner of OPEN_SIDEBAR capability + opening. */
+  readonly sidebarAdapter: SidebarAdapter;
 
   private initialized = false;
 
@@ -50,6 +115,7 @@ export class WorkerOrchestrator {
     this.diagnostics = new DiagnosticsService(adapter, this.repo);
     this.notifications = new NotificationService(adapter);
     this.incognito = new IncognitoService(adapter);
+    this.sidebarAdapter = new SidebarAdapter(adapter);
   }
 
   /**
@@ -235,9 +301,33 @@ export class WorkerOrchestrator {
   // ─── Message Routing ───────────────────────────────────────────────────
 
   private handleMessage(message: unknown, sender: { tab?: { id?: number; url?: string } }, sendResponse: (response?: unknown) => void): boolean {
-    // Async handling — return true to indicate async response
-    void this.routeMessage(message, sender).then(sendResponse).catch(() => {
-      sendResponse({ success: false, errorCode: 'INTERNAL_ERROR', message: 'Worker error' });
+    // T21: only claim the message port for actions we actually handle.
+    //
+    // Returning `true` unconditionally kept every message channel open forever,
+    // so an unrecognised action was silently unanswered and the caller waited
+    // indefinitely. Unknown actions now get an explicit reply and release the port.
+    if (!isKnownAction(message)) {
+      sendResponse({ success: false, errorCode: 'UNKNOWN_ACTION', message: 'Unknown action' });
+      return false;
+    }
+
+    let settled = false;
+    const respond = (response?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sendResponse(response);
+    };
+
+    // T21: response budget. A write that overruns is NOT cancelled (side effects
+    // must not be interrupted); the caller is simply told the answer is late so
+    // the UI cannot hang forever.
+    const timer = setTimeout(() => {
+      respond({ success: false, errorCode: 'TIMEOUT', message: 'Worker response timed out' });
+    }, RESPONSE_TIMEOUT_MS);
+
+    void this.routeMessage(message, sender).then(respond).catch(() => {
+      respond({ success: false, errorCode: 'INTERNAL_ERROR', message: 'Worker error' });
     });
     return true;
   }
@@ -281,13 +371,29 @@ export class WorkerOrchestrator {
       case 'PREV_MATCH_CURRENT':
         return this.slotService.prevMatchForUrl(request.payload.url);
 
-      case 'UNBIND_SLOT':
-        await this.slotService.unbindSlot(request.payload.slotId);
+      case 'UNBIND_SLOT': {
+        const result = await this.slotService.unbindSlot(request.payload.slotId);
+        if (!result.success) {
+          return {
+            success: false,
+            errorCode: result.errorCode,
+            message: result.message,
+          };
+        }
         return { success: true };
+      }
 
       case 'UNDO_SAVE': {
-        // Undo is handled by re-saving previous state (simplified)
-        await this.slotService.unbindSlot(request.payload.slotId);
+        // B2: restore the pre-overwrite snapshot when one is available and
+        // unexpired; otherwise degrade to deletion. Failures are propagated.
+        const result = await this.slotService.restoreSlot(request.payload.slotId);
+        if (!result.success) {
+          return {
+            success: false,
+            errorCode: result.errorCode,
+            message: result.message,
+          };
+        }
         return { success: true };
       }
 
@@ -297,7 +403,9 @@ export class WorkerOrchestrator {
         try {
           return await this.ruleService.createRule(request.payload);
         } catch (e) {
-          return { success: false, errorCode: 'INTERNAL', message: String(e) };
+          // B10: annotate as ResponseBase so an unknown errorCode is a COMPILE error.
+          const failure: ResponseBase = { success: false, errorCode: 'INTERNAL_ERROR', message: String(e) };
+          return failure;
         }
       }
 
@@ -318,7 +426,8 @@ export class WorkerOrchestrator {
           const { ruleId, expectedUpdatedAt, ...updates } = payload;
           return await this.ruleService.updateRule(ruleId, updates, expectedUpdatedAt);
         } catch (e) {
-          return { success: false, errorCode: 'INTERNAL', message: String(e) };
+          const failure: ResponseBase = { success: false, errorCode: 'INTERNAL_ERROR', message: String(e) };
+          return failure;
         }
       }
 
@@ -326,7 +435,8 @@ export class WorkerOrchestrator {
         try {
           return await this.ruleService.deleteRule(request.payload.ruleId);
         } catch (e) {
-          return { success: false, errorCode: 'INTERNAL', message: String(e) };
+          const failure: ResponseBase = { success: false, errorCode: 'INTERNAL_ERROR', message: String(e) };
+          return failure;
         }
       }
 
@@ -334,9 +444,21 @@ export class WorkerOrchestrator {
         return this.ruleService.applyToTab(request.payload.ruleId, request.payload.tabId);
 
       // ─── Tab override ────────────────────────────────────────────────
-      case 'SET_TAB_OVERRIDE':
+      case 'SET_TAB_OVERRIDE': {
+        // T37 (B9-10): reject an unsafe favicon at the WRITE layer. The compute
+        // layer already filters before delivery (no XSS), but persisting a
+        // `javascript:` value leaves dirty state that re-surfaces on every read.
+        const overrideFavicon = request.payload.favicon;
+        if (overrideFavicon && !isSafeFaviconProtocol(overrideFavicon.value)) {
+          return {
+            success: false,
+            errorCode: 'INVALID_REQUEST',
+            message: 'Unsupported favicon protocol. Use http(s) or a data: image.',
+          };
+        }
         await this.ruleService.setTabOverride(request.payload.tabId, request.payload.title, request.payload.favicon);
         return { success: true };
+      }
 
       case 'REMOVE_TAB_OVERRIDE':
         await this.ruleService.removeTabOverride(request.payload.tabId);
@@ -376,6 +498,19 @@ export class WorkerOrchestrator {
         const sync = await this.repo.getSyncState();
         const slot = sync.slots.find((s) => s.id === request.payload.slotId);
         if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', message: 'Slot not found' };
+
+        // T37 (B9-10): same write-layer gate as SET_TAB_OVERRIDE — a slot icon
+        // flows into `link.href` via the slot tier, so it must not be persisted
+        // unless it clears the allowlist.
+        const markerIcon = request.payload.uiMarker.icon;
+        if (markerIcon && !isSafeFaviconProtocol(markerIcon.value)) {
+          return {
+            success: false,
+            errorCode: 'INVALID_REQUEST',
+            message: 'Unsupported favicon protocol. Use http(s) or a data: image.',
+          };
+        }
+
         const saved = await this.repo.saveSlot(
           { ...slot, uiMarker: request.payload.uiMarker, updatedAt: new Date().toISOString() },
           version,
@@ -395,6 +530,21 @@ export class WorkerOrchestrator {
         const sync = await this.repo.getSyncState();
         const slot = sync.slots.find((s) => s.id === request.payload.slotId);
         if (!slot) return { success: false, errorCode: 'SLOT_NOT_FOUND', message: 'Slot not found' };
+
+        // T30 (B4-2): a regex supplied here is persisted and later compiled on
+        // every navigation, so it must clear the same ReDoS gate as the rule
+        // paths. Previously this endpoint was a validation bypass.
+        if (request.payload.matchType === 'regex') {
+          const check = validateRegex(request.payload.url);
+          if (!check.valid) {
+            return {
+              success: false,
+              errorCode: check.error === 'REGEX_TOO_LONG' ? 'RULE_REGEX_TOO_LONG' : 'REGEX_RISK',
+              message: check.message ?? 'Invalid regex pattern',
+            };
+          }
+        }
+
         const updatedSlot = {
           ...slot,
           urlMatch: { type: request.payload.matchType, value: request.payload.url },
@@ -545,6 +695,9 @@ export class WorkerOrchestrator {
 
       // ─── Conflict overwrite (Problem 1 fix: use captured tab data) ──
       case 'CONFLICT_OVERWRITE': {
+        // B2 → T24: the undo snapshot is now captured inside
+        // `slotService.saveSlotFromData` (the single shared capture point for
+        // every overwrite route), so this handler no longer duplicates it.
         const version = this.repo.getConfigVersion();
         const overwriteResult = await this.slotService.saveSlotFromData(
           request.payload.slotId,
@@ -575,6 +728,23 @@ export class WorkerOrchestrator {
           }
         }
         return overwriteResult;
+      }
+
+      // ─── Sidebar opening (B11c / T18) ─────────────────────────────────
+      // Sole handler for OPEN_SIDEBAR: the former listener in
+      // ToolbarActionHandler has been removed, so this action cannot be
+      // double-handled.
+      case 'OPEN_SIDEBAR': {
+        const result = await this.sidebarAdapter.openSidebar(request.payload?.windowId);
+        if (!result.success) {
+          const failure: ResponseBase = {
+            success: false,
+            errorCode: 'BROWSER_API_ERROR',
+            message: result.message,
+          };
+          return failure;
+        }
+        return { success: true };
       }
 
       // ─── Content script messages ─────────────────────────────────────

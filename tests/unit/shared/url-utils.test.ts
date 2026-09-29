@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   normalizeUrl,
   urlsMatch,
   validateRegex,
   trialRunRegex,
   matchesUrl,
+  getCompiledRegex,
   sortCandidates,
   sortRulesByPriority,
   selectWinningRule,
@@ -12,6 +15,7 @@ import {
   isProtectedUrl,
   wildcardToRegex,
 } from '@shared/url-utils';
+import { PROTECTED_URL_PREFIXES } from '@shared/protected-prefixes.generated';
 import type { TabCandidate, PageRule, UrlMatchDefinition } from '@shared/types';
 
 describe('T3: URL, regex, sorting, and conflict pure functions', () => {
@@ -87,6 +91,133 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
     it('should trial run regex against test URL', () => {
       expect(trialRunRegex('github\\.com', 'https://github.com/user')).toBe(true);
       expect(trialRunRegex('gitlab\\.com', 'https://github.com/user')).toBe(false);
+    });
+  });
+
+  // ─── B4 (T4): ReDoS hardening + compiled regex cache ───────────────────────
+  describe('ReDoS protection — catastrophic backtracking must be rejected', () => {
+    it('should reject nested quantifier (a+)+$', () => {
+      const result = validateRegex('(a+)+$');
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('REGEX_RISK');
+    });
+
+    it('should reject repeated group quantifier (.*)*', () => {
+      const result = validateRegex('(.*)*');
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('REGEX_RISK');
+    });
+
+    it('should reject nested quantifier (x+)+', () => {
+      const result = validateRegex('(x+)+');
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('REGEX_RISK');
+    });
+
+    it('should reject nested star quantifier (a*)*', () => {
+      const result = validateRegex('(a*)*');
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe('REGEX_RISK');
+    });
+
+    it('should NOT reject a safe specific regex', () => {
+      const result = validateRegex('^https://example\\.com/.*$');
+      expect(result.valid).toBe(true);
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should NOT reject a regex with a bounded group quantifier', () => {
+      // (abc)+ has no inner quantifier — not catastrophic
+      expect(validateRegex('(abc)+').valid).toBe(true);
+      expect(validateRegex('https://github\\.com/user/.*').valid).toBe(true);
+    });
+
+    // ─── T29 (B4-1): bounded OUTER quantifier must not launder the blow-up ───
+    it('T29: should reject a bounded outer quantifier wrapping an unbounded inner one', () => {
+      // `(a+){10}` and `(.*a){20}` are just as explosive as `(a+)+` — a bounded
+      // repeat of an unbounded inner quantifier still multiplies the search space.
+      const bounded = ['^(a+){10}$', '^(.*a){20}$', '^(a*){5,}$', '^(x+){2,7}$'];
+      for (const pattern of bounded) {
+        const result = validateRegex(pattern);
+        expect(result.valid, `expected ${pattern} to be rejected`).toBe(false);
+        expect(result.error, `expected ${pattern} to be REGEX_RISK`).toBe('REGEX_RISK');
+      }
+    });
+
+    it('T29: must not regress the true positives already covered', () => {
+      for (const pattern of ['(a+)+$', '(.*)*', '(x+)+', '(a*)*']) {
+        expect(validateRegex(pattern).error, pattern).toBe('REGEX_RISK');
+      }
+    });
+
+    it('T36: should reject POLYNOMIAL backtracking from adjacent unbounded groups', () => {
+      // `(a+)(a+)(a+)(a+)(a+)$` has no nesting, so the nested-quantifier check
+      // missed it entirely — the real engine took ~113s on 200 chars.
+      const polynomial = [
+        '^(a+)(a+)(a+)(a+)(a+)$',
+        '(a+)(a+)(a+)b',
+        '^(.*)(.*)x$',
+        '^(a+)(b+)c$',
+      ];
+      for (const pattern of polynomial) {
+        const result = validateRegex(pattern);
+        expect(result.valid, `expected ${pattern} to be rejected`).toBe(false);
+        expect(result.error, `expected ${pattern} to be REGEX_RISK`).toBe('REGEX_RISK');
+      }
+    });
+
+    it('T36: must NOT over-block a single quantified group or non-adjacent groups', () => {
+      // One unbounded group is linear; groups separated by a literal are fine.
+      const safe = [
+        '^(a+)$',
+        '^(a+)b$',
+        '^(a+)b(a+)$',
+        '^(abc){10}$',
+        '^(a{2,3}){4}$',
+        '^https://example\\.com/.*$',
+      ];
+      for (const pattern of safe) {
+        expect(validateRegex(pattern).valid, `expected ${pattern} to stay valid`).toBe(true);
+      }
+    });
+
+    it('T29: must still accept patterns whose group body has no unbounded quantifier', () => {
+      // Bounded inner + bounded outer is finite.
+      expect(validateRegex('^(abc){10}$').valid).toBe(true);
+      expect(validateRegex('^(a{2,3}){4}$').valid).toBe(true);
+    });
+  });
+
+  describe('Compiled regex cache — reuse and safe failure', () => {
+    it('should return the same RegExp instance for the same pattern', () => {
+      const first = getCompiledRegex('^https://cache-test\\.example/.*$');
+      const second = getCompiledRegex('^https://cache-test\\.example/.*$');
+      expect(first).not.toBeNull();
+      expect(second).toBe(first);
+    });
+
+    it('should return null for an invalid pattern without throwing', () => {
+      expect(getCompiledRegex('(')).toBeNull();
+      expect(getCompiledRegex('(')).toBeNull();
+    });
+
+    it('should keep matchesUrl semantics for regex definitions', () => {
+      const def: UrlMatchDefinition = { type: 'regex', value: 'https://cache-semantics\\.example/.*' };
+      expect(matchesUrl('https://cache-semantics.example/a/b', def)).toBe(true);
+      expect(matchesUrl('https://other.example/a/b', def)).toBe(false);
+      // Second call hits the cache — must be identical
+      expect(matchesUrl('https://cache-semantics.example/a/b', def)).toBe(true);
+    });
+
+    it('should return false for invalid regex definition without throwing', () => {
+      const def: UrlMatchDefinition = { type: 'regex', value: '(' };
+      expect(matchesUrl('https://example.com', def)).toBe(false);
+    });
+
+    it('should not throw on a catastrophic pattern (must be safely testable)', () => {
+      // Even if a dangerous pattern slipped past validation, matching must not hang.
+      const def: UrlMatchDefinition = { type: 'regex', value: '^safe$' };
+      expect(matchesUrl('anything', def)).toBe(false);
     });
   });
 
@@ -213,6 +344,47 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
       const newMatch: UrlMatchDefinition = { type: 'exact', value: 'https://example.com/page' };
       const result = detectRuleConflict(newMatch, existing, 'r1');
       expect(result.level).toBe('none');
+    });
+  });
+
+  describe('B14 — protected prefixes come from the generated single source', () => {
+    it('should consume the generated PROTECTED_URL_PREFIXES constant', () => {
+      expect(Array.isArray(PROTECTED_URL_PREFIXES)).toBe(true);
+      expect(PROTECTED_URL_PREFIXES.length).toBeGreaterThan(0);
+    });
+
+    it('should return true for EVERY generated prefix', () => {
+      for (const prefix of PROTECTED_URL_PREFIXES) {
+        expect(isProtectedUrl(`${prefix}some-page`)).toBe(true);
+      }
+    });
+
+    it('should have exactly the expected protected prefixes (no drift)', () => {
+      expect([...PROTECTED_URL_PREFIXES].sort()).toEqual(
+        [
+          'about:',
+          'brave://',
+          'chrome-extension://',
+          'chrome://',
+          'edge://',
+          'moz-extension://',
+          'opera://',
+          'vivaldi://',
+        ].sort(),
+      );
+    });
+
+    it('should have NO hardcoded duplicate prefix list in either consumer', () => {
+      // Drift guard: both consumers must reference the generated module instead
+      // of re-declaring the prefix array locally.
+      const consumers = ['src/shared/url-utils.ts', 'src/content/index.ts'];
+      for (const rel of consumers) {
+        const text = readFileSync(resolve(process.cwd(), rel), 'utf-8');
+        expect(text).toContain('protected-prefixes');
+        // A local array literal containing the sentinel prefix means a stale copy.
+        const declaresOwnList = /(?:const|let|var)\s+\w*PROTECTED\w*\s*=\s*\[/.test(text);
+        expect(declaresOwnList).toBe(false);
+      }
     });
   });
 

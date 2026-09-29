@@ -14,6 +14,15 @@ import type {
 } from './contract';
 import { AdapterError } from './contract';
 
+/**
+ * Local storage key holding the user's explicit incognito authorization (B5).
+ * Absent / non-`true` → incognito tabs are treated as inaccessible.
+ */
+export const INCOGNITO_AUTHORIZED_KEY = 'incognitoAuthorized';
+
+/** Bundled icon used when a notification is created without a usable iconUrl (T20). */
+const NOTIFICATION_FALLBACK_ICON = 'icons/icon-128.png';
+
 function normalizeTab(tab: chrome.tabs.Tab): NormalizedTab {
   return {
     id: tab.id ?? -1,
@@ -265,12 +274,26 @@ export function createChromeAdapter(browserType: BrowserType = 'chrome'): Browse
     notifications: {
       async create(notificationId, options): Promise<string> {
         try {
+          // T20: an empty iconUrl is rejected on some platforms, which makes the
+          // notification silently disappear. Fall back to the bundled extension
+          // icon so there is always a valid, extension-local image.
+          let iconUrl = options.iconUrl ?? '';
+          if (!iconUrl) {
+            try {
+              iconUrl = chrome.runtime.getURL(NOTIFICATION_FALLBACK_ICON);
+            } catch {
+              // getURL unavailable — proceed without an icon rather than failing
+              // the whole notification.
+              iconUrl = '';
+            }
+          }
+
           return await new Promise<string>((resolve, reject) => {
             chrome.notifications.create(notificationId, {
               type: options.type as chrome.notifications.TemplateType,
               title: options.title,
               message: options.message,
-              iconUrl: options.iconUrl ?? '',
+              iconUrl,
             }, (id) => {
               if (chrome.runtime.lastError) {
                 reject(new Error(chrome.runtime.lastError.message));
@@ -309,12 +332,19 @@ export function createChromeAdapter(browserType: BrowserType = 'chrome'): Browse
     incognito: {
       async isAllowed(): Promise<boolean> {
         try {
-          // Check if extension is allowed in incognito
-          const manifest = chrome.runtime.getManifest();
-          // In MV3, incognito access is determined by the "incognito" manifest key
-          // Default is "spanning" which means allowed
-          return (manifest as Record<string, unknown>).incognito !== 'not_allowed';
+          // B5: incognito access is gated on an explicit, persisted USER
+          // authorization flag — never on the manifest key.
+          //
+          // Reading `manifest.incognito !== 'not_allowed'` was structurally
+          // incapable of returning anything but `true`: the MV3 default is
+          // "spanning", so an extension that never declares the key was
+          // silently treated as fully authorized. The manifest now declares
+          // `not_allowed` (see manifests/base.json) and this method fails
+          // closed unless the user has actively granted access.
+          const data = await chrome.storage.local.get(INCOGNITO_AUTHORIZED_KEY);
+          return data[INCOGNITO_AUTHORIZED_KEY] === true;
         } catch {
+          // Storage unavailable / API missing → fail closed.
           return false;
         }
       },

@@ -243,6 +243,13 @@ export interface OpenPageRequest extends RequestBase {
   payload: { url: string };
 }
 
+// Sidebar opening (B11c / T18). Previously this action existed only as a bare
+// string literal inside sidebar-adapter.ts, outside the message contract.
+export interface OpenSidebarRequest extends RequestBase {
+  action: 'OPEN_SIDEBAR';
+  payload?: { windowId?: number };
+}
+
 // Update slot URL and match type (Problem 8: double-click URL edit)
 export interface UpdateSlotUrlRequest extends RequestBase {
   action: 'UPDATE_SLOT_URL';
@@ -318,6 +325,7 @@ export type UiRequest =
   | DownloadIconRequest
   | UploadIconRequest
   | OpenPageRequest
+  | OpenSidebarRequest
   | UpdateSlotUrlRequest
   | NextMatchCurrentRequest
   | PrevMatchCurrentRequest

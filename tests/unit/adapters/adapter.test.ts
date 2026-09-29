@@ -1,6 +1,77 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
-import { AdapterError } from '@adapters/contract';
+import { AdapterError, detectBrowserType } from '@adapters/contract';
+
+describe('T23: browser detection prefers API shape over user-agent', () => {
+  const originalChrome = (globalThis as { chrome?: unknown }).chrome;
+  const originalBrowser = (globalThis as { browser?: unknown }).browser;
+  const originalNavigator = globalThis.navigator;
+
+  function reset(): void {
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+    (globalThis as { browser?: unknown }).browser = originalBrowser;
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: originalNavigator });
+  }
+
+  afterEach(() => {
+    reset();
+  });
+
+  const withUA = (ua: string): void => {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: ua } });
+  };
+
+  it('should detect firefox from the sidebarAction API', () => {
+    withUA('Mozilla/5.0 (X11; Linux) Gecko/20100101 Firefox/121.0');
+    (globalThis as { chrome?: unknown }).chrome = { runtime: {}, sidebarAction: {} };
+
+    expect(detectBrowserType()).toBe('firefox');
+  });
+
+  it('should detect chrome from the sidePanel API', () => {
+    withUA('Mozilla/5.0 (Windows NT 10.0) Chrome/120.0 Safari/537.36');
+    (globalThis as { chrome?: unknown }).chrome = { runtime: {}, sidePanel: {} };
+
+    expect(detectBrowserType()).toBe('chrome');
+  });
+
+  it('should detect edge from the edge-specific API surface', () => {
+    withUA('Mozilla/5.0 (Windows NT 10.0) Chrome/120.0 Safari/537.36');
+    (globalThis as { chrome?: unknown }).chrome = { runtime: {}, sidePanel: {} };
+    (globalThis as { browser?: unknown }).browser = { runtime: {}, sidebarAction: undefined, edge: true };
+
+    // Edge has no dedicated global marker in practice; with only sidePanel
+    // present it must still resolve to a Chromium-family type.
+    const result = detectBrowserType();
+    expect(['chrome', 'edge']).toContain(result);
+  });
+
+  it('should NOT be fooled by a spoofed Firefox user-agent when sidePanel is present', () => {
+    // UA claims Firefox, but the API shape is Chromium-only.
+    withUA('Mozilla/5.0 (X11; Linux) Gecko/20100101 Firefox/121.0');
+    (globalThis as { chrome?: unknown }).chrome = { runtime: {}, sidePanel: {} };
+    (globalThis as { browser?: unknown }).browser = undefined;
+
+    expect(detectBrowserType()).not.toBe('firefox');
+    expect(detectBrowserType()).toBe('chrome');
+  });
+
+  it('should fall back to the user-agent when no API shape is recognisable', () => {
+    withUA('Mozilla/5.0 (X11; Linux) Gecko/20100101 Firefox/121.0');
+    (globalThis as { chrome?: unknown }).chrome = { runtime: {} };
+    (globalThis as { browser?: unknown }).browser = undefined;
+
+    expect(detectBrowserType()).toBe('firefox');
+  });
+
+  it('should default to chrome when nothing is recognisable', () => {
+    withUA('SomeUnknownAgent/1.0');
+    (globalThis as { chrome?: unknown }).chrome = { runtime: {} };
+    (globalThis as { browser?: unknown }).browser = undefined;
+
+    expect(detectBrowserType()).toBe('chrome');
+  });
+});
 
 describe('T5: WebExtensions adapter contract and mock', () => {
   const adapter = createMockAdapter();

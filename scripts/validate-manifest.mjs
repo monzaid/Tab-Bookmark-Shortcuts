@@ -60,6 +60,15 @@ function validateSourceManifests(basePath, overlayPath, browser) {
     errors.push(`base.json: Expected 21 commands, found ${commandCount}`);
   }
 
+  // B5: incognito must be declared EXPLICITLY as not_allowed.
+  // Omitting the key means "spanning" by default, which previously made
+  // incognito.isAllowed() unconditionally return true (silent over-permission).
+  if (!Object.prototype.hasOwnProperty.call(base, 'incognito')) {
+    errors.push('base.json: Must explicitly declare "incognito" (missing key implies allowed)');
+  } else if (base.incognito !== 'not_allowed') {
+    errors.push(`base.json: "incognito" must be "not_allowed", found ${JSON.stringify(base.incognito)}`);
+  }
+
   // Validate browser-specific constraints
   if (browser === 'firefox') {
     if (overlay.side_panel) {
@@ -154,6 +163,13 @@ function validateManifest(manifest, browser) {
   // Host permissions
   if (!manifest.host_permissions?.includes('<all_urls>')) {
     errors.push('Missing host_permission: <all_urls>');
+  }
+
+  // B5: the merged artifact must carry the explicit not_allowed declaration.
+  if (!Object.prototype.hasOwnProperty.call(manifest, 'incognito')) {
+    errors.push('incognito key is required (must be "not_allowed")');
+  } else if (manifest.incognito !== 'not_allowed') {
+    errors.push(`incognito must be "not_allowed", found ${JSON.stringify(manifest.incognito)}`);
   }
 
   // Browser-specific fields

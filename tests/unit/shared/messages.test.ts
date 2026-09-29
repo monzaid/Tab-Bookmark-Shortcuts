@@ -59,6 +59,7 @@ function handleUiAction(request: UiRequest): string {
     case 'DOWNLOAD_ICON': return 'download-icon';
     case 'UPLOAD_ICON': return 'upload-icon';
     case 'OPEN_PAGE': return 'open-page';
+    case 'OPEN_SIDEBAR': return 'open-sidebar';
     case 'UPDATE_SLOT_URL': return 'update-slot-url';
     case 'NEXT_MATCH_CURRENT': return 'next-match-current';
     case 'PREV_MATCH_CURRENT': return 'prev-match-current';

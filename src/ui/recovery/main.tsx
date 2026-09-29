@@ -1,15 +1,16 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RecoveryWindow } from './App';
+import { getMessageClient } from '@ui/shared/message-client';
 
 // Import styles
 import '@ui/styles/base.css';
 import '@ui/styles/recovery.css';
 
-// ─── Message client ─────────────────────────────────────────────────────────
+// ─── Message client (B11: all cross-context messaging goes through here) ────
 
 async function sendMessage(action: string, payload?: unknown): Promise<unknown> {
-  return chrome.runtime.sendMessage({ requestId: `recovery-${Date.now()}`, action, payload });
+  return getMessageClient().sendRaw(action, payload);
 }
 
 // ─── Parse URL params ───────────────────────────────────────────────────────

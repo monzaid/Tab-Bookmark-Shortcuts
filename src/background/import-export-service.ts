@@ -21,6 +21,7 @@ import type {
   ImportSlotDecision,
 } from '@shared/types';
 import { DEFAULT_STRATEGY } from '@shared/types';
+import { validateRegex } from '@shared/url-utils';
 
 // ─── Import/Export Service ───────────────────────────────────────────────────
 
@@ -102,6 +103,14 @@ export class ImportExportService {
     const importedStrategy = (data.globalStrategy as MatchStrategy) ?? DEFAULT_STRATEGY;
     const importedVersion = (data.configVersion as number) ?? 0;
 
+    // B4: static regex safety check on every imported regex (never executed here).
+    // Reject tier = invalid syntax, too long, or catastrophic backtracking.
+    // Warn tier (broad match) stays importable — `valid` remains true for it.
+    const regexRejection = this.findUnsafeRegex(importedSlots, importedRules);
+    if (regexRejection) {
+      return { success: false, errorCode: 'IMPORT_INVALID', message: regexRejection };
+    }
+
     // Get current state for conflict detection
     const currentSync = await this.repo.getSyncState();
 
@@ -150,6 +159,18 @@ export class ImportExportService {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Cannot commit invalid preview' };
     }
 
+    // T31 (B4-3): re-run the regex safety gate HERE rather than trusting
+    // `preview.valid`. The preview is caller-supplied and may have been built by
+    // hand or mutated between PREVIEW and COMMIT, so the earlier check is only a
+    // UX guard — this is the enforcement point (closes the TOCTOU window).
+    const commitRejection = this.findUnsafeRegex(
+      [...preview.newSlots, ...preview.slotConflicts.map((c) => c.imported)],
+      preview.rules,
+    );
+    if (commitRejection) {
+      return { success: false, errorCode: 'IMPORT_INVALID', message: commitRejection };
+    }
+
     const result = await this.repo.writeSync(expectedVersion, (state) => {
       // Apply slot decisions
       for (const conflict of slotDecisions) {
@@ -188,6 +209,52 @@ export class ImportExportService {
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────
+
+  /**
+   * B4: Statically validate every imported regex definition and return a
+   * locating error message for the first unsafe one, or `null` when all are safe.
+   *
+   * `validateRegex` is the single entry point: `valid === false` is the reject
+   * tier (REGEX_TOO_LONG / REGEX_INVALID / catastrophic REGEX_RISK); the broad
+   * -match warning surfaces as `valid === true` + `error === 'REGEX_RISK'`.
+   * Patterns are never executed here, so preview itself cannot be ReDoS'd.
+   */
+  private findUnsafeRegex(slots: unknown[], rules: unknown[]): string | null {
+    const extractRegex = (entry: unknown): string | null => {
+      if (typeof entry !== 'object' || entry === null) return null;
+      const match = (entry as { urlMatch?: unknown }).urlMatch;
+      if (typeof match !== 'object' || match === null) return null;
+      const { type, value } = match as { type?: unknown; value?: unknown };
+      return type === 'regex' && typeof value === 'string' ? value : null;
+    };
+
+    const reason = (check: { message?: string; error?: string }): string =>
+      check.message ?? check.error ?? 'rejected';
+
+    for (const rule of rules) {
+      const pattern = extractRegex(rule);
+      if (pattern === null) continue;
+      const check = validateRegex(pattern);
+      if (!check.valid) {
+        const id = (rule as { id?: unknown }).id;
+        const label = typeof id === 'string' ? id : '(unknown)';
+        return `Rule "${label}" has an unsafe regex: ${reason(check)}`;
+      }
+    }
+
+    for (const slot of slots) {
+      const pattern = extractRegex(slot);
+      if (pattern === null) continue;
+      const check = validateRegex(pattern);
+      if (!check.valid) {
+        const id = (slot as { id?: unknown }).id;
+        const label = typeof id === 'number' ? String(id) : '(unknown)';
+        return `Slot ${label} has an unsafe regex: ${reason(check)}`;
+      }
+    }
+
+    return null;
+  }
 
   /**
    * Apply a decision to all conflicts (select all import / all existing).

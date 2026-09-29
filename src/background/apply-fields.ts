@@ -39,17 +39,52 @@ function applyRewriteInPage(payload: any): void {
       // briefly for it so the favicon genuinely lands instead of being dropped.
       const headOf = (): HTMLElement | null => (document as unknown as { head: HTMLElement | null }).head;
 
+      // Last line of defence (B9). This function is SERIALIZED into the page
+      // context, so it cannot import from @shared/url-utils — the allowlist is
+      // mirrored inline and must stay semantically identical to
+      // `isSafeFaviconProtocol` (http/https, or data: limited to bitmap images).
+      const SAFE_PROTOCOLS = ['http:', 'https:'];
+      const SAFE_DATA_IMAGE_TYPES = [
+        'image/png',
+        'image/jpeg',
+        'image/jpg',
+        'image/gif',
+        'image/webp',
+        'image/bmp',
+        'image/x-icon',
+        'image/vnd.microsoft.icon',
+      ];
+      const isSafeFavicon = (v: string): boolean => {
+        const trimmed = v.trim().toLowerCase();
+        if (!trimmed) return false;
+        const normalized = trimmed.replace(/^[\u0000-\u0020]+/, '');
+        if (!normalized) return false;
+        if (SAFE_PROTOCOLS.some((p) => normalized.indexOf(p) === 0)) return true;
+        if (normalized.indexOf('data:') === 0) {
+          const body = normalized.slice(5);
+          const comma = body.indexOf(',');
+          const meta = comma >= 0 ? body.slice(0, comma) : body;
+          const mediaType = meta.split(';')[0].trim();
+          return SAFE_DATA_IMAGE_TYPES.indexOf(mediaType) !== -1;
+        }
+        return false;
+      };
+
       const applyFavicon = (): void => {
         const head = headOf();
         if (!head) return;
         // Remove ALL existing favicon links (icon, shortcut icon, apple-touch-icon, etc.)
         document.querySelectorAll('link[rel*="icon"]').forEach((l: Element) => { l.remove(); });
         if (favicon === null) return; // cleared — no replacement link
+        // B9: never write a dangerous protocol into link.href.
+        // `payload` is `any`, so coerce explicitly before the allowlist check.
+        const faviconValue: string = String(favicon);
+        if (!isSafeFavicon(faviconValue)) return; // existing links removed, no new one added
         // Create new link
         const link = document.createElement('link');
         link.rel = 'icon';
         link.type = 'image/png';
-        link.href = favicon;
+        link.href = faviconValue;
         head.appendChild(link);
       };
 

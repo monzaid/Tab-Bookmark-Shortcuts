@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MessageClient, getErrorMessage } from '@ui/shared/message-client';
+import type { DomainErrorCode } from '@shared/types';
 
 // Mock chrome APIs
 const mockSendMessage = vi.fn();
@@ -129,6 +130,78 @@ describe('T22: UI message client, optimistic conflict, external change', () => {
       if (!result.success) {
         expect(result.errorCode).toBe('BROWSER_API_ERROR');
         expect(result.message).not.toContain('Extension context');
+      }
+    });
+
+    it('T22: every DomainErrorCode has a non-empty English user-facing message', () => {
+      // Exhaustive at runtime, not just by the Record<> type: catches a code
+      // added to the union with an empty/placeholder string.
+      const codes: DomainErrorCode[] = [
+        'INVALID_REQUEST', 'UNKNOWN_ACTION',
+        'CONFIG_CONFLICT', 'STALE_VERSION',
+        'SLOT_NOT_FOUND', 'SLOT_EMPTY', 'SLOT_ALREADY_BOUND',
+        'NO_MATCH', 'NO_CANDIDATES',
+        'RECOVERY_EXPIRED', 'RECOVERY_NOT_FOUND',
+        'RULE_CONFLICT_BLOCK', 'RULE_CONFLICT_WARN', 'DUPLICATE_RULE',
+        'VERSION_CONFLICT', 'RULE_INVALID_REGEX', 'RULE_REGEX_TOO_LONG',
+        'RULE_PROTECTED_URL', 'RULE_NOT_FOUND',
+        'ICON_TOO_LARGE', 'ICON_INVALID_FORMAT', 'ICON_DOWNLOAD_FAILED',
+        'IMPORT_INVALID', 'IMPORT_VERSION_MISMATCH', 'IMPORT_CANCELLED',
+        'INCOGNITO_NOT_AUTHORIZED', 'PROTECTED_PAGE',
+        'BROWSER_API_ERROR', 'TAB_NOT_FOUND', 'WINDOW_NOT_FOUND', 'COMMAND_NOT_FOUND',
+        'INTERNAL_ERROR', 'TIMEOUT',
+      ];
+
+      for (const code of codes) {
+        const message = getErrorMessage(code);
+        expect(message, `missing message for ${code}`).toBeTruthy();
+        expect(message.length, `too short for ${code}`).toBeGreaterThan(10);
+        // T22: language policy is English (matches message-client's mapping).
+        // A CJK character here means an un-translated string leaked in.
+        expect(/[\u4e00-\u9fff]/.test(message), `non-English message for ${code}`).toBe(false);
+      }
+    });
+
+    it('T22: has a safe fallback for an unknown code', () => {
+      const message = getErrorMessage('NOT_A_REAL_CODE' as never);
+      expect(message).toBeTruthy();
+      expect(message).toContain('unexpected');
+    });
+
+    it('B11: sendRaw passes the action/payload through and tracks configVersion', async () => {
+      mockSendMessage.mockResolvedValue({ result: { success: true }, configVersion: 7 });
+
+      const response = await client.sendRaw('OPEN_PAGE', { url: 'chrome-extension://x/p.html' });
+
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'OPEN_PAGE',
+          payload: { url: 'chrome-extension://x/p.html' },
+        })
+      );
+      // Response shape must be the RAW wire object (pages destructure `response.result ?? response`)
+      expect(response).toEqual({ result: { success: true }, configVersion: 7 });
+      expect(client.getConfigVersion()).toBe(7);
+    });
+
+    it('B11: sendRaw forwards configVersion only when provided', async () => {
+      mockSendMessage.mockResolvedValue({ success: true });
+
+      await client.sendRaw('SAVE_SLOT', { slotId: 1 });
+      expect(mockSendMessage.mock.lastCall?.[0]).not.toHaveProperty('configVersion');
+
+      await client.sendRaw('SET_GLOBAL_STRATEGY', { strategy: 'A' }, 3);
+      expect(mockSendMessage.mock.lastCall?.[0]).toHaveProperty('configVersion', 3);
+    });
+
+    it('B11: constructing the client without chrome.storage does not throw', () => {
+      const original = globalThis.chrome;
+      try {
+        // Simulate a context where only runtime is available
+        (globalThis as unknown as { chrome: unknown }).chrome = { runtime: { sendMessage: vi.fn() } };
+        expect(() => new MessageClient()).not.toThrow();
+      } finally {
+        (globalThis as unknown as { chrome: unknown }).chrome = original;
       }
     });
 

@@ -52,6 +52,7 @@ _context/
 .context/
 .worktree/
 .codebuddy/
+_context-output/evidence/
 
 # ── Scratch / dev output files (root-level verification logs) ─
 # Historical TDD / build / lint verification transcripts kept locally.

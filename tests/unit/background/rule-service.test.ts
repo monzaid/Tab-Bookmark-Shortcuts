@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { RuleService } from '@background/rule-service';
@@ -222,6 +222,337 @@ describe('T10: Page rules, field override computation, manual apply', () => {
       if (result.success) {
         expect(result.rule.priority).toBe(100);
       }
+    });
+  });
+
+  // ─── B9 (T9): favicon protocol allowlist ─────────────────────────────────
+  //
+  // The security goal is to close the DANGEROUS-PROTOCOL injection surface
+  // (javascript: / file: / blob: / data:text/html), NOT to ban remote favicons.
+  // http(s) values MUST keep flowing — three existing integration suites assert
+  // that behaviour (rule-delivery-real-dom / rule-apply-persistence /
+  // rule-delivery-robust).
+  describe('B9 — resolveSlotField favicon protocol allowlist', () => {
+    const slotId = 1;
+    const tabId = 7;
+
+    async function seedSlot(favicon: string): Promise<void> {
+      adapter.setTabs([
+        { id: tabId, windowId: 1, index: 0, url: 'https://example.com/page', title: 'Example', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+      ]);
+
+      const saved = await repo.saveSlot(
+        {
+          id: slotId,
+          urlMatch: { type: 'exact', value: 'https://example.com/page' },
+          strategy: 'inherit',
+          uiMarker: {},
+          titleSnapshot: 'Example',
+          faviconSnapshot: favicon,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        },
+        0,
+      );
+      expect(saved.success).toBe(true);
+      await repo.setBinding({ slotId, tabId, windowId: 1, boundAt: '2026-01-01T00:00:00Z' });
+    }
+
+    it('should reject javascript: favicon (favicon === null)', async () => {
+      await seedSlot('javascript:alert(1)');
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBeNull();
+    });
+
+    it('should reject file: favicon', async () => {
+      await seedSlot('file:///etc/passwd');
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBeNull();
+    });
+
+    it('should reject data:text/html favicon', async () => {
+      await seedSlot('data:text/html,<script>alert(1)</script>');
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBeNull();
+    });
+
+    it('should reject blob: favicon', async () => {
+      await seedSlot('blob:https://example.com/1234');
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBeNull();
+    });
+
+    it('should ALLOW an https favicon (remote icon link must keep working)', async () => {
+      await seedSlot('https://remote.example/icon.png');
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBe('https://remote.example/icon.png');
+    });
+
+    it('should ALLOW an http favicon', async () => {
+      await seedSlot('http://remote.example/icon.png');
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBe('http://remote.example/icon.png');
+    });
+
+    it('should ALLOW a data:image/png favicon', async () => {
+      await seedSlot('data:image/png;base64,iVBORw0KGgo=');
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBe('data:image/png;base64,iVBORw0KGgo=');
+    });
+
+    it('should reject data:image/svg+xml (script-capable SVG vector)', async () => {
+      await seedSlot('data:image/svg+xml,<svg onload=alert(1)>');
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBeNull();
+    });
+
+    it('B7b: reapplyToMatchingTabs reads sync state only once regardless of tab count', async () => {
+      // 6 tabs all matching the same rule
+      adapter.setTabs(
+        Array.from({ length: 6 }, (_, i) => ({
+          id: i + 1,
+          windowId: 1,
+          index: i,
+          url: `https://multi.example/p${String(i)}`,
+          title: `Tab ${String(i)}`,
+          favIconUrl: '',
+          active: i === 0,
+          incognito: false,
+          status: 'complete' as const,
+        })),
+      );
+
+      const created = await service.createRule({
+        urlMatch: { type: 'regex', value: '^https://multi\\.example/' },
+        mode: 'manual',
+        priority: 5,
+        title: 'Multi',
+      }, 0);
+      expect(created.success).toBe(true);
+
+      // `getSyncState()` is memory-cached, so IPC counting cannot observe the
+      // fan-out — count the state READ itself, which is what B7b collapses.
+      const stateReadSpy = vi.spyOn(repo, 'getSyncState');
+
+      // Drive the private reapply path directly (same cast style as other tests).
+      await (
+        service as unknown as {
+          reapplyToMatchingTabs: (r: unknown, clearOnEmpty?: boolean) => Promise<void>;
+        }
+      ).reapplyToMatchingTabs({ urlMatch: { type: 'regex', value: '^https://multi\\.example/' } });
+
+      // 6 matching tabs must NOT cause 6 state reads.
+      expect(stateReadSpy.mock.calls.length).toBeLessThanOrEqual(2);
+      stateReadSpy.mockRestore();
+    });
+
+    it('B12: reapplyToMatchingTabs delivers to every matching tab with bounded concurrency', async () => {
+      const TAB_COUNT = 20;
+      adapter.setTabs(
+        Array.from({ length: TAB_COUNT }, (_, i) => ({
+          id: i + 1,
+          windowId: 1,
+          index: i,
+          url: `https://shard.example/p${String(i)}`,
+          title: `Tab ${String(i)}`,
+          favIconUrl: '',
+          active: i === 0,
+          incognito: false,
+          status: 'complete' as const,
+        })),
+      );
+
+      // An AUTO rule is required: the field chain only considers `mode === 'auto'`,
+      // and without computed title/favicon applyFieldsToTab skips delivery entirely.
+      const created = await service.createRule({
+        urlMatch: { type: 'regex', value: '^https://shard\\.example/' },
+        mode: 'auto',
+        priority: 5,
+        title: 'Sharded',
+      }, 0);
+      expect(created.success).toBe(true);
+      if (!created.success) return;
+
+      // Snapshot the real executeScript, then instrument concurrency on top.
+      const originalExecute = adapter.scripting.executeScript.bind(adapter.scripting);
+      let inFlight = 0;
+      let peak = 0;
+      const delivered: number[] = [];
+
+      adapter.scripting.executeScript = async (options) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        delivered.push(options.target.tabId);
+        try {
+          await new Promise((r) => setTimeout(r, 1));
+          return await originalExecute(options);
+        } finally {
+          inFlight--;
+        }
+      };
+
+      try {
+        await (
+          service as unknown as {
+            reapplyToMatchingTabs: (r: unknown, clearOnEmpty?: boolean) => Promise<void>;
+          }
+        ).reapplyToMatchingTabs(created.rule);
+      } finally {
+        adapter.scripting.executeScript = originalExecute;
+      }
+
+      // Every matching tab must be delivered exactly once
+      expect(new Set(delivered).size).toBe(TAB_COUNT);
+      expect(delivered).toHaveLength(TAB_COUNT);
+      // Concurrency must be bounded (serial baseline would peak at 1)
+      expect(peak).toBeGreaterThan(1);
+      expect(peak).toBeLessThanOrEqual(8);
+    });
+
+    it('B7b: computeFields output is unchanged by the pure-function refactor', async () => {
+      adapter.setTabs([
+        { id: 1, windowId: 1, index: 0, url: 'https://equiv.example/page', title: 'Site', favIconUrl: 'https://site.example/f.ico', active: true, incognito: false, status: 'complete' },
+      ]);
+
+      await service.createRule({
+        urlMatch: { type: 'exact', value: 'https://equiv.example/page' },
+        mode: 'auto',
+        priority: 5,
+        title: 'Rule Title',
+        favicon: { type: 'url', value: 'https://rule.example/icon.png' },
+      }, 0);
+
+      // Rule tier
+      const ruleOnly = await service.computeFields(1, 'https://equiv.example/page', 'Site', '');
+      expect(ruleOnly).toMatchObject({
+        title: 'Rule Title',
+        favicon: 'https://rule.example/icon.png',
+        titleSource: 'rule',
+        faviconSource: 'rule',
+      });
+
+      // Override tier must beat the rule tier
+      await service.setTabOverride(1, 'Override Title', { type: 'upload', value: 'data:image/png;base64,OVR' });
+      const withOverride = await service.computeFields(1, 'https://equiv.example/page', 'Site', '');
+      expect(withOverride).toMatchObject({
+        title: 'Override Title',
+        favicon: 'data:image/png;base64,OVR',
+        titleSource: 'override',
+        faviconSource: 'override',
+      });
+
+      // A tab with NO override and NO matching rule falls back to the site tier
+      const otherTab = await service.computeFields(99, 'https://other.example/none', 'Site', '');
+      expect(otherTab).toMatchObject({ title: null, favicon: null, titleSource: 'site', faviconSource: 'site' });
+    });
+
+    it('T33 (B9-8): the OVERRIDE tier must reject a dangerous favicon protocol', async () => {
+      adapter.setTabs([
+        { id: 1, windowId: 1, index: 0, url: 'https://example.com/page', title: 'Example', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+      ]);
+
+      for (const dangerous of ['javascript:alert(1)', 'file:///etc/passwd', 'blob:https://x/y', 'data:text/html,<script>alert(1)</script>']) {
+        await service.setTabOverride(1, undefined, { type: 'url', value: dangerous });
+        const computed = await service.computeFields(1, 'https://example.com/page', 'Site', '');
+        expect(computed.favicon, `override must not deliver ${dangerous}`).toBeNull();
+        expect(computed.faviconSource).toBe('site');
+      }
+    });
+
+    it('T33 (B9-8): the RULE tier must reject a dangerous favicon protocol', async () => {
+      adapter.setTabs([
+        { id: 1, windowId: 1, index: 0, url: 'https://bad-rule.example/page', title: 'Example', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+      ]);
+
+      // Write the rule directly so we isolate the COMPUTE layer from the
+      // write-layer rejection asserted separately below.
+      const sync = await repo.getSyncState();
+      await repo.writeSync(sync.configVersion, (state) => {
+        state.rules.push({
+          id: 'bad-rule',
+          urlMatch: { type: 'exact', value: 'https://bad-rule.example/page' },
+          mode: 'auto',
+          priority: 5,
+          favicon: { type: 'url', value: 'javascript:alert(1)' },
+          enabled: true,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        });
+        return state;
+      });
+
+      const computed = await service.computeFields(1, 'https://bad-rule.example/page', 'Site', '');
+      expect(computed.favicon, 'rule tier must not deliver a javascript: favicon').toBeNull();
+      expect(computed.faviconSource).toBe('site');
+    });
+
+    it('T33 (B9-8): createRule/updateRule must reject a dangerous favicon value', async () => {
+      const created = await service.createRule({
+        urlMatch: { type: 'exact', value: 'https://write.example/page' },
+        mode: 'auto',
+        priority: 1,
+        title: 'T',
+        favicon: { type: 'url', value: 'javascript:alert(1)' },
+      }, 0);
+      expect(created.success, 'createRule must reject a dangerous favicon').toBe(false);
+
+      const direct = await service.createRule({
+        urlMatch: { type: 'exact', value: 'https://write2.example/page' },
+        mode: 'auto',
+        priority: 1,
+        favicon: { type: 'url', value: 'https://safe.example/i.png' },
+      }, 0);
+      expect(direct.success).toBe(true);
+      if (direct.success) {
+        const updated = await service.updateRule(direct.rule.id, {
+          favicon: { type: 'url', value: 'data:text/html,<script>alert(1)</script>' },
+        });
+        expect(updated.success, 'updateRule must reject a dangerous favicon').toBe(false);
+      }
+    });
+
+    it('T33 (B9-8): a SAFE override/rule favicon is still delivered', async () => {
+      adapter.setTabs([
+        { id: 1, windowId: 1, index: 0, url: 'https://safe-tier.example/page', title: 'Example', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+      ]);
+      await service.createRule({
+        urlMatch: { type: 'exact', value: 'https://safe-tier.example/page' },
+        mode: 'auto',
+        priority: 5,
+        favicon: { type: 'url', value: 'https://cdn.example.com/i.png' },
+      }, 0);
+
+      const ruleTier = await service.computeFields(1, 'https://safe-tier.example/page', 'Site', '');
+      expect(ruleTier.favicon).toBe('https://cdn.example.com/i.png');
+      expect(ruleTier.faviconSource).toBe('rule');
+
+      await service.setTabOverride(1, undefined, { type: 'upload', value: 'data:image/png;base64,AAA' });
+      const overrideTier = await service.computeFields(1, 'https://safe-tier.example/page', 'Site', '');
+      expect(overrideTier.favicon).toBe('data:image/png;base64,AAA');
+      expect(overrideTier.faviconSource).toBe('override');
+    });
+
+    it('should reject a dangerous protocol coming from uiMarker.icon.value too', async () => {
+      adapter.setTabs([
+        { id: tabId, windowId: 1, index: 0, url: 'https://example.com/page', title: 'Example', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+      ]);
+      await repo.saveSlot(
+        {
+          id: slotId,
+          urlMatch: { type: 'exact', value: 'https://example.com/page' },
+          strategy: 'inherit',
+          uiMarker: { icon: { type: 'url', value: 'javascript:alert(1)' } },
+          titleSnapshot: 'Example',
+          faviconSnapshot: '',
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        },
+        0,
+      );
+      await repo.setBinding({ slotId, tabId, windowId: 1, boundAt: '2026-01-01T00:00:00Z' });
+
+      const computed = await service.computeFields(tabId, 'https://example.com/page', 'Site', '');
+      expect(computed.favicon).toBeNull();
     });
   });
 });

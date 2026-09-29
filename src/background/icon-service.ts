@@ -23,6 +23,136 @@ export const MAX_OUTPUT_DIMENSION = 128; // px
 export const MAX_OUTPUT_SIZE = 64 * 1024; // 64KB
 export const VALID_FORMATS = ['image/png', 'image/jpeg', 'image/webp'];
 
+/** B8: hard ceiling on how long a remote icon fetch may block the service worker. */
+export const ICON_FETCH_TIMEOUT_MS = 8_000;
+/** B8: protocols permitted for remote icon downloads (everything else is denied). */
+const ALLOWED_FETCH_PROTOCOLS = ['http:', 'https:'];
+
+/** B8: hosts that serve cloud instance metadata and must never be fetched. */
+const METADATA_HOSTS = new Set([
+  'metadata.azure.com',
+  'metadata.google.internal',
+  '100.100.100.200',
+  '168.63.129.16',
+]);
+
+/** B8: RFC 1918 / loopback / link-local / unspecified check for dotted IPv4. */
+function isPrivateIpv4(host: string): boolean {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!v4) return false;
+
+  const octets = v4.slice(1).map(Number);
+  if (octets.some((o) => o > 255)) return false;
+  const [a, b] = octets;
+
+  if (a === 0) return true; // "this network" / unspecified
+  if (a === 10) return true; // RFC 1918
+  if (a === 127) return true; // loopback
+  if (a === 169 && b === 254) return true; // link-local
+  if (a === 172 && b >= 16 && b <= 31) return true; // RFC 1918
+  if (a === 192 && b === 168) return true; // RFC 1918
+  return false;
+}
+
+/** Turn the two 16-bit halves of an embedded IPv4 into dotted-quad form. */
+function hextetsToIpv4(highHextet: string, lowHextet: string): string {
+  const high = parseInt(highHextet, 16);
+  const low = parseInt(lowHextet, 16);
+  return [String((high >> 8) & 0xff), String(high & 0xff), String((low >> 8) & 0xff), String(low & 0xff)].join('.');
+}
+
+/**
+ * B8: recover the embedded IPv4 from an IPv6 address that carries one.
+ *
+ * Three forms embed an IPv4 and all three reach the same host, so all three must
+ * be normalised before the IPv4 deny rules run (T35 — the v4-translated and
+ * NAT64 variants previously slipped straight through the SSRF guard):
+ *
+ * 1. IPv4-mapped `::ffff:a.b.c.d` / `::ffff:aabb:ccdd`
+ * 2. IPv4-translated `::ffff:0:a.b.c.d` / `::ffff:0:aabb:ccdd`
+ * 3. NAT64 well-known prefix `64:ff9b::a.b.c.d` / `64:ff9b::aabb:ccdd`
+ */
+function extractMappedIpv4(host: string): string | null {
+  const dotted = /^(?:::ffff:|::ffff:0:|64:ff9b::)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(host);
+  if (dotted) return dotted[1];
+
+  const hex = /^(?:::ffff:|::ffff:0:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (hex) return hextetsToIpv4(hex[1], hex[2]);
+
+  return null;
+}
+
+/**
+ * B8: detect loopback / link-local / private-network / metadata hosts (SSRF defence).
+ * Hand-written — no `is-ip` / `ipaddr.js` dependency is permitted.
+ */
+function isPrivateOrLoopbackHost(hostname: string): boolean {
+  // Strip the URL bracket form and a trailing FQDN dot.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+
+  // mDNS names resolve on the local network.
+  if (host.endsWith('.local')) return true;
+
+  // Cloud metadata services.
+  if (METADATA_HOSTS.has(host)) return true;
+
+  // IPv4-mapped IPv6 must be judged by the IPv4 it embeds.
+  const mapped = extractMappedIpv4(host);
+  if (mapped) return isPrivateIpv4(mapped);
+
+  // IPv6 loopback / unspecified.
+  if (host === '::1' || host === '::') return true;
+
+  // Compare the first hextet numerically so whole /10 blocks are covered — a
+  // literal `fe80:` prefix test misses fe90::–febf:: entirely.
+  const firstHextet = /^([0-9a-f]{1,4}):/.exec(host);
+  if (firstHextet) {
+    const value = parseInt(firstHextet[1], 16);
+    if (value >= 0xfe80 && value <= 0xfebf) return true; // fe80::/10 link-local
+    if (value >= 0xfec0 && value <= 0xfeff) return true; // fec0::/10 site-local
+    if ((value & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+  }
+
+  return isPrivateIpv4(host);
+}
+
+/**
+ * B8: returns `null` when the URL is safe to fetch, or a failure result.
+ * Enforced BEFORE any network call so the SSRF surface stays closed.
+ */
+function rejectUnsafeFetchUrl(url: string): { success: false; errorCode: string; message: string } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return {
+      success: false,
+      errorCode: 'ICON_DOWNLOAD_FAILED',
+      message: 'Invalid icon URL. You can retry manually.',
+    };
+  }
+
+  if (!ALLOWED_FETCH_PROTOCOLS.includes(parsed.protocol)) {
+    return {
+      success: false,
+      errorCode: 'ICON_DOWNLOAD_FAILED',
+      message: `Blocked icon protocol: ${parsed.protocol}. Only http/https are allowed.`,
+    };
+  }
+
+  if (isPrivateOrLoopbackHost(parsed.hostname)) {
+    return {
+      success: false,
+      errorCode: 'ICON_DOWNLOAD_FAILED',
+      message: 'Blocked private/loopback icon host. You can retry manually.',
+    };
+  }
+
+  return null;
+}
+
 // ─── Result Types ────────────────────────────────────────────────────────────
 
 export type IconProcessResult =
@@ -94,15 +224,53 @@ export class IconService {
       return { success: true, dataUri: local.iconCache[cacheKey], cacheKey };
     }
 
+    // B8: reject non-http(s) and private/loopback hosts BEFORE any network call.
+    const rejected = rejectUnsafeFetchUrl(url);
+    if (rejected) return rejected;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, ICON_FETCH_TIMEOUT_MS);
+
     try {
-      // Fetch the icon
-      const response = await fetch(url, { mode: 'cors' });
+      // Fetch the icon with a hard timeout so a hung server cannot pin the SW.
+      const response = await fetch(url, { mode: 'cors', signal: controller.signal });
+
+      // T28 (B8-6): re-validate the FINAL URL. The pre-flight check only saw the
+      // requested URL; a redirect can land on a private/loopback host, and the
+      // browser reports that hop in `response.url`. Without this, the SSRF guard
+      // is bypassable by a single 302.
+      if (response.url && response.url !== url) {
+        const redirected = rejectUnsafeFetchUrl(response.url);
+        if (redirected) {
+          return {
+            success: false,
+            errorCode: 'ICON_DOWNLOAD_FAILED',
+            message: 'Blocked redirect to a private/loopback icon host. You can retry manually.',
+          };
+        }
+      }
+
       if (!response.ok) {
         return {
           success: false,
           errorCode: 'ICON_DOWNLOAD_FAILED',
           message: `Download failed: HTTP ${response.status}`,
         };
+      }
+
+      // B8: short-circuit on an advertised oversize body instead of downloading it.
+      const contentLength = response.headers.get('content-length');
+      if (contentLength !== null) {
+        const advertised = Number(contentLength);
+        if (Number.isFinite(advertised) && advertised > MAX_UPLOAD_SIZE) {
+          return {
+            success: false,
+            errorCode: 'ICON_TOO_LARGE',
+            message: 'Downloaded icon exceeds 2MB limit',
+          };
+        }
       }
 
       const blob = await response.blob();
@@ -116,7 +284,7 @@ export class IconService {
         };
       }
 
-      // Validate size
+      // Validate size (second line of defence for servers that omit Content-Length)
       if (blob.size > MAX_UPLOAD_SIZE) {
         return {
           success: false,
@@ -132,12 +300,14 @@ export class IconService {
       await this.repo.setIconCache(cacheKey, dataUri);
 
       return { success: true, dataUri, cacheKey };
-    } catch (e) {
+    } catch {
       return {
         success: false,
         errorCode: 'ICON_DOWNLOAD_FAILED',
         message: 'Failed to download icon. You can retry manually.',
       };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
