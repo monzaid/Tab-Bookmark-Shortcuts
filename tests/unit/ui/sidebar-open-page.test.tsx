@@ -119,4 +119,22 @@ describe('Bug 1 (sidebar): footer buttons reuse already-open tabs', () => {
     expect(tabsUpdate).toHaveBeenCalledWith(5, { url: `${SETTINGS_URL}#diagnostics` });
     expect(tabsCreate).not.toHaveBeenCalled();
   });
+
+  it('should route Import/Export to the settings import-export section (U4 / P1)', async () => {
+    runtimeSendMessage.mockImplementation((msg: { action: string }) =>
+      Promise.resolve(msg.action === 'OPEN_PAGE' ? { success: true } : STATE_RESPONSE),
+    );
+
+    await renderSidebar();
+    fireEvent.click(screen.getByRole('button', { name: 'Import or export' }));
+
+    await waitFor(() => {
+      expect(runtimeSendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'OPEN_PAGE',
+          payload: { url: `${SETTINGS_URL}#import-export` },
+        }),
+      );
+    });
+  });
 });

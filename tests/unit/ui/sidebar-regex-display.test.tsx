@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { SidebarApp } from '@ui/sidebar/App';
 
 /**
@@ -83,5 +83,61 @@ describe('Sidebar regex display uses shared matchesUrl', () => {
       expect(screen.getByText('Original')).toBeInTheDocument();
     });
     expect(screen.queryByText('Regex Rule Title')).not.toBeInTheDocument();
+  });
+
+  // ── U8 (P9) — appended only (GE3); the two cases above are untouched ──────
+  it('should word the auto-conversion hint in English, with no CJK mixed in', async () => {
+    render(<SidebarApp />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Add to global rules' })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add to global rules' }));
+
+    const urlInput = await screen.findByLabelText('Match URL');
+    fireEvent.change(urlInput, { target: { value: '*.example.com/*' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'Regex' }));
+
+    const hint = await screen.findByRole('status');
+    expect(hint.textContent).toContain('Auto-converted to regex');
+    expect(/[\u4e00-\u9fff]/.test(hint.textContent)).toBe(false);
+  });
+
+  // ── U8 (P12) — appended only (GE3) ────────────────────────────────────────
+  it('should keep a toast visible for 5s (the shared default), not 3s', async () => {
+    vi.useFakeTimers();
+    try {
+      const { act } = await import('@testing-library/react');
+      mockSendMessage.mockResolvedValue(makeState('https://example\\.com/.*', 'Regex Rule Title'));
+      mockSendMessage.mockImplementation((message: { action?: string }) =>
+        Promise.resolve(
+          message.action === 'SAVE_SLOT'
+            ? { result: { success: true } }
+            : makeState('https://example\\.com/.*', 'Regex Rule Title'),
+        ),
+      );
+
+      render(<SidebarApp />);
+
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await Promise.resolve(); });
+
+      fireEvent.click(screen.getAllByRole('button', { name: 'Save to slot 1' })[0]);
+
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await Promise.resolve(); });
+
+      expect(screen.getAllByRole('alert').some((a) => a.textContent.includes('Saved to slot 1'))).toBe(true);
+
+      // Still there at 3s — the pre-fix `duration={3000}` would have dismissed it.
+      act(() => { vi.advanceTimersByTime(3000); });
+      expect(screen.getAllByRole('alert').some((a) => a.textContent.includes('Saved to slot 1'))).toBe(true);
+
+      // Gone after the shared 5000ms default.
+      act(() => { vi.advanceTimersByTime(2500); });
+      expect(screen.queryAllByRole('alert').some((a) => a.textContent.includes('Saved to slot 1'))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

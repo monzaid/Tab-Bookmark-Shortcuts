@@ -34,7 +34,6 @@ export default defineConfig({
         settings: resolve(__dirname, 'src/ui/settings/index.html'),
         recovery: resolve(__dirname, 'src/ui/recovery/index.html'),
         'import-preview': resolve(__dirname, 'src/ui/import-preview/index.html'),
-        'candidate-selector': resolve(__dirname, 'src/ui/candidate-selector/index.html'),
         'conflict-confirm': resolve(__dirname, 'src/ui/conflict-confirm/index.html'),
       },
       output: {

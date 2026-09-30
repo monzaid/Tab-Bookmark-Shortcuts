@@ -71,6 +71,16 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
       });
     });
 
+    // ── U8 (P9) — appended only (GE3); every case above is untouched ────────
+    it('should use the English "Not set" placeholder for commands without a shortcut', async () => {
+      render(<SettingsApp />);
+
+      await waitFor(() => {
+        expect(screen.getAllByText('Not set').length).toBeGreaterThan(0);
+      });
+      expect(screen.queryByText('未设置')).toBeNull();
+    });
+
     it('should navigate between sections', async () => {
       render(<SettingsApp />);
 

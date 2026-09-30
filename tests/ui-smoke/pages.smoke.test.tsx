@@ -58,7 +58,7 @@ vi.stubGlobal('chrome', {
   },
 });
 
-describe('ui-smoke — six page entries render', () => {
+describe('ui-smoke — five page entries render', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -116,33 +116,6 @@ describe('ui-smoke — six page entries render', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: /import preview/i })).toBeTruthy();
       expect(screen.getByRole('status')).toBeTruthy();
-    });
-  });
-
-  it('candidate-selector renders its candidate list', async () => {
-    const { CandidateSelectorApp } = await import('@ui/candidate-selector/App');
-    render(
-      <CandidateSelectorApp
-        candidates={[
-          {
-            tabId: 1,
-            windowId: 1,
-            index: 0,
-            url: 'https://example.com',
-            title: 'Example',
-            favIconUrl: '',
-            isCurrentWindow: true,
-            isIncognito: false,
-          },
-        ]}
-        mode="slot"
-        onSwitch={vi.fn()}
-        onApply={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    );
-    await waitFor(() => {
-      expect(document.body.textContent).toContain('Example');
     });
   });
 

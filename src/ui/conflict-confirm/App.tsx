@@ -2,9 +2,10 @@
  * Conflict Confirm Window — shown when saving to an occupied slot via shortcut.
  *
  * - Displays old binding summary vs new tab summary
- * - Three options: Cancel (undo), Force Overwrite, 5s countdown auto-overwrite
+ * - Three options: Cancel (undo), Force Overwrite, 5s countdown cancel
  * - Progress bar: 5s linear shrink animation via CSS @keyframes
- * - 5s no action → auto-execute overwrite and close window
+ * - 5s no action → cancel and close window (non-destructive default; the
+ *   overwrite must be an explicit click)
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -34,7 +35,7 @@ export function ConflictConfirm({ conflict, onOverwrite, onCancel }: ConflictCon
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoTriggered = useRef(false);
 
-  // 5-second countdown → auto overwrite
+  // 5-second countdown → cancel (non-destructive default)
   useEffect(() => {
     timerRef.current = setInterval(() => {
       setCountdown((prev) => {
@@ -42,7 +43,7 @@ export function ConflictConfirm({ conflict, onOverwrite, onCancel }: ConflictCon
           if (timerRef.current) clearInterval(timerRef.current);
           if (!autoTriggered.current) {
             autoTriggered.current = true;
-            void handleOverwrite();
+            void handleCancel();
           }
           return 0;
         }
@@ -114,14 +115,14 @@ export function ConflictConfirm({ conflict, onOverwrite, onCancel }: ConflictCon
         </div>
 
         {/* Progress bar: 5s countdown */}
-        <div className="tbs-conflict__progress" role="progressbar" aria-valuenow={countdown} aria-valuemin={0} aria-valuemax={5} aria-label="Auto-overwrite countdown">
+        <div className="tbs-conflict__progress" role="progressbar" aria-valuenow={countdown} aria-valuemin={0} aria-valuemax={5} aria-label="Cancelling countdown">
           <div
             className="tbs-conflict__progress-bar"
             style={{ animationDuration: '5s' }}
           />
         </div>
         <p className="tbs-conflict__countdown">
-          Auto-overwrite in {countdown}s
+          Cancelling in {countdown}s
         </p>
 
         {/* Actions */}

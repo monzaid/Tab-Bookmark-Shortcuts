@@ -97,24 +97,74 @@ export interface DialogProps {
   children: React.ReactNode;
   /** Optional footer actions */
   footer?: React.ReactNode;
+  /**
+   * F4: element to restore focus to when the dialog closes.
+   *
+   * Capturing `document.activeElement` is not enough when the dialog is opened
+   * from a transient menu: the clicked `role="menuitem"` is unmounted in the
+   * same commit, so the browser has already dropped focus to `<body>` and the
+   * user is returned to the top of the document. Callers therefore pass the
+   * durable trigger (e.g. the `⋯` button) explicitly.
+   */
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
+  /**
+   * N7: durable element to fall back to when the trigger does not survive.
+   *
+   * A dialog action can REMOVE its own trigger after the close (deleting a slot
+   * unbinds it, which unmounts that slot's `⋯` button). The trigger still looks
+   * focusable on the close frame, so focus is applied to it and then silently
+   * decays to `<body>` when React removes it. When provided, this element is
+   * re-checked one tick after the restore and takes over if focus was lost.
+   */
+  focusFallbackRef?: React.RefObject<HTMLElement | null>;
 }
 
-export function Dialog({ open, onClose, title, children, footer }: DialogProps) {
+export function Dialog({
+  open,
+  onClose,
+  title,
+  children,
+  footer,
+  returnFocusRef,
+  focusFallbackRef,
+}: DialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (open) {
-      previousFocus.current = document.activeElement as HTMLElement;
+      previousFocus.current = returnFocusRef?.current ?? (document.activeElement as HTMLElement);
       // Focus first focusable element in dialog
       const focusable = dialogRef.current?.querySelector<HTMLElement>(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
       );
       focusable?.focus();
-    } else if (previousFocus.current) {
-      previousFocus.current.focus();
+    } else {
+      const target = previousFocus.current;
+      target?.focus();
+      const fallback = focusFallbackRef?.current;
+      if (!fallback) return;
+
+      const restoreIfLost = (): void => {
+        const active = document.activeElement;
+        const lost =
+          active === null ||
+          active === document.body ||
+          (target !== null && !document.contains(target));
+        if (lost) fallback.focus();
+      };
+
+      // A destructive action (e.g. Delete Slot) removes its own trigger
+      // asynchronously, AFTER this close frame: the trigger still looks
+      // focusable here, so focus is applied to it and would then silently
+      // decay to `<body>`. The removal normally takes this dialog down with it
+      // (the trigger lives in the same actions section), so it is observable
+      // twice — here, and when React runs this effect's cleanup on unmount.
+      // Re-assert a perceivable focus target at both moments.
+      restoreIfLost();
+      return restoreIfLost;
     }
-  }, [open]);
+  }, [open, returnFocusRef, focusFallbackRef]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -142,10 +192,22 @@ export function Dialog({ open, onClose, title, children, footer }: DialogProps) 
     [onClose]
   );
 
+  // F1 regression guard: a modal is a hard interaction boundary. Whatever
+  // houses the dialog (e.g. a clickable `.tbs-slot-row`), a click on the
+  // overlay means "cancel the modal" and must never reach the underlying
+  // content — otherwise cancelling also triggers the host's own click action.
+  const handleOverlayClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      onClose();
+    },
+    [onClose]
+  );
+
   if (!open) return null;
 
   return (
-    <div className="tbs-dialog-overlay" onClick={onClose}>
+    <div className="tbs-dialog-overlay" onClick={handleOverlayClick}>
       <div
         ref={dialogRef}
         role="dialog"
@@ -232,6 +294,13 @@ export interface ConfirmProps {
   variant?: 'default' | 'danger';
   onConfirm: () => void;
   onCancel: () => void;
+  /** F4: durable trigger element to focus on close (see `DialogProps`). */
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
+  /**
+   * N7: durable element to fall back to when the trigger does not survive the
+   * confirmed action (see `DialogProps`).
+   */
+  focusFallbackRef?: React.RefObject<HTMLElement | null>;
 }
 
 export function Confirm({
@@ -243,12 +312,16 @@ export function Confirm({
   variant = 'default',
   onConfirm,
   onCancel,
+  returnFocusRef,
+  focusFallbackRef,
 }: ConfirmProps) {
   return (
     <Dialog
       open={open}
       onClose={onCancel}
       title={title}
+      returnFocusRef={returnFocusRef}
+      focusFallbackRef={focusFallbackRef}
       footer={
         <>
           <Button variant="ghost" onClick={onCancel}>{cancelLabel}</Button>

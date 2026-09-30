@@ -70,9 +70,24 @@ const NAV_ITEMS: { id: SettingsSection; label: string }[] = [
   { id: 'diagnostics', label: 'Diagnostics' },
 ];
 
+/**
+ * P1: map `location.hash` onto a section. Kept pure so it is directly unit
+ * testable. Unknown or absent hashes fall back to the default section.
+ *
+ * A `hashchange` listener is REQUIRED, not optional: `openPage`
+ * (`src/shared/open-page.ts`) navigates an already-open settings tab with a
+ * hash-only `tabs.update`, which does not reload the document — only the
+ * listener makes a second click on the footer entry take effect.
+ */
+export function resolveSectionFromHash(hash: string): SettingsSection {
+  const id = hash.replace(/^#/, '');
+  const match = NAV_ITEMS.find((item) => item.id === id);
+  return match ? match.id : 'slots';
+}
+
 // ─── Shortcuts Section (Problem 3) ──────────────────────────────────────────
 
-function ShortcutsSection({ commands }: { commands: CommandInfo[] }) {
+function ShortcutsSection({ commands, loading }: { commands: CommandInfo[]; loading: boolean }) {
   const browserManagementHint = getBrowserShortcutHint();
 
   return (
@@ -92,7 +107,7 @@ function ShortcutsSection({ commands }: { commands: CommandInfo[] }) {
           {commands.map((cmd) => (
             <tr key={cmd.name}>
               <td>{cmd.description || cmd.name}</td>
-              <td>{cmd.shortcut ?? '未设置'}</td>
+              <td>{cmd.shortcut ?? 'Not set'}</td>
               <td>
                 <StatusBadge
                   status={cmd.shortcut ? 'active' : 'inactive'}
@@ -101,8 +116,11 @@ function ShortcutsSection({ commands }: { commands: CommandInfo[] }) {
               </td>
             </tr>
           ))}
-          {commands.length === 0 && (
+          {commands.length === 0 && loading && (
             <tr><td colSpan={3} style={{ textAlign: 'center', color: 'var(--color-text-tertiary)' }}>Loading commands...</td></tr>
+          )}
+          {commands.length === 0 && !loading && (
+            <tr><td colSpan={3} style={{ textAlign: 'center', color: 'var(--color-text-tertiary)' }}>No commands available</td></tr>
           )}
         </tbody>
       </table>
@@ -138,7 +156,7 @@ function StrategySection({ globalStrategy, slots, configVersion: _cv, onGlobalCh
             checked={globalStrategy === 'A'}
             onChange={() => onGlobalChange('A')}
           />
-          <span><strong>A.</strong> 会话标签优先 — tabId 存在即切换</span>
+          <span><strong>A.</strong> Session tab first — switch when tabId exists</span>
         </label>
         <label className="tbs-settings__strategy-radio">
           <input
@@ -148,7 +166,7 @@ function StrategySection({ globalStrategy, slots, configVersion: _cv, onGlobalCh
             checked={globalStrategy === 'B'}
             onChange={() => onGlobalChange('B')}
           />
-          <span><strong>B.</strong> 会话标签 + 规则校验（默认）— tabId 存在且 URL 仍匹配</span>
+          <span><strong>B.</strong> Session tab + rule check (default) — tabId exists and URL still matches</span>
         </label>
         <label className="tbs-settings__strategy-radio">
           <input
@@ -158,7 +176,7 @@ function StrategySection({ globalStrategy, slots, configVersion: _cv, onGlobalCh
             checked={globalStrategy === 'C'}
             onChange={() => onGlobalChange('C')}
           />
-          <span><strong>C.</strong> 严格规则匹配 — 忽略 tabId，仅 URL/正则查找</span>
+          <span><strong>C.</strong> Strict rule match — ignore tabId, resolve by URL/regex only</span>
         </label>
       </div>
 
@@ -184,10 +202,10 @@ function StrategySection({ globalStrategy, slots, configVersion: _cv, onGlobalCh
                     onChange={(e) => onSlotChange(slotId, e.target.value as MatchStrategy | 'inherit')}
                     aria-label={`Strategy for slot ${slotId}`}
                   >
-                    <option value="inherit">继承全局 ({globalStrategy})</option>
-                    <option value="A">A — 会话标签优先</option>
-                    <option value="B">B — 会话 + 规则校验</option>
-                    <option value="C">C — 严格规则匹配</option>
+                    <option value="inherit">Inherit global ({globalStrategy})</option>
+                    <option value="A">A — Session tab first</option>
+                    <option value="B">B — Session + rule check</option>
+                    <option value="C">C — Strict rule match</option>
                   </select>
                 </td>
               </tr>
@@ -320,7 +338,7 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
       // the backend's raw text; other errors surface their concrete message.
       setError(
         result.errorCode === 'VERSION_CONFLICT'
-          ? '规则已被其他操作修改，请刷新后重试'
+          ? 'This rule was modified elsewhere. Refresh and try again.'
           : (result.message ?? 'Failed to update rule'),
       );
       return;
@@ -1746,16 +1764,23 @@ function DiagnosticsSection() {
 // ─── Main Settings App ───────────────────────────────────────────────────────
 
 export function SettingsApp() {
-  const [activeSection, setActiveSection] = useState<SettingsSection>('slots');
+  const [activeSection, setActiveSection] = useState<SettingsSection>(() =>
+    resolveSectionFromHash(window.location.hash),
+  );
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [globalStrategy, setGlobalStrategy] = useState<MatchStrategy>('B');
   const [slots, setSlots] = useState<SlotDefinition[]>([]);
   const [configVersion, setConfigVersion] = useState(0);
   const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
   const [conflictBanner, setConflictBanner] = useState(false);
+  // P11: top-level three-state — loading / failed / loaded
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Load state
   const loadState = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
       const [cmdRes, stateRes] = await Promise.all([
         sendMessage('GET_COMMANDS'),
@@ -1772,7 +1797,10 @@ export function SettingsApp() {
         setSlots(sync.slots);
         setConfigVersion(sync.configVersion);
       }
+      setLoading(false);
     } catch {
+      setLoading(false);
+      setError('Failed to load settings');
       setToast({ variant: 'error', message: 'Failed to load settings' });
     }
   }, []);
@@ -1780,6 +1808,15 @@ export function SettingsApp() {
   useEffect(() => {
     void loadState();
   }, [loadState]);
+
+  // P1: follow hash-only navigation on an already-open settings tab.
+  useEffect(() => {
+    const onHashChange = () => {
+      setActiveSection(resolveSectionFromHash(window.location.hash));
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => { window.removeEventListener('hashchange', onHashChange); };
+  }, []);
 
   const handleGlobalChange = useCallback(async (strategy: MatchStrategy) => {
     try {
@@ -1839,22 +1876,40 @@ export function SettingsApp() {
           </div>
         )}
 
-        {activeSection === 'slots' && <ShortcutsSection commands={commands} />}
-        {activeSection === 'strategy' && (
-          <StrategySection
-            globalStrategy={globalStrategy}
-            slots={slots}
-            configVersion={configVersion}
-            onGlobalChange={handleGlobalChange}
-            onSlotChange={handleSlotChange}
-          />
+        {/* P11: three mutually exclusive states — loading / failed / content */}
+        {loading && (
+          <div role="status" aria-busy="true" className="tbs-settings__loading">
+            Loading settings...
+          </div>
         )}
-        {activeSection === 'rules' && (
-          <RulesSection />
+
+        {!loading && error !== null && (
+          <div role="alert" className="tbs-settings__error">
+            <p>{error}</p>
+            <Button size="sm" variant="primary" onClick={() => { void loadState(); }}>Retry</Button>
+          </div>
         )}
-        {activeSection === 'dashboard' && <DashboardSection />}
-        {activeSection === 'import-export' && <ImportExportSection />}
-        {activeSection === 'diagnostics' && <DiagnosticsSection />}
+
+        {!loading && error === null && (
+          <>
+            {activeSection === 'slots' && <ShortcutsSection commands={commands} loading={loading} />}
+            {activeSection === 'strategy' && (
+              <StrategySection
+                globalStrategy={globalStrategy}
+                slots={slots}
+                configVersion={configVersion}
+                onGlobalChange={handleGlobalChange}
+                onSlotChange={handleSlotChange}
+              />
+            )}
+            {activeSection === 'rules' && (
+              <RulesSection />
+            )}
+            {activeSection === 'dashboard' && <DashboardSection />}
+            {activeSection === 'import-export' && <ImportExportSection />}
+            {activeSection === 'diagnostics' && <DiagnosticsSection />}
+          </>
+        )}
       </main>
 
       {toast && (

@@ -17,7 +17,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { SlotDefinition, SlotBinding, SyncState, LocalState } from '@shared/types';
-import { Button, IconButton, Toast, Tooltip, StatusBadge } from '@ui/shared/components';
+import { Button, IconButton, Toast, Tooltip, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { getMessageClient } from '@ui/shared/message-client';
 import { openOrReusePage } from '@shared/open-page';
 import type { PageOpenApi } from '@shared/open-page';
@@ -125,7 +125,8 @@ interface SlotRowProps {
   onPrevMatch: (slotId: number) => void;
   onSave: (slotId: number) => void;
   onUnbind: (slotId: number) => void;
-  onEditIcon: (slotId: number) => void;
+  /** F4: `trigger` is the durable element to restore focus to on modal close. */
+  onEditIcon: (slotId: number, trigger?: HTMLElement | null) => void;
   onEditTitle: (slotId: number, title: string) => void;
   onResetTitle: (slotId: number) => void;
   onAddToGlobal: (slotId: number) => void;
@@ -143,7 +144,15 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
   const [editingUrl, setEditingUrl] = useState(false);
   const [urlDraft, setUrlDraft] = useState('');
   const [urlMatchType, setUrlMatchType] = useState<'exact' | 'regex'>('exact');
+  // P2: deletion is destructive, so it must pass through a confirmation first.
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  // F4: the `⋯` button is the durable trigger — the menu item that opens the
+  // confirm dialog is unmounted, so focus must be restored here instead.
+  const moreButtonRef = useRef<HTMLElement | null>(null);
+  // N7: the row itself survives an unbind, so it is the durable focus fallback
+  // when the `⋯` trigger (and the whole actions section) is removed.
+  const rowRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const urlInputRef = useRef<HTMLInputElement>(null);
 
@@ -171,15 +180,24 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
     return () => document.removeEventListener('mousedown', handler);
   }, [menuOpen]);
 
-  const handleTitleDoubleClick = (e: React.MouseEvent) => {
+  /**
+ * P8: the `⋯` menu needs the SAME entry points as double-click. Extracted so
+ * both paths share one implementation (the double-click handlers below just
+ * stop propagation and delegate).
+ */
+const startTitleEdit = () => {
     if (!isBound) return;
-    e.stopPropagation();
     const current = slot?.uiMarker.customTitle || slot?.titleSnapshot || '';
     setTitleDraft(current);
     // Remember the pre-edit value so an unchanged save is treated as "no change".
     setTitleInitial(current);
     setEditingTitle(true);
     setTimeout(() => titleInputRef.current?.focus(), 0);
+  };
+
+  const handleTitleDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    startTitleEdit();
   };
 
   const handleTitleSave = () => {
@@ -196,14 +214,18 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
     if (e.key === 'Escape') setEditingTitle(false);
   };
 
-  // Problem 8: double-click URL to edit
-  const handleUrlDoubleClick = (e: React.MouseEvent) => {
+  // Problem 8 / P8: double-click URL to edit — shared with the `⋯` menu entry.
+  const startUrlEdit = () => {
     if (!isBound || !slot) return;
-    e.stopPropagation();
     setUrlDraft(slot.urlMatch.value);
     setUrlMatchType(slot.urlMatch.type);
     setEditingUrl(true);
     setTimeout(() => urlInputRef.current?.focus(), 0);
+  };
+
+  const handleUrlDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    startUrlEdit();
   };
 
   const handleUrlSave = () => {
@@ -226,6 +248,7 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
 
   return (
     <div
+      ref={rowRef}
       className={`tbs-slot-row${isBound ? ' tbs-slot-row--bound' : ''}`}
       role="listitem"
       tabIndex={0}
@@ -365,18 +388,46 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
               <IconButton
                 size="sm"
                 aria-label={`More options for slot ${slotNumber}`}
-                onClick={(e) => { e.stopPropagation(); setMenuOpen(!menuOpen); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // F4: record the durable trigger so Dialog can restore focus
+                  // here after closing the modal opened from this menu.
+                  moreButtonRef.current = e.currentTarget;
+                  setMenuOpen(!menuOpen);
+                }}
               >
                 ⋯
               </IconButton>
               {menuOpen && (
                 <div className="tbs-slot-menu" role="menu" aria-label={`Slot ${slotNumber} actions`}>
+                  {/* P8: explicit edit entries — double-click remains a shortcut. */}
+                  <button
+                    className="tbs-slot-menu__item"
+                    role="menuitem"
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); startTitleEdit(); }}
+                  >
+                    Rename Slot…
+                  </button>
+                  <button
+                    className="tbs-slot-menu__item"
+                    role="menuitem"
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onEditIcon(slotNumber, moreButtonRef.current); }}
+                  >
+                    Change Icon…
+                  </button>
+                  <button
+                    className="tbs-slot-menu__item"
+                    role="menuitem"
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); startUrlEdit(); }}
+                  >
+                    Edit URL…
+                  </button>
                   <button
                     className="tbs-slot-menu__item tbs-slot-menu__item--danger"
                     role="menuitem"
-                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onUnbind(slotNumber); }}
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setDeleteConfirmOpen(true); }}
                   >
-                    Reset
+                    Delete Slot
                   </button>
                   <button
                     className="tbs-slot-menu__item"
@@ -387,6 +438,19 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
                   </button>
                 </div>
               )}
+
+              {/* P2: destructive action requires an explicit confirmation. */}
+              <Confirm
+                open={deleteConfirmOpen}
+                title="Delete Slot"
+                message={`Delete slot ${String(slotNumber)}? Its saved URL, title and icon will be removed.`}
+                confirmLabel="Delete"
+                variant="danger"
+                returnFocusRef={moreButtonRef}
+                focusFallbackRef={rowRef}
+                onConfirm={() => { setDeleteConfirmOpen(false); onUnbind(slotNumber); }}
+                onCancel={() => { setDeleteConfirmOpen(false); }}
+              />
             </div>
           </>
         )}
@@ -435,28 +499,49 @@ import type { IconConfig } from '@ui/components/IconEditor';
 import { wildcardToRegex, matchesUrl } from '@shared/url-utils';
 
 interface IconEditorModalProps {
+  open: boolean;
   onApply: (iconData: string) => void;
   onCancel: () => void;
   onReset?: () => void;
   initialIcon?: string;
+  /** F4: durable trigger element to focus on close (menu items are unmounted). */
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
+  /** N7: durable element to fall back to if the trigger is removed on close. */
+  focusFallbackRef?: React.RefObject<HTMLElement | null>;
 }
 
-function IconEditorModal({ onApply, onCancel, onReset, initialIcon }: IconEditorModalProps) {
+function IconEditorModal({ open, onApply, onCancel, onReset, initialIcon, returnFocusRef, focusFallbackRef }: IconEditorModalProps) {
   const [iconConfig, setIconConfig] = useState<IconConfig>(
     initialIcon ? { dataUri: initialIcon } : { bgColor: '#2563EB', text: '', textColor: '#FFFFFF' }
   );
+
+  // The modal stays mounted so `Dialog` can restore focus to the trigger when
+  // `open` flips back to false (the primitive captures the previously focused
+  // element on open). Per-open state is therefore re-seeded here, mirroring the
+  // established `Confirm` usage in DualCards.tsx.
+  useEffect(() => {
+    if (open) {
+      setIconConfig(initialIcon ? { dataUri: initialIcon } : { bgColor: '#2563EB', text: '', textColor: '#FFFFFF' });
+    }
+  }, [open, initialIcon]);
 
   const handleApply = useCallback(() => {
     const dataUri = renderIconToDataUri(iconConfig, 64);
     if (dataUri) onApply(dataUri);
   }, [iconConfig, onApply]);
 
+  // P4: reuse the shared Dialog primitive — it supplies Escape, a Tab focus trap
+// and focus restoration (see shared/components.tsx), so none of that is
+// re-implemented here. The container/CSS classes change, nothing else does.
   return (
-    <div className="tbs-modal-overlay" role="dialog" aria-modal="true" aria-label="Change tab icon">
-      <div className="tbs-modal">
-        <h3 className="tbs-modal__title">Change Icon</h3>
-        <IconEditor value={iconConfig} onChange={setIconConfig} size={64} />
-        <div className="tbs-modal__footer">
+    <Dialog
+      open={open}
+      onClose={onCancel}
+      title="Change Icon"
+      returnFocusRef={returnFocusRef}
+      focusFallbackRef={focusFallbackRef}
+      footer={
+        <>
           {onReset && (
             <Button size="sm" variant="ghost" onClick={() => { onReset(); onCancel(); }} aria-label="Reset icon">
               Reset
@@ -464,15 +549,18 @@ function IconEditorModal({ onApply, onCancel, onReset, initialIcon }: IconEditor
           )}
           <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
           <Button size="sm" variant="primary" onClick={handleApply}>Apply</Button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      <IconEditor value={iconConfig} onChange={setIconConfig} size={64} />
+    </Dialog>
   );
 }
 
 // ─── Create Rule Modal (Problem 3: icon editor + priority) ──────────────────
 
 interface CreateRuleModalProps {
+  open: boolean;
   defaultUrl: string;
   defaultTitle?: string;
   defaultIcon?: string;
@@ -481,7 +569,7 @@ interface CreateRuleModalProps {
   onCancel: () => void;
 }
 
-function CreateRuleModal({ defaultUrl, defaultTitle = '', defaultIcon = '', defaultMatchType, onSave, onCancel }: CreateRuleModalProps) {
+function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = '', defaultMatchType, onSave, onCancel }: CreateRuleModalProps) {
   const [url, setUrl] = useState(defaultUrl);
   const [matchType, setMatchType] = useState<'exact' | 'regex'>(defaultMatchType ?? 'exact');
   const [title, setTitle] = useState(defaultTitle);
@@ -497,6 +585,23 @@ function CreateRuleModal({ defaultUrl, defaultTitle = '', defaultIcon = '', defa
   const [iconUrl, setIconUrl] = useState(defaultIcon && !defaultIcon.startsWith('data:') ? defaultIcon : '');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // P4: the modal stays mounted (so `Dialog` can restore focus to its trigger
+  // on close), therefore the prefill has to be re-seeded on every open.
+  useEffect(() => {
+    if (!open) return;
+    setUrl(defaultUrl);
+    setMatchType(defaultMatchType ?? 'exact');
+    setTitle(defaultTitle);
+    setMode('auto');
+    setPriority(0);
+    setIconConfig(defaultIcon ? { dataUri: defaultIcon } : { bgColor: '#2563EB', text: '', textColor: '#FFFFFF' });
+    setIconMode(defaultIcon ? 'custom' : 'url');
+    setPrevIconMode(null);
+    setIconUrl(defaultIcon && !defaultIcon.startsWith('data:') ? defaultIcon : '');
+    setSaving(false);
+    setSaveError(null);
+  }, [open, defaultUrl, defaultTitle, defaultIcon, defaultMatchType]);
 
   const handleSave = useCallback(async () => {
     if (!url.trim() || saving) return;
@@ -539,10 +644,21 @@ function CreateRuleModal({ defaultUrl, defaultTitle = '', defaultIcon = '', defa
   }, [url, matchType, title, iconConfig, iconMode, iconUrl, mode, priority, onSave, saving]);
 
   return (
-    <div className="tbs-modal-overlay" role="dialog" aria-modal="true" aria-label="Create global page rule">
-      <div className="tbs-modal tbs-modal--wide">
-        <h3 className="tbs-modal__title">New Global Page Rule</h3>
-
+    // P4: same Dialog primitive as the icon modal (Escape / Tab trap / focus
+    // restoration). Form fields, ids, labels and handlers are unchanged.
+    <Dialog
+      open={open}
+      onClose={onCancel}
+      title="New Global Page Rule"
+      footer={
+        <>
+          <Button size="sm" variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
+          <Button size="sm" variant="primary" onClick={() => void handleSave()} disabled={!url.trim() || saving}>
+            {saving ? 'Saving...' : 'Save'}
+          </Button>
+        </>
+      }
+    >
         <div className="tbs-modal__section">
           <label className="tbs-modal__label" htmlFor="rule-url">Match URL</label>
           <div className="tbs-inline-field">
@@ -582,7 +698,7 @@ function CreateRuleModal({ defaultUrl, defaultTitle = '', defaultIcon = '', defa
           {matchType === 'regex' && url.trim() && (() => {
             const conversion = wildcardToRegex(url.trim());
             if (conversion.converted) {
-              return <span className="tbs-modal__regex-valid" role="status">✓ 已自动转换为正则表达式: {conversion.pattern}</span>;
+              return <span className="tbs-modal__regex-valid" role="status">✓ Auto-converted to regex: {conversion.pattern}</span>;
             }
             try {
               new RegExp(url.trim());
@@ -677,15 +793,7 @@ function CreateRuleModal({ defaultUrl, defaultTitle = '', defaultIcon = '', defa
         {saveError && (
           <p className="tbs-modal__error" role="alert" style={{ color: '#DC2626', fontSize: '12px', margin: '4px 0' }}>{saveError}</p>
         )}
-
-        <div className="tbs-modal__footer">
-          <Button size="sm" variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
-          <Button size="sm" variant="primary" onClick={() => void handleSave()} disabled={!url.trim() || saving}>
-            {saving ? 'Saving...' : 'Save'}
-          </Button>
-        </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -733,6 +841,15 @@ export function SidebarApp() {
   // ─── Load state from background ────────────────────────────────────────
 
   const loadState = useCallback(async () => {
+    // P3: clear a previous failure and re-enter the loading state so a Retry
+    // is observable (and so error and loading are never shown together).
+    //
+    // F2 fix: only a COLD load (nothing loaded yet → `sync === null`) may enter
+    // the full-page loading state. Every later refresh (post-save, unbind,
+    // icon/title/URL update, `storage.onChanged`) must keep the existing shell,
+    // footer and any open modal mounted — otherwise the whole sidebar flashes
+    // white and in-progress modal drafts are lost.
+    setState((prev) => ({ ...prev, loading: prev.sync === null, error: null }));
     try {
       const response = await sendMessage('GET_STATE') as {
         result?: { success: boolean; sync?: SyncState; local?: LocalState };
@@ -761,9 +878,15 @@ export function SidebarApp() {
           sync: result.sync!,
           local,
           loading: false,
+          error: null,
         }));
       } else {
-        setState((prev) => ({ ...prev, loading: false }));
+        // N5: the background reports TIMEOUT / INTERNAL_ERROR by *resolving*
+        // `{ success: false }`, and message-client passes it through — so this
+        // branch (not the catch below) is the common real-failure path. Writing
+        // `error: null` here made the P3 defect (a failure rendered as ten
+        // "Empty" slots) reappear on that path.
+        setState((prev) => ({ ...prev, loading: false, error: 'Failed to load state' }));
       }
     } catch {
       setState((prev) => ({ ...prev, loading: false, error: 'Failed to load state' }));
@@ -991,13 +1114,13 @@ export function SidebarApp() {
         | undefined;
       const ok = result?.result?.success ?? result?.success ?? false;
       if (ok) {
-        setToast({ variant: 'info', message: `Slot ${String(slotId)} unbound` });
+        setToast({ variant: 'info', message: `Slot ${String(slotId)} deleted` });
         void loadState();
       } else {
-        setToast({ variant: 'error', message: `Failed to unbind slot ${String(slotId)}` });
+        setToast({ variant: 'error', message: `Failed to delete slot ${String(slotId)}` });
       }
     } catch {
-      setToast({ variant: 'error', message: `Failed to unbind slot ${String(slotId)}` });
+      setToast({ variant: 'error', message: `Failed to delete slot ${String(slotId)}` });
     }
   }, [loadState]);
 
@@ -1059,7 +1182,7 @@ export function SidebarApp() {
   }, [openPage]);
 
   const handleOpenImportExport = useCallback(() => {
-    void openPage('src/ui/import-preview/index.html');
+    void openPage('src/ui/settings/index.html#import-export');
   }, [openPage]);
 
   const handleOpenDiagnostics = useCallback(() => {
@@ -1199,7 +1322,12 @@ export function SidebarApp() {
 
   const [slotIconEditorId, setSlotIconEditorId] = useState<number | null>(null);
 
-  const handleSlotEditIcon = useCallback((slotId: number) => {
+  // F4: durable element to focus after the slot icon modal closes. Captured
+  // from the `⋯` button because the menu item that opens the modal unmounts.
+  const slotIconTriggerRef = useRef<HTMLElement | null>(null);
+
+  const handleSlotEditIcon = useCallback((slotId: number, trigger?: HTMLElement | null) => {
+    slotIconTriggerRef.current = trigger ?? null;
     setSlotIconEditorId(slotId);
   }, []);
 
@@ -1312,6 +1440,12 @@ export function SidebarApp() {
     const cmd = commands.find((c) => c.name === cmdName);
     return cmd?.shortcut ?? null;
   }, [commands]);
+
+  // N6: an error is only a BLOCKING condition when there is nothing to show
+  // (`sync === null`, i.e. a cold load / Retry failed). A transient refresh
+  // failure (`storage.onChanged`, post-save) must not swallow the slot list the
+  // user is already looking at — it degrades to a dismissible notice instead.
+  const hasLoadedState = state.sync !== null;
 
   // ─── Render ────────────────────────────────────────────────────────────
 
@@ -1498,43 +1632,68 @@ export function SidebarApp() {
         </section>
       )}
 
-      {/* Icon editor inline modal (Problem 3a) */}
-      {showIconEditor && (
-        <IconEditorModal
-          onApply={handleIconApply}
-          onCancel={() => setShowIconEditor(false)}
-          onReset={handleCurrentIconReset}
-          initialIcon={displayCurrentFavicon || undefined}
-        />
-      )}
+      {/* Icon editor inline modal (Problem 3a) — P4: always mounted so Dialog
+          can restore focus to the trigger on close. */}
+      <IconEditorModal
+        open={showIconEditor}
+        onApply={handleIconApply}
+        onCancel={() => setShowIconEditor(false)}
+        onReset={handleCurrentIconReset}
+        initialIcon={displayCurrentFavicon || undefined}
+      />
 
       {/* Slot icon editor (Problem 7) */}
-      {slotIconEditorId !== null && (
-        <IconEditorModal
-          onApply={handleSlotIconApply}
-          onCancel={() => setSlotIconEditorId(null)}
-          onReset={handleSlotIconReset}
-          initialIcon={(() => {
-            const s = state.sync?.slots.find((sl) => sl.id === slotIconEditorId);
-            return s?.uiMarker.icon?.value || s?.faviconSnapshot || undefined;
-          })()}
-        />
-      )}
+      <IconEditorModal
+        open={slotIconEditorId !== null}
+        onApply={handleSlotIconApply}
+        onCancel={() => setSlotIconEditorId(null)}
+        onReset={handleSlotIconReset}
+        returnFocusRef={slotIconTriggerRef}
+        initialIcon={(() => {
+          const s = state.sync?.slots.find((sl) => sl.id === slotIconEditorId);
+          return s?.uiMarker.icon?.value || s?.faviconSnapshot || undefined;
+        })()}
+      />
 
       {/* Global rule creation modal (Problem 3c / 5 / 7) */}
-      {showRuleModal && (
-        <CreateRuleModal
-          defaultUrl={rulePrefill ? rulePrefill.url : state.currentTabUrl}
-          defaultTitle={rulePrefill ? rulePrefill.title : ''}
-          defaultIcon={rulePrefill ? rulePrefill.icon : ''}
-          defaultMatchType={rulePrefill ? rulePrefill.matchType : undefined}
-          onSave={handleCreateGlobalRule}
-          onCancel={() => { setShowRuleModal(false); setRulePrefill(null); }}
-        />
+      <CreateRuleModal
+        open={showRuleModal}
+        defaultUrl={rulePrefill ? rulePrefill.url : state.currentTabUrl}
+        defaultTitle={rulePrefill ? rulePrefill.title : ''}
+        defaultIcon={rulePrefill ? rulePrefill.icon : ''}
+        defaultMatchType={rulePrefill ? rulePrefill.matchType : undefined}
+        onSave={handleCreateGlobalRule}
+        onCancel={() => { setShowRuleModal(false); setRulePrefill(null); }}
+      />
+
+      {/* N6: non-blocking notice for a refresh failure that kept the list.
+          `role="status"` (polite) — not `role="alert"` — so it never competes
+          with the blocking P3 panel above. */}
+      {state.error && hasLoadedState && (
+        <div role="status" aria-live="polite" className="tbs-sidebar__stale-notice">
+          <span>{state.error} — showing the last loaded slots.</span>
+          <Button size="sm" variant="ghost" aria-label="Retry loading state" onClick={() => { void loadState(); }}>
+            Retry
+          </Button>
+        </div>
       )}
 
-      {/* 10-slot list */}
+      {/* 10-slot list — P3: a failed load replaces the LIST with an explicit
+          error + Retry, instead of rendering 10 rows labelled "Empty". The
+          error branch must precede the `slots` fallback so the empty rows are
+          never produced; the surrounding shell (and its footer navigation)
+          stays intact.
+          N6: that substitution applies only when NOTHING was loaded yet. Once a
+          list exists, a transient refresh failure keeps the list and surfaces a
+          non-blocking notice instead (the alert/Retry panel would otherwise
+          discard good data on a single flaky background write). */}
       <section className="tbs-sidebar__slots" aria-label="Bookmark slots">
+        {state.error && !hasLoadedState ? (
+          <div role="alert" className="tbs-sidebar__error">
+            <p>{state.error}</p>
+            <Button size="sm" variant="primary" onClick={() => { void loadState(); }}>Retry</Button>
+          </div>
+        ) : (
         <div role="list" aria-label="10 bookmark slots">
           {Array.from({ length: 10 }, (_, i) => {
             const slotNumber = i + 1;
@@ -1592,6 +1751,7 @@ export function SidebarApp() {
             );
           })}
         </div>
+        )}
       </section>
 
       {/* Undo bar */}
@@ -1605,7 +1765,6 @@ export function SidebarApp() {
           variant={toast.variant}
           message={toast.message}
           onDismiss={() => setToast(null)}
-          duration={3000}
         />
       )}
 

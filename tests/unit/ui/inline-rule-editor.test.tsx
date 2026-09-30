@@ -219,7 +219,7 @@ describe('Module 2 (UI): Inline rule editing in settings', () => {
     fireEvent.click(within(form).getByRole('button', { name: 'Update Rule' }));
 
     await waitFor(() => {
-      expect(within(form).getByRole('alert')).toHaveTextContent('规则已被其他操作修改，请刷新后重试');
+      expect(within(form).getByRole('alert')).toHaveTextContent('This rule was modified elsewhere. Refresh and try again.');
     });
   });
 

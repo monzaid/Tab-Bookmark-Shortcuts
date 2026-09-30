@@ -70,16 +70,26 @@ function respondWith(unbindResult: unknown, undoResult: unknown): void {
   });
 }
 
-/** Open slot 1's "more" menu and click Reset (which triggers UNBIND_SLOT). */
+/**
+ * Open slot 1's "more" menu, pick the destructive entry and confirm it.
+ *
+ * GE1 (plan-authorised): the entry was renamed `Reset` -> `Delete Slot` (P6)
+ * and now requires a confirmation (P2). Only the LOCATORS and the interaction
+ * FLOW are updated here; every `expect` judgement below is unchanged.
+ */
 async function clickReset(): Promise<void> {
   await waitFor(() => {
     expect(screen.getByRole('button', { name: 'More options for slot 1' })).toBeInTheDocument();
   });
   fireEvent.click(screen.getByRole('button', { name: 'More options for slot 1' }));
   await waitFor(() => {
-    expect(screen.getByRole('menuitem', { name: 'Reset' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Delete Slot' })).toBeInTheDocument();
   });
-  fireEvent.click(screen.getByRole('menuitem', { name: 'Reset' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Delete Slot' }));
+  await waitFor(() => {
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 }
 
 describe('T26 (N3) — sidebar consumes the response `success` flag', () => {
@@ -96,12 +106,12 @@ describe('T26 (N3) — sidebar consumes the response `success` flag', () => {
     await waitFor(() => {
       const alerts = screen.getAllByRole('alert');
       const texts = alerts.map((a) => a.textContent ?? '');
-      expect(texts.some((t) => t.includes('Failed to unbind slot 1'))).toBe(true);
+      expect(texts.some((t) => t.includes('Failed to delete slot 1'))).toBe(true);
     });
 
     // The success/info wording must NOT appear.
     const texts = screen.getAllByRole('alert').map((a) => a.textContent ?? '');
-    expect(texts.some((t) => t.includes('Slot 1 unbound'))).toBe(false);
+    expect(texts.some((t) => t.includes('Slot 1 deleted'))).toBe(false);
   });
 
   it('should surface an error when UNDO_SAVE fails', async () => {

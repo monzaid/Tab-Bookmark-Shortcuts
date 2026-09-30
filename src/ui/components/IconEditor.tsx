@@ -100,6 +100,48 @@ export function IconEditor({ value, onChange, size = 64 }: IconEditorProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const previewRef = useRef<HTMLCanvasElement>(null);
 
+  /**
+ * F3: last config handed up through `onChange`.
+ *
+ * The editor is mounted/unmounted with its host dialog, but a host that keeps
+ * the dialog mounted (as the sidebar modal does) re-seeds `value` AFTER the
+ * first open. Without this, `useState(value?.…)` only reads the prop once at
+ * mount and the real icon never reaches the editor — the first open then shows
+ * a blank default and any edit overwrites the user's icon.
+ *
+ * Recognising our own echo (identical object reference) keeps the sync below
+ * from fighting the user's in-progress edits; only genuinely external `value`
+ * changes are adopted.
+ */
+const lastEmitted = useRef<IconConfig | null>(null);
+
+  /**
+ * N8: structural equality, not reference identity.
+ *
+ * All five current call sites store the emitted object as-is, so a reference
+ * check would suffice today. A future caller that clones or JSON round-trips
+ * the config before handing it back would, with a reference check, look like an
+ * external change and silently reset the editor — discarding the user's
+ * in-progress edits. Comparing field-by-field removes that footgun.
+ */
+const isSameConfig = (a: IconConfig, b: IconConfig | null): boolean =>
+    b !== null &&
+    a.bgColor === b.bgColor &&
+    a.text === b.text &&
+    a.textColor === b.textColor &&
+    a.dataUri === b.dataUri;
+
+  // Adopt externally supplied values (e.g. the host seeding the icon on open).
+  useEffect(() => {
+    if (value !== undefined && isSameConfig(value, lastEmitted.current)) return;
+    setBgColor(value?.bgColor ?? '#2563EB');
+    setUseBgColor(!!value?.bgColor || value === undefined);
+    setText(value?.text ?? '');
+    setTextColor(value?.textColor ?? autoTextColor(value?.bgColor ?? '#2563EB'));
+    setTextColorManual(!!value?.textColor);
+    setUploadPreview(value?.dataUri ?? null);
+  }, [value]);
+
   // Auto text color when bg changes and user hasn't manually set it
   const effectiveTextColor = textColorManual ? textColor : autoTextColor(useBgColor ? bgColor : '#9CA3AF');
 
@@ -143,18 +185,22 @@ export function IconEditor({ value, onChange, size = 64 }: IconEditorProps) {
   const emitChange = useCallback((overrides: Partial<IconConfig & { uploadPreview: string | null; useBg?: boolean }> = {}) => {
     const finalUpload = overrides.uploadPreview !== undefined ? overrides.uploadPreview : uploadPreview;
     if (finalUpload) {
-      onChange({ dataUri: finalUpload });
+      const emitted = { dataUri: finalUpload };
+      lastEmitted.current = emitted;
+      onChange(emitted);
       return;
     }
     const finalUseBg = overrides.useBg !== undefined ? overrides.useBg : useBgColor;
     const finalBg = overrides.bgColor !== undefined ? overrides.bgColor : (finalUseBg ? bgColor : undefined);
     const finalText = overrides.text !== undefined ? overrides.text : text;
     const finalTextColor = overrides.textColor !== undefined ? overrides.textColor : effectiveTextColor;
-    onChange({
+    const emitted: IconConfig = {
       bgColor: finalBg,
       text: finalText || undefined,
       textColor: finalText ? finalTextColor : undefined,
-    });
+    };
+    lastEmitted.current = emitted;
+    onChange(emitted);
   }, [uploadPreview, useBgColor, bgColor, text, effectiveTextColor, onChange]);
 
   // Auto-propagate internal state to parent whenever it changes.
@@ -185,7 +231,9 @@ export function IconEditor({ value, onChange, size = 64 }: IconEditorProps) {
     reader.onload = () => {
       const dataUri = reader.result as string;
       setUploadPreview(dataUri);
-      onChange({ dataUri });
+      const emitted = { dataUri };
+      lastEmitted.current = emitted;
+      onChange(emitted);
     };
     reader.readAsDataURL(file);
   }, [onChange]);
@@ -239,7 +287,7 @@ export function IconEditor({ value, onChange, size = 64 }: IconEditorProps) {
           type="text"
           value={text}
           onChange={(e) => { setText(e.target.value); setUploadPreview(null); }}
-          placeholder="🚀、A、文档"
+          placeholder="🚀, A, Doc"
           maxLength={4}
           aria-label="Icon text or emoji"
           className="tbs-icon-editor__text-input"
@@ -284,7 +332,7 @@ export function IconEditor({ value, onChange, size = 64 }: IconEditorProps) {
           onClick={() => setShowUpload(!showUpload)}
           aria-expanded={showUpload}
         >
-          {showUpload ? '▼' : '▶'} 或上传图标文件
+          {showUpload ? '▼' : '▶'} or upload an icon file
         </button>
         {showUpload && (
           <div className="tbs-icon-editor__upload">
