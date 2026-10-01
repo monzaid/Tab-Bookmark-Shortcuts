@@ -981,18 +981,34 @@ export function SidebarApp() {
         outcome?: { type: string };
       };
       const result = response?.result ?? response;
-      if (result?.success) {
-        const outcome = result.outcome;
-        if (outcome?.type === 'needs_recovery') {
-          setToast({ variant: 'info', message: `Slot ${slotId}: opening recovery window` });
-        }
-      } else {
+      if (!result?.success) {
         setToast({ variant: 'error', message: `Failed to switch to slot ${slotId}` });
+      } else if (result.outcome?.type === 'incognito_blocked') {
+        // Design §4 / DT8: `incognito_blocked` returns success:true, so the
+        // plain `!success` branch above never fires — surface the toast here.
+        setToast({ variant: 'error', message: 'Incognito access not authorized' });
       }
+      // D2: the background owns the recovery window. The sidebar must NOT raise
+      // its own recovery-opening toast (that was the misleading one).
     } catch {
       setToast({ variant: 'error', message: `Failed to switch to slot ${slotId}` });
     }
   }, []);
+
+  /**
+   * Position (↑/↓) start point (BLK-A / A1): the locked tab when locked, else the
+   * current tab. The Lock stays in-memory — only the id rides in the payload, and
+   * the background degrades to the active tab when the anchor is gone (DT7).
+   */
+  const handlePositionPrev = useCallback(async () => {
+    const anchorTabId = state.lockedTabId ?? state.currentTabId;
+    await sendMessage('POSITION_CURRENT_PREV', anchorTabId === null ? {} : { anchorTabId });
+  }, [state.lockedTabId, state.currentTabId]);
+
+  const handlePositionNext = useCallback(async () => {
+    const anchorTabId = state.lockedTabId ?? state.currentTabId;
+    await sendMessage('POSITION_CURRENT_NEXT', anchorTabId === null ? {} : { anchorTabId });
+  }, [state.lockedTabId, state.currentTabId]);
 
   const handleNextMatch = useCallback(async (slotId: number) => {
     try {
@@ -1156,24 +1172,36 @@ export function SidebarApp() {
 
   const openPage = useCallback(async (path: string) => {
     const url = chrome.runtime.getURL(path);
-    try {
-      // Main path (B11b): let the background open the page so it can reuse an
-      // already-open tab. No chrome.tabs access happens here.
-      await sendMessage('OPEN_PAGE', { url });
-    } catch {
-      // Fallback (B11b): the background is unavailable (SW not yet woken /
-      // extension reloading / restricted context). This is REQUIRED behaviour —
-      // without it the footer buttons would silently do nothing. It reuses the
-      // shared open-or-reuse logic and obtains its chrome.tabs operations from
-      // the single helper below, so the fallback cannot be re-duplicated.
+
+    // A9: bounded retry FIRST. A cold/in-flight service worker is transient, so
+    // retrying OPEN_PAGE avoids a second creator racing the background one.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const api = createChromePageOpenApi();
-        if (api) {
-          await openOrReusePage(api, url);
-        }
+        await sendMessage('OPEN_PAGE', { url });
+        return;
       } catch {
-        // Silently fail
+        // Retry below; only a genuinely dead extension context falls through.
       }
+    }
+
+    // Direct fallback ONLY when the extension context is actually gone. If
+    // `chrome.runtime.id` still exists we must NOT open a second creator.
+    //
+    // Re-typed as optional (same pattern as `createChromePageOpenApi` above) so
+    // the availability check stays meaningful instead of being reported as an
+    // unnecessary condition on a non-optional global.
+    const runtimeApi = (globalThis as { chrome?: { runtime?: { id?: string } } }).chrome?.runtime;
+    if (typeof runtimeApi?.id === 'string' && runtimeApi.id.length > 0) {
+      return;
+    }
+
+    try {
+      const api = createChromePageOpenApi();
+      if (api) {
+        await openOrReusePage(api, url);
+      }
+    } catch {
+      // Silently fail
     }
   }, []);
 
@@ -1626,6 +1654,29 @@ export function SidebarApp() {
                 title="Switch to next matching tab"
               >
                 ↻
+              </Button>
+              {/* Position (↑/↓) — BY POSITION, not by match (D7 / BLK-A / A1).
+                  The start point is the locked tab when locked, else the current
+                  tab; a closed lock degrades in the background without error. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                className="tbs-sidebar__position-btn"
+                onClick={() => void handlePositionPrev()}
+                aria-label="Switch to previous position tab"
+                title="Switch to previous position tab"
+              >
+                ↑
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="tbs-sidebar__position-btn"
+                onClick={() => void handlePositionNext()}
+                aria-label="Switch to next position tab"
+                title="Switch to next position tab"
+              >
+                ↓
               </Button>
             </span>
           </div>

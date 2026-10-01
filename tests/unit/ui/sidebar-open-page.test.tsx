@@ -34,7 +34,7 @@ vi.stubGlobal('chrome', {
 const STATE_RESPONSE = {
   result: {
     success: true,
-    sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] },
+    sync: { configVersion: 1, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
     local: { bindings: [], cycleCursors: [], lastSuccessSlotId: null, recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [] },
   },
 };
@@ -136,5 +136,38 @@ describe('Bug 1 (sidebar): footer buttons reuse already-open tabs', () => {
         }),
       );
     });
+  });
+
+  // ─── T12a: bounded retry FIRST; direct fallback only when the context is dead ───
+  it('T12a RED: retries OPEN_PAGE before falling back (no second creator)', async () => {
+    let attempts = 0;
+    runtimeSendMessage.mockImplementation((msg: { action: string }) => {
+      if (msg.action === 'OPEN_PAGE') {
+        attempts += 1;
+        if (attempts === 1) return Promise.reject(new Error('service worker waking'));
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve(STATE_RESPONSE);
+    });
+
+    await renderSidebar();
+    fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+
+    await waitFor(() => {
+      expect(attempts).toBeGreaterThanOrEqual(2);
+    });
+    // The retry succeeded, so the local fallback must NOT have created a tab.
+    expect(tabsCreate).not.toHaveBeenCalled();
+  });
+
+  });
+
+describe('T12a: the misleading recovery toast is gone', () => {
+  it('T12a: sidebar source contains no recovery-opening toast', async () => {
+    // Assembled at runtime so this assertion does not itself add a static match.
+    const needle = 'opening ' + 'recovery window';
+    const fs = await import('node:fs');
+    const source = fs.readFileSync('src/ui/sidebar/App.tsx', 'utf-8');
+    expect(source).not.toContain(needle);
   });
 });

@@ -18,4 +18,5 @@ export const PROTECTED_URL_PREFIXES: readonly string[] = [
   'brave://',
   'opera://',
   'vivaldi://',
+  'file://',
 ];

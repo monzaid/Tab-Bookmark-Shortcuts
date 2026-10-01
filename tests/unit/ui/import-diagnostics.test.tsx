@@ -12,7 +12,9 @@ describe('T20: Import preview, diagnostics, unified feedback, tool entries', () 
     ],
     newSlots: [{ id: 5, urlMatch: { type: 'exact', value: 'https://brand-new.com' }, strategy: 'inherit', uiMarker: {}, titleSnapshot: 'New', faviconSnapshot: '', createdAt: '', updatedAt: '' }],
     rules: [],
-    globalStrategy: 'B',
+    matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' },
+    switchDirection: 'next',
+    autoBindGlobal: true,
     configVersion: 3,
   };
 

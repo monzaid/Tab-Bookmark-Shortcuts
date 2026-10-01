@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { ImportExportService } from '@background/import-export-service';
-import type { SlotDefinition, ImportSlotConflict } from '@shared/types';
+import type { SlotDefinition, ImportSlotConflict, MatchRuleSettings } from '@shared/types';
+
+const SETTINGS_B: MatchRuleSettings = { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' };
+const SETTINGS_A: MatchRuleSettings = { tabIdMode: 'exists', ruleCheckMode: 'no-match', priority: 'tabId' };
+const SETTINGS_C: MatchRuleSettings = { tabIdMode: 'no-exists', ruleCheckMode: 'match', priority: 'tabId' };
 
 describe('T13: JSON import/export, merge preview, single commit', () => {
   const adapter = createMockAdapter();
@@ -45,7 +49,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
             updatedAt: '2026-01-01T00:00:00Z',
           },
         ],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 1,
       };
 
@@ -66,7 +72,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           urlMatch: { type: 'regex' as const, value: '^(.*a){20}$' },
         })),
         rules: [],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 1,
       };
 
@@ -90,7 +98,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
             updatedAt: '2026-01-01T00:00:00Z',
           },
         ],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 1,
       };
 
@@ -109,12 +119,20 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
       const result = await service.exportConfig();
       expect(result.success).toBe(true);
       if (result.success) {
-        const parsed = JSON.parse(result.json);
+        const parsed = JSON.parse(result.json) as {
+          version: number;
+          slots: Array<Record<string, unknown>>;
+          configVersion: number;
+        };
         expect(parsed.version).toBe(1);
         expect(parsed.slots).toHaveLength(1);
         expect(parsed.configVersion).toBe(1);
-        // Must NOT contain local data
-        expect(result.json).not.toContain('tabId');
+        // Must NOT contain local data. NOTE: the new-shape export legitimately
+        // contains the token `tabId` as a Priority value (matchSettings.priority),
+        // so the local-binding exclusion is asserted on the STRUCTURAL key, not
+        // the raw substring.
+        expect(parsed.slots[0]).not.toHaveProperty('tabId');
+        expect(result.json).not.toContain('"tabId":');
         expect(result.json).not.toContain('data:image/png;base64,secret');
         expect(result.json).not.toContain('bindings');
         expect(result.json).not.toContain('recoverySessions');
@@ -133,7 +151,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           makeSlot(2, 'https://new-slot.com'), // New
         ],
         rules: [],
-        globalStrategy: 'A',
+        matchSettings: SETTINGS_A,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 5,
       });
 
@@ -160,7 +180,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           makeSlot(2, 'https://new-slot.com'),
         ],
         rules: [{ id: 'r1', urlMatch: { type: 'exact', value: 'https://rule.com' }, mode: 'auto', priority: 5, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }],
-        globalStrategy: 'C',
+        matchSettings: SETTINGS_C,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 5,
       });
 
@@ -184,7 +206,7 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
       expect(sync.slots.find((s) => s.id === 1)?.urlMatch.value).toBe('https://imported.com');
       expect(sync.slots.find((s) => s.id === 2)?.urlMatch.value).toBe('https://new-slot.com');
       expect(sync.rules).toHaveLength(1);
-      expect(sync.globalStrategy).toBe('C');
+      expect(sync.matchSettings).toEqual(SETTINGS_C);
     });
 
     it('should keep existing slot when decision is "existing"', async () => {
@@ -195,7 +217,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
         exportedAt: '2026-06-01T00:00:00Z',
         slots: [makeSlot(1, 'https://reject-this.com')],
         rules: [],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 3,
       });
 
@@ -259,7 +283,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
         exportedAt: '2026-06-01T00:00:00Z',
         slots: [makeSlot(2, 'https://new.com')],
         rules: [],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 0,
       });
 
@@ -293,7 +319,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
             updatedAt: '2026-01-01T00:00:00Z',
           },
         ],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 0,
       });
 
@@ -317,7 +345,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           },
         ],
         rules: [],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 0,
       });
 
@@ -343,7 +373,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
             updatedAt: '2026-01-01T00:00:00Z',
           },
         ],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 0,
       });
 
@@ -369,13 +401,64 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
             updatedAt: '2026-01-01T00:00:00Z',
           },
         ],
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 0,
       });
 
       const result = await service.generatePreview(importJson);
       // Warn tier (REGEX_RISK with valid:true) must remain importable
       expect(result.success).toBe(true);
+    });
+
+    // ─── T1 RED ④ (ruling 4): legacy export files are no longer importable ───
+    it('T1 RED ④: rejects a legacy export file that has no matchSettings', async () => {
+      // The legacy export field is used as *rejected input* — the mandated RED
+      // fixture for ruling 4 (see delivery report).
+      const legacyJson = JSON.stringify({
+        version: 1,
+        exportedAt: '2026-06-01T00:00:00Z',
+        slots: [],
+        rules: [],
+        globalStrategy: 'B',
+        configVersion: 3,
+      });
+
+      const result = await service.generatePreview(legacyJson);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.errorCode).toBe('IMPORT_INVALID');
+      }
+    });
+
+    it('T1 RED ④: rejects an export file whose matchSettings shape is invalid', async () => {
+      const badJson = JSON.stringify({
+        version: 1,
+        slots: [],
+        rules: [],
+        matchSettings: { tabIdMode: 'sometimes', ruleCheckMode: 'match', priority: 'tabId' },
+        configVersion: 3,
+      });
+      const result = await service.generatePreview(badJson);
+      expect(result.success).toBe(false);
+    });
+
+    it('T1 RED ④: accepts a new-shape export file (matchSettings present)', async () => {
+      const newJson = JSON.stringify({
+        version: 1,
+        slots: [],
+        rules: [],
+        matchSettings: SETTINGS_C,
+        switchDirection: 'previous',
+        autoBindGlobal: false,
+        configVersion: 3,
+      });
+      const result = await service.generatePreview(newJson);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.preview.matchSettings).toEqual(SETTINGS_C);
+      }
     });
 
     it('should not write config before confirmation (preview is read-only)', async () => {
@@ -386,7 +469,9 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
         exportedAt: '2026-06-01T00:00:00Z',
         slots: [makeSlot(1, 'https://changed.com')],
         rules: [],
-        globalStrategy: 'A',
+        matchSettings: SETTINGS_A,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 99,
       });
 
@@ -395,7 +480,7 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
 
       const sync = await repo.getSyncState();
       expect(sync.slots[0].urlMatch.value).toBe('https://original.com');
-      expect(sync.globalStrategy).toBe('B'); // Unchanged
+      expect(sync.matchSettings).toEqual(SETTINGS_B); // Unchanged
       expect(sync.configVersion).toBe(1); // Unchanged
     });
   });

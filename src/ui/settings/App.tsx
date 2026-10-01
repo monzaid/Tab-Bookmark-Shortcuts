@@ -13,9 +13,11 @@ import { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
 import { Button, Toast, StatusBadge } from '@ui/shared/components';
 import { IconEditor, renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchStrategy, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, IconSource, DashboardItem } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, IconSource, DashboardItem } from '@shared/types';
+import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 import { wildcardToRegex } from '@shared/url-utils';
 import { getMessageClient } from '@ui/shared/message-client';
+import { MatchSettingsHelp } from './MatchSettingsHelp';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -57,6 +59,71 @@ function extractResult(res: unknown): Record<string, unknown> | null {
   if (!res || typeof res !== 'object') return null;
   const r = res as Record<string, unknown>;
   return (r.result as Record<string, unknown>) ?? r;
+}
+
+// ─── Per-slot strategy drafts (ACC#5) ────────────────────────────────────────
+//
+// The per-slot editor must be OPTIMISTIC: the user's choice is shown immediately
+// and is NOT silently discarded when the write is slow, fails, or is rejected by
+// a version conflict. Otherwise `isCustom` (derived from the server `slots`)
+// collapses back to "Inherit global" the instant the write does not land.
+
+type SlotStrategyValue = 'inherit' | MatchRuleSettings;
+
+/** A typed placeholder for a slot the server has not created yet. */
+function synthesizeDraftSlot(id: number, strategy: SlotStrategyValue): SlotDefinition {
+  return {
+    id,
+    urlMatch: { type: 'exact', value: '' },
+    strategy,
+    uiMarker: {},
+    titleSnapshot: '',
+    faviconSnapshot: '',
+    createdAt: '',
+    updatedAt: '',
+  };
+}
+
+/** Server slots overlaid with the user's un-committed strategy choices. */
+function mergeSlotDrafts(
+  slots: SlotDefinition[],
+  drafts: Record<number, SlotStrategyValue>,
+): SlotDefinition[] {
+  const draftIds = Object.keys(drafts).map(Number);
+  if (draftIds.length === 0) return slots;
+
+  const byId = new Map(slots.map((s) => [s.id, s] as const));
+  for (const id of draftIds) {
+    const existing = byId.get(id);
+    const strategy = drafts[id];
+    byId.set(id, existing ? { ...existing, strategy } : synthesizeDraftSlot(id, strategy));
+  }
+  return Array.from(byId.values());
+}
+
+/** Remove a slot's pending draft without a dynamic `delete` (key is numeric). */
+function removeSlotDraft(
+  drafts: Record<number, SlotStrategyValue>,
+  slotId: number,
+): Record<number, SlotStrategyValue> {
+  const next: Record<number, SlotStrategyValue> = {};
+  for (const key of Object.keys(drafts)) {
+    const id = Number(key);
+    if (id !== slotId) next[id] = drafts[id];
+  }
+  return next;
+}
+
+/** Commit a strategy into the server-truth list, creating an entry if needed. */
+function upsertSlotStrategy(
+  slots: SlotDefinition[],
+  slotId: number,
+  strategy: SlotStrategyValue,
+): SlotDefinition[] {
+  if (slots.some((s) => s.id === slotId)) {
+    return slots.map((s) => (s.id === slotId ? { ...s, strategy } : s));
+  }
+  return [...slots, synthesizeDraftSlot(slotId, strategy)];
 }
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
@@ -135,77 +202,176 @@ function getBrowserShortcutHint(): string {
 // ─── Strategy Section (Problem 6) ───────────────────────────────────────────
 
 interface StrategySectionProps {
-  globalStrategy: MatchStrategy;
+  matchSettings: MatchRuleSettings;
+  switchDirection: SwitchDirection;
+  autoBindGlobal: boolean;
   slots: SlotDefinition[];
   configVersion: number;
-  onGlobalChange: (strategy: MatchStrategy) => void;
-  onSlotChange: (slotId: number, strategy: MatchStrategy | 'inherit') => void;
+  onGlobalChange: (settings: MatchRuleSettings) => void;
+  onDirectionChange: (direction: SwitchDirection) => void;
+  onAutoBindGlobalChange: (enabled: boolean) => void;
+  onSlotChange: (slotId: number, strategy: 'inherit' | MatchRuleSettings) => void;
+  onSlotAutoBindChange: (slotId: number, override: boolean | null) => void;
 }
 
-function StrategySection({ globalStrategy, slots, configVersion: _cv, onGlobalChange, onSlotChange }: StrategySectionProps) {
+/**
+ * Tri-knob editor shared by the global section and per-slot "Custom" expansion.
+ *
+ * ACC#6a: `priority` is meaningful ONLY for combination 1 (tabIdMode `exists`).
+ * When Tab ID = "No tab ID" the Priority control is hidden — its stored value is
+ * PRESERVED (never cleared), so switching back to `exists` restores it.
+ */
+function MatchKnobs({
+  idPrefix,
+  settings,
+  onChange,
+}: {
+  idPrefix: string;
+  settings: MatchRuleSettings;
+  onChange: (settings: MatchRuleSettings) => void;
+}) {
+  const showPriority = settings.tabIdMode !== 'no-exists';
   return (
-    <section aria-label="Global matching strategy">
-      <h2>Global Matching Strategy</h2>
+    <div className="tbs-settings__knobs">
+      <label>
+        <span>Tab ID</span>
+        <select
+          aria-label={`${idPrefix} Tab ID`}
+          value={settings.tabIdMode}
+          onChange={(e) => { onChange({ ...settings, tabIdMode: e.target.value as TabIdMode }); }}
+        >
+          <option value="exists">Exists</option>
+          <option value="no-exists">No tab ID</option>
+        </select>
+      </label>
+      <label>
+        <span>Rule Check</span>
+        <select
+          aria-label={`${idPrefix} Rule Check`}
+          value={settings.ruleCheckMode}
+          onChange={(e) => { onChange({ ...settings, ruleCheckMode: e.target.value as RuleCheckMode }); }}
+        >
+          <option value="match">Match</option>
+          <option value="no-match">No match</option>
+        </select>
+      </label>
+      {showPriority && (
+        <label>
+          <span>Priority</span>
+          <select
+            aria-label={`${idPrefix} Priority`}
+            value={settings.priority}
+            onChange={(e) => { onChange({ ...settings, priority: e.target.value as Priority }); }}
+          >
+            <option value="tabId">Tab ID</option>
+            <option value="rule-check">Rule Check</option>
+            <option value="none">None</option>
+          </select>
+        </label>
+      )}
+    </div>
+  );
+}
 
-      <div className="tbs-settings__strategy-radios" role="radiogroup" aria-label="Global default strategy">
-        <label className="tbs-settings__strategy-radio">
-          <input
-            type="radio"
-            name="global-strategy"
-            value="A"
-            checked={globalStrategy === 'A'}
-            onChange={() => onGlobalChange('A')}
-          />
-          <span><strong>A.</strong> Session tab first — switch when tabId exists</span>
-        </label>
-        <label className="tbs-settings__strategy-radio">
-          <input
-            type="radio"
-            name="global-strategy"
-            value="B"
-            checked={globalStrategy === 'B'}
-            onChange={() => onGlobalChange('B')}
-          />
-          <span><strong>B.</strong> Session tab + rule check (default) — tabId exists and URL still matches</span>
-        </label>
-        <label className="tbs-settings__strategy-radio">
-          <input
-            type="radio"
-            name="global-strategy"
-            value="C"
-            checked={globalStrategy === 'C'}
-            onChange={() => onGlobalChange('C')}
-          />
-          <span><strong>C.</strong> Strict rule match — ignore tabId, resolve by URL/regex only</span>
-        </label>
-      </div>
+function StrategySection({
+  matchSettings,
+  switchDirection,
+  autoBindGlobal,
+  slots,
+  configVersion: _cv,
+  onGlobalChange,
+  onDirectionChange,
+  onAutoBindGlobalChange,
+  onSlotChange,
+  onSlotAutoBindChange,
+}: StrategySectionProps) {
+  return (
+    <section aria-label="Global matching settings">
+      <h2>Global Matching Settings</h2>
+
+      <MatchSettingsHelp />
+
+      <MatchKnobs idPrefix="Global" settings={matchSettings} onChange={onGlobalChange} />
+
+      <label className="tbs-settings__row">
+        <span>Switch Direction</span>
+        <select
+          aria-label="Switch Direction"
+          value={switchDirection}
+          onChange={(e) => { onDirectionChange(e.target.value as SwitchDirection); }}
+        >
+          <option value="previous">Previous Match</option>
+          <option value="next">Next Match</option>
+        </select>
+      </label>
+
+      <label className="tbs-settings__row">
+        <input
+          type="checkbox"
+          checked={autoBindGlobal}
+          onChange={(e) => { onAutoBindGlobalChange(e.target.checked); }}
+        />
+        <span>Auto-bind switched tabs to their slot</span>
+      </label>
 
       <h3>Per-Slot Override</h3>
-      <table className="tbs-settings__table" role="table" aria-label="Slot strategy overrides">
+      <table className="tbs-settings__table" role="table" aria-label="Slot settings overrides">
         <thead>
           <tr>
             <th scope="col">Slot</th>
             <th scope="col">Strategy</th>
+            <th scope="col">Auto-bind</th>
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 10 }, (_, i) => {
             const slotId = i + 1;
             const slot = slots.find((s) => s.id === slotId);
-            const current = slot?.strategy ?? 'inherit';
+            const raw = slot?.strategy ?? 'inherit';
+            const isCustom = raw !== 'inherit';
+            // Explicit narrowing keeps the type checker satisfied without an assertion.
+            const customSettings: MatchRuleSettings = isCustom ? raw : matchSettings;
+            const override = slot?.autoBindOverride;
+            const autoBindValue = override === undefined ? 'follow' : override ? 'on' : 'off';
             return (
               <tr key={slotId}>
                 <td>Slot {slotId}</td>
                 <td>
                   <select
-                    value={current}
-                    onChange={(e) => onSlotChange(slotId, e.target.value as MatchStrategy | 'inherit')}
+                    value={isCustom ? 'custom' : 'inherit'}
+                    onChange={(e) => {
+                      onSlotChange(
+                        slotId,
+                        e.target.value === 'inherit' ? 'inherit' : { ...matchSettings },
+                      );
+                    }}
                     aria-label={`Strategy for slot ${slotId}`}
                   >
-                    <option value="inherit">Inherit global ({globalStrategy})</option>
-                    <option value="A">A — Session tab first</option>
-                    <option value="B">B — Session + rule check</option>
-                    <option value="C">C — Strict rule match</option>
+                    <option value="inherit">Inherit global</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  {isCustom && (
+                    <MatchKnobs
+                      idPrefix={'Slot ' + String(slotId)}
+                      settings={customSettings}
+                      onChange={(next) => { onSlotChange(slotId, next); }}
+                    />
+                  )}
+                </td>
+                <td>
+                  <select
+                    value={autoBindValue}
+                    onChange={(e) => {
+                      onSlotAutoBindChange(
+                        slotId,
+                        e.target.value === 'follow' ? null : e.target.value === 'on',
+                      );
+                    }}
+                    aria-label={'Auto-bind for slot ' + String(slotId)}
+                  >
+                    <option value="follow">Follow global</option>
+                    <option value="on">Always on</option>
+                    <option value="off">Always off</option>
                   </select>
                 </td>
               </tr>
@@ -1620,7 +1786,9 @@ function ImportExportSection() {
           <ul>
             <li>Slots: {preview.newSlots.length} new, {preview.slotConflicts.length} conflicts</li>
             <li>Rules: {preview.rules.length}</li>
-            <li>Global Strategy: {preview.globalStrategy}</li>
+            <li>
+              Matching: {preview.matchSettings.tabIdMode} + {preview.matchSettings.ruleCheckMode} + priority {preview.matchSettings.priority}
+            </li>
           </ul>
 
           {preview.slotConflicts.length > 0 && (
@@ -1768,8 +1936,16 @@ export function SettingsApp() {
     resolveSectionFromHash(window.location.hash),
   );
   const [commands, setCommands] = useState<CommandInfo[]>([]);
-  const [globalStrategy, setGlobalStrategy] = useState<MatchStrategy>('B');
+  const [matchSettings, setMatchSettings] = useState<MatchRuleSettings>(DEFAULT_MATCH_SETTINGS);
+  const [switchDirection, setSwitchDirection] = useState<SwitchDirection>('next');
+  const [autoBindGlobal, setAutoBindGlobal] = useState(true);
   const [slots, setSlots] = useState<SlotDefinition[]>([]);
+  /**
+   * ACC#5: un-committed per-slot strategy choices. Layered over `slots` when
+   * rendered so a failed/slow write never collapses the editor back to
+   * "Inherit global". An entry is dropped once the server confirms it.
+   */
+  const [slotStrategyDrafts, setSlotStrategyDrafts] = useState<Record<number, SlotStrategyValue>>({});
   const [configVersion, setConfigVersion] = useState(0);
   const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
   const [conflictBanner, setConflictBanner] = useState(false);
@@ -1792,8 +1968,18 @@ export function SettingsApp() {
         setCommands(cmdResult.commands as CommandInfo[]);
       }
       if (stateResult?.success && stateResult.sync) {
-        const sync = stateResult.sync as { globalStrategy: MatchStrategy; slots: SlotDefinition[]; configVersion: number };
-        setGlobalStrategy(sync.globalStrategy);
+        const sync = stateResult.sync as {
+          matchSettings?: MatchRuleSettings;
+          switchDirection?: SwitchDirection;
+          autoBindGlobal?: boolean;
+          slots: SlotDefinition[];
+          configVersion: number;
+        };
+        // NIT-4 read-side defensive default (never reads the removed legacy
+        // strategy field).
+        setMatchSettings(sync.matchSettings ?? DEFAULT_MATCH_SETTINGS);
+        setSwitchDirection(sync.switchDirection ?? 'next');
+        setAutoBindGlobal(sync.autoBindGlobal ?? true);
         setSlots(sync.slots);
         setConfigVersion(sync.configVersion);
       }
@@ -1818,36 +2004,103 @@ export function SettingsApp() {
     return () => { window.removeEventListener('hashchange', onHashChange); };
   }, []);
 
-  const handleGlobalChange = useCallback(async (strategy: MatchStrategy) => {
+  const handleGlobalChange = useCallback(async (settings: MatchRuleSettings) => {
     try {
-      const res = await sendMessage('SET_GLOBAL_STRATEGY', { strategy }, configVersion);
+      const res = await sendMessage('SET_GLOBAL_STRATEGY', { matchSettings: settings }, configVersion);
       const result = extractResult(res);
       if (result?.success) {
-        setGlobalStrategy(strategy);
+        setMatchSettings(settings);
         setConfigVersion((v) => v + 1);
-        setToast({ variant: 'success', message: 'Strategy updated' });
+        setToast({ variant: 'success', message: 'Settings updated' });
       } else if (result?.errorCode === 'CONFIG_CONFLICT') {
         setConflictBanner(true);
         void loadState();
       }
     } catch {
-      setToast({ variant: 'error', message: 'Failed to update strategy' });
+      setToast({ variant: 'error', message: 'Failed to update settings' });
     }
   }, [configVersion, loadState]);
 
-  const handleSlotChange = useCallback(async (slotId: number, strategy: MatchStrategy | 'inherit') => {
+  const handleDirectionChange = useCallback(async (direction: SwitchDirection) => {
+    try {
+      const res = await sendMessage('SET_SWITCH_DIRECTION', { direction }, configVersion);
+      const result = extractResult(res);
+      if (result?.success) {
+        setSwitchDirection(direction);
+        setConfigVersion((v) => v + 1);
+      } else if (result?.errorCode === 'CONFIG_CONFLICT') {
+        setConflictBanner(true);
+        void loadState();
+      }
+    } catch {
+      setToast({ variant: 'error', message: 'Failed to update direction' });
+    }
+  }, [configVersion, loadState]);
+
+  const handleAutoBindGlobalChange = useCallback(async (enabled: boolean) => {
+    try {
+      const res = await sendMessage('SET_AUTO_BIND_GLOBAL', { enabled }, configVersion);
+      const result = extractResult(res);
+      if (result?.success) {
+        setAutoBindGlobal(enabled);
+        setConfigVersion((v) => v + 1);
+      } else if (result?.errorCode === 'CONFIG_CONFLICT') {
+        setConflictBanner(true);
+        void loadState();
+      }
+    } catch {
+      setToast({ variant: 'error', message: 'Failed to update auto-bind' });
+    }
+  }, [configVersion, loadState]);
+
+  const handleSlotChange = useCallback(async (slotId: number, strategy: 'inherit' | MatchRuleSettings) => {
+    // ACC#5: optimistic — reflect the choice immediately so the editor never
+    // collapses to "Inherit global" while the write is in flight or if it fails.
+    setSlotStrategyDrafts((prev) => ({ ...prev, [slotId]: strategy }));
     try {
       const res = await sendMessage('SET_SLOT_STRATEGY', { slotId, strategy }, configVersion);
       const result = extractResult(res);
       if (result?.success) {
-        setSlots((prev) => prev.map((s) => s.id === slotId ? { ...s, strategy } : s));
+        setSlots((prev) => upsertSlotStrategy(prev, slotId, strategy));
+        setSlotStrategyDrafts((prev) => removeSlotDraft(prev, slotId));
+        setConfigVersion((v) => v + 1);
+      } else if (result?.errorCode === 'CONFIG_CONFLICT') {
+        // Keep the user's input visible; the conflict banner explains + refreshes.
+        setConflictBanner(true);
+        void loadState();
+      } else {
+        // Non-conflict failure: DO NOT silently revert — surface it and keep the
+        // draft so the user's selection survives.
+        setToast({ variant: 'error', message: (result?.message as string) || `Failed to update slot ${String(slotId)}` });
+      }
+    } catch {
+      // Keep the draft on a thrown error too — never discard the user's input.
+      setToast({ variant: 'error', message: `Failed to update slot ${String(slotId)}` });
+    }
+  }, [configVersion, loadState]);
+
+  const handleSlotAutoBindChange = useCallback(async (slotId: number, override: boolean | null) => {
+    try {
+      const res = await sendMessage('SET_SLOT_AUTO_BIND', { slotId, override }, configVersion);
+      const result = extractResult(res);
+      if (result?.success) {
+        setSlots((prev) => prev.map((s) => {
+          if (s.id !== slotId) return s;
+          const next = { ...s };
+          if (override === null) {
+            delete next.autoBindOverride;
+          } else {
+            next.autoBindOverride = override;
+          }
+          return next;
+        }));
         setConfigVersion((v) => v + 1);
       } else if (result?.errorCode === 'CONFIG_CONFLICT') {
         setConflictBanner(true);
         void loadState();
       }
     } catch {
-      setToast({ variant: 'error', message: `Failed to update slot ${slotId}` });
+      setToast({ variant: 'error', message: 'Failed to update auto-bind for slot ' + String(slotId) });
     }
   }, [configVersion, loadState]);
 
@@ -1895,11 +2148,16 @@ export function SettingsApp() {
             {activeSection === 'slots' && <ShortcutsSection commands={commands} loading={loading} />}
             {activeSection === 'strategy' && (
               <StrategySection
-                globalStrategy={globalStrategy}
-                slots={slots}
+                matchSettings={matchSettings}
+                switchDirection={switchDirection}
+                autoBindGlobal={autoBindGlobal}
+                slots={mergeSlotDrafts(slots, slotStrategyDrafts)}
                 configVersion={configVersion}
-                onGlobalChange={handleGlobalChange}
-                onSlotChange={handleSlotChange}
+                onGlobalChange={(next) => { void handleGlobalChange(next); }}
+                onDirectionChange={(dir) => { void handleDirectionChange(dir); }}
+                onAutoBindGlobalChange={(enabled) => { void handleAutoBindGlobalChange(enabled); }}
+                onSlotChange={(id, next) => { void handleSlotChange(id, next); }}
+                onSlotAutoBindChange={(id, override) => { void handleSlotAutoBindChange(id, override); }}
               />
             )}
             {activeSection === 'rules' && (

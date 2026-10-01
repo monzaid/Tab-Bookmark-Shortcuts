@@ -20,7 +20,14 @@ const mockSendMessage = vi.fn().mockImplementation(async (msg: { action: string 
     return {
       result: {
         success: true,
-        sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] },
+        sync: {
+          configVersion: 1,
+          matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' },
+          switchDirection: 'next',
+          autoBindGlobal: true,
+          slots: [],
+          rules: [],
+        },
         local: { bindings: [], cycleCursors: [], lastSuccessSlotId: null, recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [] },
       },
     };
@@ -90,10 +97,10 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
 
       // Click strategy section
       fireEvent.click(screen.getByRole('button', { name: 'Global Strategy' }));
-      expect(screen.getByRole('radiogroup', { name: 'Global default strategy' })).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Global matching settings' })).toBeInTheDocument();
     });
 
-    it('should render global strategy radios with B checked', async () => {
+    it('should render the global tri-knob controls with defaults', async () => {
       render(<SettingsApp />);
 
       await waitFor(() => {
@@ -102,8 +109,10 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Global Strategy' }));
 
-      const radioB = screen.getByRole('radio', { name: /B\./ });
-      expect(radioB).toBeChecked();
+      expect(screen.getByLabelText('Global Tab ID')).toHaveValue('exists');
+      expect(screen.getByLabelText('Global Rule Check')).toHaveValue('match');
+      expect(screen.getByLabelText('Global Priority')).toHaveValue('tabId');
+      expect(screen.getByLabelText('Switch Direction')).toHaveValue('next');
     });
 
     it('should render 10 per-slot strategy selects', async () => {
@@ -117,9 +126,10 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
 
       const slotSelects = screen.getAllByRole('combobox', { name: /Strategy for slot/ });
       expect(slotSelects).toHaveLength(10);
+      expect(slotSelects[0]).toHaveValue('inherit');
     });
 
-    it('should send SET_GLOBAL_STRATEGY on radio change', async () => {
+    it('should send SET_GLOBAL_STRATEGY with matchSettings on knob change', async () => {
       render(<SettingsApp />);
 
       await waitFor(() => {
@@ -128,14 +138,13 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Global Strategy' }));
 
-      const radioC = screen.getByRole('radio', { name: /C\./ });
-      fireEvent.click(radioC);
+      fireEvent.change(screen.getByLabelText('Global Rule Check'), { target: { value: 'no-match' } });
 
       await waitFor(() => {
         expect(mockSendMessage).toHaveBeenCalledWith(
           expect.objectContaining({
             action: 'SET_GLOBAL_STRATEGY',
-            payload: { strategy: 'C' },
+            payload: { matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'no-match', priority: 'tabId' } },
           })
         );
       });
@@ -146,7 +155,7 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
     it('should show conflict banner on CONFIG_CONFLICT', async () => {
       mockSendMessage.mockImplementation(async (msg: { action: string }) => {
         if (msg.action === 'GET_COMMANDS') return { result: { success: true, commands: [] } };
-        if (msg.action === 'GET_STATE') return { result: { success: true, sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] }, local: {} } };
+        if (msg.action === 'GET_STATE') return { result: { success: true, sync: { configVersion: 1, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] }, local: {} } };
         if (msg.action === 'SET_GLOBAL_STRATEGY') return { result: { success: false, errorCode: 'CONFIG_CONFLICT', message: 'conflict' } };
         return { result: { success: true } };
       });
@@ -158,7 +167,7 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
       });
 
       fireEvent.click(screen.getByRole('button', { name: 'Global Strategy' }));
-      fireEvent.click(screen.getByRole('radio', { name: /A\./ }));
+      fireEvent.change(screen.getByLabelText('Global Priority'), { target: { value: 'none' } });
 
       await waitFor(() => {
         expect(screen.getByRole('alert')).toHaveTextContent(/changed externally/);
@@ -168,7 +177,7 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
     it('should not expose raw error text to user', async () => {
       mockSendMessage.mockImplementation(async (msg: { action: string }) => {
         if (msg.action === 'GET_COMMANDS') return { result: { success: true, commands: [] } };
-        if (msg.action === 'GET_STATE') return { result: { success: true, sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] }, local: {} } };
+        if (msg.action === 'GET_STATE') return { result: { success: true, sync: { configVersion: 1, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] }, local: {} } };
         if (msg.action === 'SET_GLOBAL_STRATEGY') return { result: { success: false, errorCode: 'BROWSER_API_ERROR', message: 'chrome.runtime.lastError: internal' } };
         return { result: { success: true } };
       });
@@ -180,7 +189,7 @@ describe('T17: Settings — slots, strategy, shortcuts sections', () => {
       });
 
       fireEvent.click(screen.getByRole('button', { name: 'Global Strategy' }));
-      fireEvent.click(screen.getByRole('radio', { name: /C\./ }));
+      fireEvent.change(screen.getByLabelText('Global Rule Check'), { target: { value: 'no-match' } });
 
       await waitFor(() => {
         // Should show safe message, not raw error

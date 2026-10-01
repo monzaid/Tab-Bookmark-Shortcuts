@@ -33,10 +33,12 @@ describe('U1 (P10) — candidate-selector page fully removed', () => {
     expect(countOccurrences(source, 'it(')).toBe(5);
   });
 
-  it('should keep exactly 6 recovery-window cases and drop all candidate imports', () => {
+  it('should keep exactly 8 recovery-window cases and drop all candidate imports', () => {
     const source = read('tests/unit/ui/recovery-selector.test.tsx');
-    // B1/B2: candidate=7 removed, Recovery=6 preserved.
-    expect(countOccurrences(source, 'it(')).toBe(6);
+    // B1/B2: candidate=7 removed. T12b grew the recovery window suite from 6 to
+    // 8 cases (Prev/Next + autoBind + protected-page inline error), so the exact
+    // count is updated while the precision itself is preserved.
+    expect(countOccurrences(source, 'it(')).toBe(8);
     expect(source).not.toContain('CandidateSelectorApp');
     expect(source).not.toContain('TabCandidate');
   });

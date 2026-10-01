@@ -33,7 +33,7 @@ describe('T22: UI message client, optimistic conflict, external change', () => {
       mockSendMessage.mockResolvedValue({
         result: {
           success: true,
-          sync: { configVersion: 5, globalStrategy: 'B', slots: [], rules: [] },
+          sync: { configVersion: 5, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
           local: { bindings: [], cycleCursors: [], lastSuccessSlotId: null, recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [] },
         },
       });
@@ -48,18 +48,18 @@ describe('T22: UI message client, optimistic conflict, external change', () => {
 
       // First set version
       mockSendMessage.mockResolvedValueOnce({
-        result: { success: true, sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] }, local: {} },
+        result: { success: true, sync: { configVersion: 1, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] }, local: {} },
       });
       await client.getState();
 
       mockSendMessage.mockResolvedValueOnce({ success: true, configVersion: 2 });
-      await client.setGlobalStrategy('C');
+      await client.setMatchSettings({ tabIdMode: 'no-exists', ruleCheckMode: 'match', priority: 'tabId' });
 
       expect(mockSendMessage).toHaveBeenLastCalledWith(
         expect.objectContaining({
           action: 'SET_GLOBAL_STRATEGY',
           configVersion: 1,
-          payload: { strategy: 'C' },
+          payload: { matchSettings: { tabIdMode: 'no-exists', ruleCheckMode: 'match', priority: 'tabId' } },
         })
       );
     });
@@ -85,7 +85,7 @@ describe('T22: UI message client, optimistic conflict, external change', () => {
         message: 'Version conflict: expected 1, current is 5',
       });
 
-      const result = await client.setGlobalStrategy('A');
+      const result = await client.setMatchSettings({ tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'none' });
       expect(result.success).toBe(false);
       if (!result.success) {
         expect(result.errorCode).toBe('CONFIG_CONFLICT');
@@ -190,7 +190,7 @@ describe('T22: UI message client, optimistic conflict, external change', () => {
       await client.sendRaw('SAVE_SLOT', { slotId: 1 });
       expect(mockSendMessage.mock.lastCall?.[0]).not.toHaveProperty('configVersion');
 
-      await client.sendRaw('SET_GLOBAL_STRATEGY', { strategy: 'A' }, 3);
+      await client.sendRaw('SET_GLOBAL_STRATEGY', { matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' } }, 3);
       expect(mockSendMessage.mock.lastCall?.[0]).toHaveProperty('configVersion', 3);
     });
 
@@ -208,7 +208,7 @@ describe('T22: UI message client, optimistic conflict, external change', () => {
     it('should not silently overwrite on conflict', async () => {
       // Simulate: client thinks version is 1, but server is at 5
       mockSendMessage.mockResolvedValueOnce({
-        result: { success: true, sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] }, local: {} },
+        result: { success: true, sync: { configVersion: 1, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] }, local: {} },
       });
       await client.getState();
 

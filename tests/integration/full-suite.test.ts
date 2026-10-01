@@ -121,7 +121,9 @@ describe('T24: Integration suite — cross-module compatibility', () => {
           { id: 5, urlMatch: { type: 'exact', value: 'https://new.com' }, strategy: 'inherit', uiMarker: {}, titleSnapshot: 'New', faviconSnapshot: '', createdAt: '', updatedAt: '' },
         ],
         rules: [],
-        globalStrategy: 'A',
+        matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'no-match', priority: 'tabId' },
+        switchDirection: 'next',
+        autoBindGlobal: true,
         configVersion: 99,
       });
 
@@ -200,7 +202,9 @@ describe('T24: Integration suite — cross-module compatibility', () => {
       // Simulate external version bump
       adapter.state.syncStorage['syncState'] = {
         configVersion: 99,
-        globalStrategy: 'C',
+        matchSettings: { tabIdMode: 'no-exists', ruleCheckMode: 'match', priority: 'tabId' },
+        switchDirection: 'next',
+        autoBindGlobal: true,
         slots: [],
         rules: [],
       };

@@ -58,10 +58,16 @@ const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
   'REMOVE_TAB_OVERRIDE',
   'SET_GLOBAL_STRATEGY',
   'SET_SLOT_STRATEGY',
+  'SET_SWITCH_DIRECTION',
+  'SET_AUTO_BIND_GLOBAL',
+  'SET_SLOT_AUTO_BIND',
+  'POSITION_CURRENT_PREV',
+  'POSITION_CURRENT_NEXT',
   'UPDATE_SLOT_UI_MARKER',
   'UPDATE_SLOT_URL',
   'RECOVERY_OPEN_URL',
   'RECOVERY_NEXT_MATCH',
+  'RECOVERY_PREV_MATCH',
   'RECOVERY_DISMISS',
   'EXPORT_CONFIG',
   'IMPORT_PREVIEW',
@@ -230,31 +236,15 @@ export class WorkerOrchestrator {
       const switchMatch = command.match(/^switch-slot-(\d+)$/);
       if (switchMatch) {
         const slotId = parseInt(switchMatch[1]);
-        const result = await this.slotService.switchSlot(slotId);
-        if (result.success) {
-          const outcome = result.outcome;
-          if (outcome.type === 'switched' && outcome.crossWindow) {
-            await this.notifications.notify({ type: 'cross_window_switch', slotId, crossWindow: true });
+        // Same key as the SWITCH_SLOT message path so a command + a message for
+        // the same slot coalesce together (A10 / item1).
+        const result = await this.coalesce(`switch:${String(slotId)}`, async () => {
+          const r = await this.slotService.switchSlot(slotId);
+          if (r.success) {
+            await this.applySwitchOutcome(r.outcome);
           }
-          if (outcome.type === 'needs_recovery') {
-            await this.notifications.notify({ type: 'no_target', slotId });
-            // Open recovery window with slot info params
-            const syncState = await this.repo.getSyncState();
-            const recoverySlot = syncState.slots.find((s) => s.id === slotId);
-            const recoveryParams = new URLSearchParams({
-              recoveryId: outcome.recoveryId,
-              title: recoverySlot?.titleSnapshot ?? '',
-              url: recoverySlot?.urlMatch.type === 'exact' ? recoverySlot.urlMatch.value : '',
-            });
-            await this.adapter.windows.create({
-              url: this.adapter.runtime.getURL(`src/ui/recovery/index.html?${recoveryParams.toString()}`),
-              type: 'popup',
-              width: 400,
-              height: 300,
-              focused: true,
-            });
-          }
-        }
+          return r;
+        });
         await this.diagnostics.record(result.success ? 'SUCCESS' : 'SLOT_NOT_FOUND', 'switch_slot');
         return;
       }
@@ -264,6 +254,135 @@ export class WorkerOrchestrator {
     } catch (e) {
       await this.diagnostics.record('INTERNAL_ERROR', 'command_handler');
     }
+  }
+
+  // ─── In-flight coalescing (A10) ─────────────────────────────────────────
+  //
+  // Concurrent triggers against the SAME key collapse into a single execution;
+  // the shared promise is returned to every awaiter (errors propagate to all).
+  // This is per-key, NEVER a global throttle — different keys stay concurrent.
+  private readonly inFlight = new Map<string, Promise<unknown>>();
+
+  /** Hash-insensitive base-URL key (mirrors `openOrReusePage`'s matching). */
+  private baseUrlKey(url: string): string {
+    const hashIdx = url.indexOf('#');
+    return hashIdx >= 0 ? url.slice(0, hashIdx) : url;
+  }
+
+  private coalesce<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const existing = this.inFlight.get(key);
+    if (existing) return existing as Promise<T>;
+
+    const started = run().finally(() => {
+      // Only clear if this very promise is still the registered one.
+      if (this.inFlight.get(key) === started) this.inFlight.delete(key);
+    });
+    this.inFlight.set(key, started);
+    return started;
+  }
+
+  // ─── applySwitchOutcome — the ONLY side-effect mapping point ────────────
+  //
+  // Mapping table (design §3.2) covers exactly the four frozen SwitchOutcome
+  // variants. There is deliberately NO privileged-page variant branch: privileged
+  // targets are handled on the open/navigate path via the existing PROTECTED_PAGE
+  // domain error (BLK-B / B2).
+  //
+  //   needs_recovery          → create-or-focus recovery window; 1× no_target
+  //   switched + crossWindow  → 1× cross_window_switch
+  //   switched (same window)  → diagnostics only
+  //   incognito_blocked       → diagnostics only
+  //   no_match                → diagnostics only
+  private async applySwitchOutcome(
+    outcome: import('@shared/types').SwitchOutcome,
+  ): Promise<void> {
+    switch (outcome.type) {
+      case 'needs_recovery': {
+        await this.notifications.notify({ type: 'no_target', slotId: outcome.slotId });
+        await this.openOrFocusRecoveryWindow(outcome.slotId, outcome.recoveryId);
+        await this.diagnostics.record('SUCCESS', 'switch_needs_recovery');
+        return;
+      }
+      case 'switched': {
+        if (outcome.crossWindow) {
+          await this.notifications.notify({ type: 'cross_window_switch', slotId: 0, crossWindow: true });
+        }
+        await this.diagnostics.record('SUCCESS', 'switch_switched');
+        return;
+      }
+      case 'incognito_blocked': {
+        // Design §3.2: `incognito_blocked` → notification = — (diagnostics only).
+        // The user-visible toast (`Incognito access not authorized`) is raised by
+        // the UI that initiated the switch, which owns the outcome; sending a
+        // `background_failure` notification here was a mapping-table violation.
+        await this.diagnostics.record('INCOGNITO_NOT_AUTHORIZED', 'switch_incognito_blocked');
+        return;
+      }
+      case 'no_match': {
+        await this.diagnostics.record('NO_MATCH', 'switch_no_match');
+        return;
+      }
+    }
+  }
+
+  /**
+   * Create-or-focus the recovery window for a slot (D12/A11): at most one window
+   * per slot. An existing live session's `windowId` is focused instead of a new
+   * window being spawned.
+   */
+  private async openOrFocusRecoveryWindow(slotId: number, recoveryId: string): Promise<void> {
+    const local = await this.repo.getLocalState();
+
+    // Reuse any LIVE session window for this slot (idempotency). Expired
+    // sessions are skipped so this decision matches `RecoveryService.getSession`'s
+    // lazy expiry filter — a stale session must never mask a fresh window.
+    // The session id is NOT excluded: `createRecoverySession` now dedups per
+    // slot, so the re-triggered `recoveryId` may legitimately be the id of the
+    // already-open window's session (which is exactly what must be focused).
+    const now = Date.now();
+    const existing = local.recoverySessions.find(
+      (s) =>
+        s.slotId === slotId &&
+        s.windowId > 0 &&
+        new Date(s.expiresAt).getTime() >= now,
+    );
+    if (existing) {
+      // FIX-3: reuse must be validated against the window's liveness. Chrome
+      // rejects an update to a closed window id; blindly awaiting it threw,
+      // which (on the message path) became INTERNAL_ERROR and (on the command
+      // path) a diagnostics-only failure — the notification was sent but the
+      // window never opened. Swallow the rejection and fall through to create.
+      try {
+        await this.adapter.windows.update(existing.windowId, { focused: true });
+        return;
+      } catch {
+        // Dead window id → drop the stale placeholder and create a fresh window.
+      }
+    }
+
+    const syncState = await this.repo.getSyncState();
+    const recoverySlot = syncState.slots.find((s) => s.id === slotId);
+    // FIX-2: the effective auto-bind value (slot override wins, else global).
+    // Without this the recovery window could not render the right checkbox
+    // state and always opened unchecked (design §3.5 / D14 / DT8④).
+    const effectiveAutoBind = recoverySlot?.autoBindOverride ?? syncState.autoBindGlobal;
+    const recoveryParams = new URLSearchParams({
+      recoveryId,
+      slotId: String(slotId),
+      title: recoverySlot?.titleSnapshot ?? '',
+      url: recoverySlot?.urlMatch.type === 'exact' ? recoverySlot.urlMatch.value : '',
+      matchType: recoverySlot?.urlMatch.type ?? 'exact',
+      autoBind: String(effectiveAutoBind),
+    });
+    const win = await this.adapter.windows.create({
+      url: this.adapter.runtime.getURL(`src/ui/recovery/index.html?${recoveryParams.toString()}`),
+      type: 'popup',
+      width: 400,
+      height: 300,
+      focused: true,
+    });
+    // Backfill the window id so the next trigger focuses instead of creating.
+    await this.repo.updateRecoverySession(recoveryId, { windowId: win.id });
   }
 
   // ─── Tab Removed Cleanup ───────────────────────────────────────────────
@@ -353,8 +472,25 @@ export class WorkerOrchestrator {
         );
       }
 
-      case 'SWITCH_SLOT':
-        return this.slotService.switchSlot(request.payload.slotId);
+      case 'SWITCH_SLOT': {
+        // item1 fix + A10: the sidebar entry runs the SAME side-effect mapping as
+        // the switch-slot-x command, and concurrent triggers for the same slot
+        // coalesce into one execution (1 window / 1 notification / 1 binding).
+        const slotId = request.payload.slotId;
+        return this.coalesce(`switch:${String(slotId)}`, async () => {
+          const switchResult = await this.slotService.switchSlot(slotId);
+          if (switchResult.success) {
+            await this.applySwitchOutcome(switchResult.outcome);
+          }
+          return switchResult;
+        });
+      }
+
+      case 'POSITION_CURRENT_PREV':
+        return this.slotService.positionPrev(request.payload.anchorTabId);
+
+      case 'POSITION_CURRENT_NEXT':
+        return this.slotService.positionNext(request.payload.anchorTabId);
 
       case 'NEXT_MATCH':
         return this.slotService.nextMatch();
@@ -467,7 +603,22 @@ export class WorkerOrchestrator {
       // ─── Settings ────────────────────────────────────────────────────
       case 'SET_GLOBAL_STRATEGY': {
         const version = request.configVersion ?? this.repo.getConfigVersion();
-        return this.repo.setGlobalStrategy(request.payload.strategy, version);
+        return this.repo.setMatchSettings(request.payload.matchSettings, version);
+      }
+
+      case 'SET_SWITCH_DIRECTION': {
+        const version = request.configVersion ?? this.repo.getConfigVersion();
+        return this.repo.setSwitchDirection(request.payload.direction, version);
+      }
+
+      case 'SET_AUTO_BIND_GLOBAL': {
+        const version = request.configVersion ?? this.repo.getConfigVersion();
+        return this.repo.setAutoBindGlobal(request.payload.enabled, version);
+      }
+
+      case 'SET_SLOT_AUTO_BIND': {
+        const version = request.configVersion ?? this.repo.getConfigVersion();
+        return this.repo.setSlotAutoBindOverride(request.payload.slotId, request.payload.override, version);
       }
 
       case 'SET_SLOT_STRATEGY': {
@@ -554,11 +705,19 @@ export class WorkerOrchestrator {
       }
 
       // ─── Recovery ────────────────────────────────────────────────────
-      case 'RECOVERY_OPEN_URL':
-        return this.recoveryService.openUrl(request.payload.recoveryId);
+      case 'RECOVERY_OPEN_URL': {
+        // A10: concurrent opens for the same session create at most one tab.
+        const recoveryId = request.payload.recoveryId;
+        return this.coalesce(`recovery-open:${recoveryId}`, async () =>
+          this.recoveryService.openUrl(recoveryId, request.payload.autoBind),
+        );
+      }
 
       case 'RECOVERY_NEXT_MATCH':
-        return this.recoveryService.nextMatch(request.payload.recoveryId);
+        return this.recoveryService.nextMatch(request.payload.recoveryId, request.payload.autoBind);
+
+      case 'RECOVERY_PREV_MATCH':
+        return this.recoveryService.prevMatch(request.payload.recoveryId, request.payload.autoBind);
 
       case 'RECOVERY_DISMISS':
         await this.recoveryService.dismiss(request.payload.recoveryId);
@@ -669,21 +828,28 @@ export class WorkerOrchestrator {
         const msg = message as { payload?: { url?: string } };
         const url = msg.payload?.url;
         if (url) {
-          await openOrReusePage({
-            queryAllTabs: async () => {
-              const tabs = await this.adapter.tabs.query({});
-              return tabs.map((t) => ({ id: t.id, url: t.url }));
-            },
-            activateTab: async (tabId) => {
-              await this.adapter.tabs.update(tabId, { active: true });
-            },
-            navigateTab: async (tabId, targetUrl) => {
-              await this.adapter.tabs.update(tabId, { url: targetUrl });
-            },
-            createTab: async (targetUrl) => {
-              await this.adapter.tabs.create({ url: targetUrl, active: true });
-            },
-          }, url);
+          // A10: coalesce concurrent opens of the same base-URL (hash-insensitive)
+          // so a race cannot spawn two tabs.
+          const baseKey = this.baseUrlKey(url);
+          await this.coalesce(baseKey, async () => {
+            await openOrReusePage({
+              queryAllTabs: async () => {
+                const tabs = await this.adapter.tabs.query({});
+                return tabs.map((t) => ({ id: t.id, url: t.url }));
+              },
+              activateTab: async (tabId) => {
+                await this.adapter.tabs.update(tabId, { active: true });
+              },
+              navigateTab: async (tabId, targetUrl) => {
+                await this.adapter.tabs.update(tabId, { url: targetUrl });
+              },
+              createTab: async (targetUrl) => {
+                await this.adapter.tabs.create({ url: targetUrl, active: true });
+                // T11: diagnosis token — no URL/title content (isSanitized-safe).
+                await this.diagnostics.record('SUCCESS', 'open_page:background:create');
+              },
+            }, url);
+          });
         }
         return { success: true };
       }

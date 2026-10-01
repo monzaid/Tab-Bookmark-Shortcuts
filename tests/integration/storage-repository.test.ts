@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
-import type { SlotDefinition, RecoverySession, SlotBinding } from '@shared/types';
+import type { SlotDefinition, RecoverySession, SlotBinding, MatchRuleSettings } from '@shared/types';
+
+/** Distinct MatchRuleSettings values reused across these assertions. */
+const SETTINGS_A: MatchRuleSettings = { tabIdMode: 'exists', ruleCheckMode: 'no-match', priority: 'tabId' };
+const SETTINGS_C: MatchRuleSettings = { tabIdMode: 'no-exists', ruleCheckMode: 'match', priority: 'tabId' };
+const SETTINGS_B: MatchRuleSettings = { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' };
 
 describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
   const adapter = createMockAdapter();
@@ -19,7 +24,9 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
       const local = await repo.getLocalState();
 
       expect(sync.configVersion).toBe(0);
-      expect(sync.globalStrategy).toBe('B');
+      expect(sync.matchSettings).toEqual(SETTINGS_B);
+      expect(sync.switchDirection).toBe('next');
+      expect(sync.autoBindGlobal).toBe(true);
       expect(sync.slots).toEqual([]);
       expect(sync.rules).toEqual([]);
       expect(local.bindings).toEqual([]);
@@ -71,7 +78,7 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
 
     it('should invalidate cache on storage.onChanged and reload truth', async () => {
       // Write initial state
-      await repo.setGlobalStrategy('A', 0);
+      await repo.setMatchSettings(SETTINGS_A, 0);
       expect(repo.getConfigVersion()).toBe(1);
 
       // Simulate external change via storage event
@@ -81,7 +88,9 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
             oldValue: undefined,
             newValue: {
               configVersion: 5,
-              globalStrategy: 'C',
+              matchSettings: SETTINGS_C,
+              switchDirection: 'previous',
+              autoBindGlobal: false,
               slots: [],
               rules: [],
             },
@@ -93,14 +102,14 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
       // Cache should be updated
       const sync = await repo.getSyncState();
       expect(sync.configVersion).toBe(5);
-      expect(sync.globalStrategy).toBe('C');
+      expect(sync.matchSettings).toEqual(SETTINGS_C);
     });
 
     it('should persist and read back after re-hydration', async () => {
       const slot: SlotDefinition = {
         id: 3,
         urlMatch: { type: 'regex', value: 'https://github\\.com/.*' },
-        strategy: 'B',
+        strategy: SETTINGS_B,
         uiMarker: { customTitle: 'GitHub' },
         titleSnapshot: 'GitHub',
         faviconSnapshot: 'https://github.com/favicon.ico',
@@ -123,10 +132,10 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
   describe('Error path — version conflict and cleanup', () => {
     it('should reject write with stale version (CONFIG_CONFLICT)', async () => {
       // First write succeeds: version 0 → 1
-      await repo.setGlobalStrategy('A', 0);
+      await repo.setMatchSettings(SETTINGS_A, 0);
 
       // Second write with stale version 0 should fail
-      const result = await repo.setGlobalStrategy('C', 0);
+      const result = await repo.setMatchSettings(SETTINGS_C, 0);
       expect(result.success).toBe(false);
       if (!result.success) {
         expect(result.errorCode).toBe('CONFIG_CONFLICT');
@@ -136,10 +145,10 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
     });
 
     it('should allow write with correct version after conflict', async () => {
-      await repo.setGlobalStrategy('A', 0); // version → 1
+      await repo.setMatchSettings(SETTINGS_A, 0); // version → 1
 
       // Retry with correct version
-      const result = await repo.setGlobalStrategy('C', 1);
+      const result = await repo.setMatchSettings(SETTINGS_C, 1);
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.configVersion).toBe(2);
@@ -155,6 +164,8 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
         faviconSnapshot: '',
         createdAt: '2020-01-01T00:00:00Z',
         expiresAt: '2020-01-01T00:05:00Z', // Long expired
+        windowId: -1,
+        candidateCursor: null,
       };
 
       const validSession: RecoverySession = {
@@ -165,6 +176,8 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
         faviconSnapshot: '',
         createdAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5 min from now
+        windowId: -1,
+        candidateCursor: null,
       };
 
       await repo.addRecoverySession(expiredSession);
@@ -300,6 +313,8 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
         faviconSnapshot: '',
         createdAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        windowId: -1,
+        candidateCursor: null,
       });
 
       // The old snapshot object must be frozen — no in-place mutation
@@ -339,7 +354,9 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
       // local key it points at (resolveIconReferences reads storage directly).
       adapter.state.syncStorage['syncState'] = {
         configVersion: 1,
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         slots: [
           {
             id: 1,
@@ -377,7 +394,9 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
     it('B7a: invalidates the resolution cache when local storage changes', async () => {
       adapter.state.syncStorage['syncState'] = {
         configVersion: 1,
-        globalStrategy: 'B',
+        matchSettings: SETTINGS_B,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         slots: [
           {
             id: 1,
@@ -414,7 +433,9 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
       // Directly modify mock internal state without triggering onChanged
       adapter.state.syncStorage['syncState'] = {
         configVersion: 10,
-        globalStrategy: 'A',
+        matchSettings: SETTINGS_A,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         slots: [],
         rules: [],
       };
@@ -422,6 +443,35 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
       const result = await repo.checkExternalChange();
       expect(result.changed).toBe(true);
       expect(result.newVersion).toBe(10);
+    });
+
+    // ─── T1 RED ③ (ruling 3): legacy persisted data is ignored, no migration ───
+    it('T1 RED ③: legacy syncState normalizes to the new defaults', async () => {
+      // Legacy shape written by an older version — no `matchSettings` field.
+      // NOTE: this literal is the legacy field name used as *rejected input*;
+      // it is the mandated RED fixture for ruling 3 (see delivery report).
+      adapter.state.syncStorage['syncState'] = {
+        configVersion: 7,
+        globalStrategy: 'C',
+        slots: [],
+        rules: [],
+      };
+
+      const migratedRepo = new StorageRepository(adapter);
+      await migratedRepo.initialize();
+      const sync = await migratedRepo.getSyncState();
+
+      // Silently falls back to the new default (exists + match + tabId).
+      expect(sync.matchSettings).toEqual({ tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' });
+      expect(sync.switchDirection).toBe('next');
+      expect(sync.autoBindGlobal).toBe(true);
+      // configVersion is NOT bumped by normalization.
+      expect(sync.configVersion).toBe(7);
+      // The normalized state has exactly the new key set — the legacy field is
+      // gone entirely (not read, not preserved).
+      expect(Object.keys(sync).sort()).toEqual(
+        ['autoBindGlobal', 'configVersion', 'matchSettings', 'rules', 'slots', 'switchDirection'].sort(),
+      );
     });
   });
 });

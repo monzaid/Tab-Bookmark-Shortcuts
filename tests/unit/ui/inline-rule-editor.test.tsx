@@ -45,7 +45,7 @@ const mockSendMessage = vi.fn().mockImplementation((msg: { action: string }) => 
     return {
       result: {
         success: true,
-        sync: { configVersion: 2, globalStrategy: 'B', slots: [], rules: stateRules },
+        sync: { configVersion: 2, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: stateRules },
         local: { bindings: [], cycleCursors: [], lastSuccessSlotId: null, recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [] },
       },
     };

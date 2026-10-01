@@ -3,16 +3,38 @@
  * Covers: slots, strategies, rules, icons, overrides, recovery, diagnostics, import.
  */
 
-// ─── Matching Strategy ───────────────────────────────────────────────────────
+// ─── Matching Strategy (tri-knob model) ──────────────────────────────────────
+//
+// The legacy single-letter strategy type and its default constant were removed
+// entirely (D17) — no dead type, no dead constant. The old A/B/C → four-cell
+// correspondence lives ONLY in the design doc §3.1 markdown table; it does not
+// exist in code or types.
 
-export type MatchStrategy = 'A' | 'B' | 'C';
+/** Does the slot require its bound tab to exist? */
+export type TabIdMode = 'exists' | 'no-exists';
+/** Does the slot require a URL/regex match? */
+export type RuleCheckMode = 'match' | 'no-match';
+/** Combination 1 only: which source wins when both are available. */
+export type Priority = 'tabId' | 'rule-check' | 'none';
+
+export interface MatchRuleSettings {
+  tabIdMode: TabIdMode;
+  ruleCheckMode: RuleCheckMode;
+  priority: Priority;
+}
+
+/** Global switch direction for single-command entries (design §3.3). */
+export type SwitchDirection = 'previous' | 'next';
 
 /**
- * A: Session tab first — tabId exists → switch; else URL/regex lookup
- * B: Session tab + rule validation (GLOBAL DEFAULT) — tabId exists AND URL still matches → switch; else lookup
- * C: Strict rule matching — ignore tabId, only URL/regex lookup
+ * New default settings = combination 1 + `priority = tabId` (design D9).
+ * Replaces the removed legacy strategy default.
  */
-export const DEFAULT_STRATEGY: MatchStrategy = 'B';
+export const DEFAULT_MATCH_SETTINGS: MatchRuleSettings = {
+  tabIdMode: 'exists',
+  ruleCheckMode: 'match',
+  priority: 'tabId',
+};
 
 // ─── URL Matching ────────────────────────────────────────────────────────────
 
@@ -51,7 +73,9 @@ export interface SlotUiMarker {
 export interface SlotDefinition {
   id: number; // 1-10
   urlMatch: UrlMatchDefinition;
-  strategy: MatchStrategy | 'inherit'; // 'inherit' uses global default
+  strategy: 'inherit' | MatchRuleSettings; // 'inherit' uses global default
+  /** undefined = inherit `autoBindGlobal` (D14). */
+  autoBindOverride?: boolean;
   uiMarker: SlotUiMarker;
   /** Title snapshot at save time */
   titleSnapshot: string;
@@ -122,6 +146,17 @@ export interface RecoverySession {
   createdAt: string; // ISO 8601
   /** TTL: 5 minutes from createdAt */
   expiresAt: string; // ISO 8601
+  /**
+   * Window id of the recovery window (design A11/DT1). Backfilled by the worker
+   * when the window is created so create-or-focus can reuse one window per slot.
+   */
+  windowId: number;
+  /**
+   * Prev/Next cursor anchored to a tabId (DT2). `null` = not yet positioned, in
+   * which case the first browse anchors on the active tab's neighbour. Browsing
+   * does NOT consume the session (DT1/DT5).
+   */
+  candidateCursor: number | null;
 }
 
 // ─── Recovery Snapshot (local) ───────────────────────────────────────────────
@@ -161,7 +196,9 @@ export interface ExportPayload {
   exportedAt: string; // ISO 8601
   slots: SlotDefinition[];
   rules: PageRule[];
-  globalStrategy: MatchStrategy;
+  matchSettings: MatchRuleSettings;
+  switchDirection: SwitchDirection;
+  autoBindGlobal: boolean;
   configVersion: number;
 }
 
@@ -180,7 +217,9 @@ export interface ImportPreview {
   slotConflicts: ImportSlotConflict[];
   newSlots: SlotDefinition[];
   rules: PageRule[];
-  globalStrategy: MatchStrategy;
+  matchSettings: MatchRuleSettings;
+  switchDirection: SwitchDirection;
+  autoBindGlobal: boolean;
   configVersion: number;
 }
 
@@ -188,7 +227,12 @@ export interface ImportPreview {
 
 export interface SyncState {
   configVersion: number;
-  globalStrategy: MatchStrategy;
+  /** Global tri-knob settings (directly replaces the removed legacy strategy field). */
+  matchSettings: MatchRuleSettings;
+  /** Global direction for single-command entries (design §3.3). */
+  switchDirection: SwitchDirection;
+  /** Global auto-bind default; slots may override (D14). */
+  autoBindGlobal: boolean;
   slots: SlotDefinition[];
   rules: PageRule[];
 }

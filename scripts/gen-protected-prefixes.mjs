@@ -49,6 +49,9 @@ const PROTECTED_PREFIXES = [
   'brave://',
   'opera://',
   'vivaldi://',
+  // C2/A13: local files are privileged targets too — the recovery window's
+  // "Open URL" path must intercept them, and they cannot be rule-rewrite targets.
+  'file://',
 ];
 
 const banner = `/**

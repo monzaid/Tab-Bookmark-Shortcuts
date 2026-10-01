@@ -1,0 +1,442 @@
+# Decisions Manifest — Slot Switch Consistency & Strategy Model Redesign
+# Date: 2026-09-30 · Baseline: HEAD d1f1f1d · Layers: Goal / Constraint / Architecture / Detail
+# Counts: 46 decisions · OPEN: 0 · Registered risks: 1 (RK1)
+
+meta:
+  iteration: "1+2 行为一致性 bug 修复 + 3+4 功能重设计（单一整体迭代）"
+  main_design: "_context-output/designs/2026-09-30-slot-switch-consistency-design.md"
+  sub_documents:
+    goal: "_context-output/designs/2026-09-30-slot-switch-consistency-goal-core-scope-design.md"
+    constraint: "_context-output/designs/2026-09-30-slot-switch-consistency-constraint-boundaries-design.md"
+    architecture: "_context-output/designs/2026-09-30-slot-switch-consistency-architecture-module-design.md"
+    detail: "_context-output/designs/2026-09-30-slot-switch-consistency-detail-interaction-copy-design.md"
+  counts: { decisions: 46, open: 0, risks: 1 }
+
+# ─────────────────────────────── Goal ───────────────────────────────
+decisions:
+  - id: D1
+    layer: goal
+    node: 迭代组织
+    decision: "单一整体迭代：1+2 bug 修复 + 3+4 重设计，单一设计文档 → 单一计划"
+    alternatives:
+      - { option: "拆分为两轮", rejected_reason: "1 与 3 深度耦合（3 重定义匹配结果语义，直接决定三者一致性）；4 依赖 3；2 的根因不修则 3/4 新增动作继续出双份" }
+    rationale: "避免同一批文件被反复改动"
+    status: RESOLVED
+  - id: D2
+    layer: goal
+    node: 恢复窗打开职责
+    decision: "background 统一负责：SWITCH_SLOT 结果 needs_recovery → background 开窗；调用方都不自行开窗；侧边栏删除误导性 toast"
+    alternatives:
+      - { option: "调用方各自负责", rejected_reason: "一致性靠两处碰巧同步，正是本轮 bug 成因；3/4 新增窗口逻辑会多处重复" }
+    rationale: "一致性由构造保证（single source of truth）；只弹 1 次收敛到唯一位置"
+    implications: "侧边栏现文案 'Slot x: opening recovery window' 与实际不符，已确认未被测试锁定，可安全删除"
+    status: RESOLVED
+  - id: D3
+    layer: goal
+    node: 组合 4 定义
+    decision: "Position（忽略 Match URL），不再查询 URL/正则"
+    alternatives:
+      - { option: "URL 候选集 + 顺序选第几个", rejected_reason: "与组合 3 语义重叠，失去区分意义" }
+      - { option: "等同全局下一个标签页命令", rejected_reason: "丢失 slot 语义" }
+    status: RESOLVED
+  - id: D4
+    layer: goal
+    node: 组合 4 起点与失败条件
+    decision: "环 = 当前窗口存活标签页；起点 = 该槽上次成功切换的标签页（游标）；游标缺失 → Tab Not Found；首次 → 以当前活动页为起点"
+    alternatives:
+      - { option: "活动页起点", rejected_reason: "无视游标，使 slot 保有自身游标失去作用" }
+      - { option: "binding 起点", rejected_reason: "组合 4 前提即 binding 失效 → 退化为永远 Tab Not Found" }
+    implications: "经 A4 精化：游标即 binding.tabId（用户裁决），故 D4 的 'binding 起点' 对本模型成立"
+    status: RESOLVED
+  - id: D5
+    layer: goal
+    node: 组合 4 聚焦/步进
+    decision: "游标==活动页 → 步进（环内按方向）；游标!=活动页 → 聚焦；游标缺失 → Tab Not Found；成功后更新该槽数据（binding+游标）"
+    status: RESOLVED
+  - id: D6
+    layer: goal
+    node: 方向设置适用范围
+    decision: "仅作用于单命令类入口：① 快捷键 Switch to next matching tab ② Switch to slot x 且该槽有效策略=组合 4。侧边栏保留独立 ⤺/↻"
+    alternatives:
+      - { option: "全局翻转所有入口", rejected_reason: "用户失去直接反向能力" }
+      - { option: "每条快捷键各自配置", rejected_reason: "无需求支撑" }
+    implications: "经 Q35 收紧：侧边栏'点 slot 行'与快捷键同源（保证 SC1 一致性）"
+    status: RESOLVED
+    depends_on: [D7]
+  - id: D7
+    layer: goal
+    node: 侧边栏位置按钮
+    decision: "Current Page 新增 ↑/↓ 位置步进（置于 ⤺/↻ 右侧）；slot 行不新增位置按钮"
+    status: RESOLVED
+  - id: D8
+    layer: goal
+    node: ↑/↓ 起点
+    decision: "复用现有 Lock：起点=锁定 tab；未锁定=当前活动页；锁定后切走再按 → 先聚焦回锁定 tab 再步进"
+    alternatives:
+      - { option: "新增独立 Current Page 游标", rejected_reason: "与 Lock 语义重叠，同一卡片并存两个锚点" }
+      - { option: "恒为当前活动页", rejected_reason: "'记录'名不副实" }
+    implications: "不新增持久化字段；经 DT7 补充：锁定 tab 失效时降级（Q46）"
+    status: RESOLVED
+  - id: D9
+    layer: goal
+    node: 组合 1 priority 语义
+    decision: "偏序 + 回退（**none 档为最严例外**）：none = **绑定 tab 必须存在且 URL 仍匹配，任一不满足 → Tab Not Found，绝不回退 URL 候选**【修正 2026-09-30 · 用户裁定 C-A2 + Q1-B】；tabId = 存活即切（不校验 URL）否则用 URL 候选；rule check = 先用 URL 候选，无匹配才回退切绑定 tab"
+    alternatives:
+      - { option: "三档皆强制 URL 校验", rejected_reason: "使 tabId 与 none 几无差别，失去该档意义" }
+    implications: "新默认（组合1+tabId）≠ 旧默认 B —— 属可感知变更，由 D10 迁移策略约束。**【修正 2026-09-30 · C-A2 + Q1-B】none 档为最严档：绑定 tab『不存在』或『存在但 URL 漂移』**均**返回 recovery（Tab Not Found），不再回退 URL 候选；此为用户裁定，覆盖主设计 §3.1 四格表与本条的原字面措辞（已同步 amended）**"
+    status: RESOLVED
+  - id: D10
+    layer: goal
+    node: 默认值与迁移
+    decision: "【已废弃 2026-09-30】原裁决为'迁移保行为 + 新默认仅新装'。用户裁定：**不做兼容、不做迁移**（应用未公测、无用户历史）→ 删除 globalStrategy，新增 matchSettings；旧持久化数据被忽略、静默落到新默认 exists+match+priority=tabId；不提示、不备份"
+    alternatives:
+      - { option: "迁移保行为（A→组合2 / B→组合1·none / C→组合3 无损映射）", rejected_reason: "[原已采纳，2026-09-30 由用户推翻] 无用户历史，无需保行为；且迁移需兼容层，导致契约前置期 typecheck 死结（TS2367）" }
+      - { option: "升级即重置为新默认", rejected_reason: "[原被否决，现成为实际选择] 无用户历史下重置即预期行为" }
+    rationale: "应用未公测；旧 A/B/C 与新四格的对应关系降级为纯语义参考表，不产生迁移代码"
+    implications: "A/B/C→新格对照表保留为文档语义说明；无 schemaVersion"
+    status: SUPERSEDED
+    superseded_by: "user-ruling-2026-09-30-no-migration"
+  - id: D11
+    layer: goal
+    node: Position 环范围
+    decision: "仅当前窗口（按 index 排序）；步进不跨窗；聚焦可跨窗"
+    alternatives:
+      - { option: "全窗口合并", rejected_reason: "步进莫名跳窗，难预期难测；跨窗口能力未丢失（Focus 路径仍在）" }
+    status: RESOLVED
+  - id: D12
+    layer: goal
+    node: 恢复窗生命周期
+    decision: "每 slot 至多一个：已有 → 聚焦复用绝不新建；不同 slot 各自一窗。与 D2 合流为以 slot 为键的 create-or-focus"
+    alternatives:
+      - { option: "全局单例", rejected_reason: "不同 slot 互相顶掉" }
+      - { option: "每次新建", rejected_reason: "多窗叠加" }
+    status: RESOLVED
+  - id: D13
+    layer: goal
+    node: autoBind 作用域
+    decision: "全局默认 + 槽位可覆盖；设置页配全局；弹窗显示该槽有效值并写入槽位覆盖"
+    alternatives:
+      - { option: "全局单值", rejected_reason: "用户明确要求可覆盖" }
+      - { option: "每 slot 独立无需全局", rejected_reason: "全局默认形同虚设" }
+    status: RESOLVED
+  - id: D14
+    layer: goal
+    node: 覆盖表示与撤销
+    decision: "三态覆盖：slot.autoBindOverride?: boolean（undefined=继承全局）；弹窗复选框显示有效值、切换写强制值；设置页三态（Follow global/Always on/Always off）以撤销覆盖"
+    alternatives:
+      - { option: "布尔覆盖无继承", rejected_reason: "全局默认对存量槽失效，自相矛盾" }
+      - { option: "仅能覆盖开", rejected_reason: "无法表达全局开此槽关" }
+    implications: "全局默认=开；新槽=继承；首次弹窗切换即产生显式覆盖"
+    status: RESOLVED
+  - id: D15
+    layer: goal
+    node: 恢复窗 Prev/Next 候选来源
+    decision: "Match（slot urlMatch 候选集内按方向循环）；无候选 → 窗内报错不跳转"
+    alternatives:
+      - { option: "Position", rejected_reason: "按钮名 Match 名不副实，与同屏 Open URL 语义不一致" }
+      - { option: "自适应按有效策略", rejected_reason: "同一按钮语义随配置漂移" }
+    status: RESOLVED
+  - id: D17
+    layer: goal
+    node: 旧类型与常量的彻底删除
+    decision: "【裁定 2026-09-30 · Q1-A】彻底删除 type MatchStrategy = 'A'|'B'|'C' 与 const DEFAULT_STRATEGY：不保留死类型；新增 DEFAULT_MATCH_SETTINGS 取代；A/B/C 与新四格的对应关系仅保留为主设计 §3.1 的 markdown 对照表（不进入代码/类型）"
+    alternatives:
+      - { option: "保留 MatchStrategy 类型供文档语义对照", rejected_reason: "[RECOMMENDED-B, REJECTED BY USER] 会成为无消费者的死类型" }
+    rationale: "与「不需要保留旧逻辑」一致；避免死代码"
+    implications: "T1 须删除类型与常量；messages.test.ts:19/199-200 的 DEFAULT_STRATEGY 断言随迁移改为 DEFAULT_MATCH_SETTINGS"
+    status: RESOLVED
+    depends_on: [D10]
+    decision: "整块继承：strategy = 'inherit' | MatchRuleSettings；不支持部分覆盖"
+    alternatives:
+      - { option: "逐字段继承", rejected_reason: "无真实诉求、UI 与测试成本翻倍（YAGNI）" }
+    status: RESOLVED
+
+# ──────────────────────────── Constraint ────────────────────────────
+  - id: C1
+    layer: constraint
+    node: 权限红线
+    decision: "本项目不新增 permission/host_permission/command；所需能力全部落在既有权限内"
+    rationale: "既有 tabs/windows/storage/notifications/commands/sidePanel/scripting + <all_urls> 足够；新增权限触发重授权"
+    implications: "方向设置复用既有 next-match / switch-slot-x，不新增命令"
+    status: RESOLVED
+    depends_on: [D6]
+  - id: C2
+    layer: constraint
+    node: 特权页拦截
+    decision: "打开/导航类必须拦截特权页（沿用 isProtectedUrl，命中则报错不打开）；激活类放行且环包含特权页；file:// 等同特权页"
+    alternatives:
+      - { option: "全拦截", rejected_reason: "环排除特权页破坏'环=tab strip'，↑/↓ 跳过用户可见标签页" }
+    implications: "坐实 recovery-service.openUrl:64 未做协议校验的真实缺口，本迭代必须补"
+    status: RESOLVED
+    depends_on: [C3]
+  - id: C3
+    layer: constraint
+    node: incognito 授权
+    decision: "统一沿用 isAllowed()：激活/聚焦 incognito 或在 incognito 新建均需授权；未授权不执行并返回 incognito_blocked"
+    alternatives:
+      - { option: "更严（已授权仍拒激活）", rejected_reason: "能力回退" }
+      - { option: "更松（激活不检查）", rejected_reason: "削弱 not_allowed 默认下隐私承诺" }
+    status: RESOLVED
+  - id: C4
+    layer: constraint
+    node: 向后兼容
+    decision: "【已废弃 2026-09-30】原裁决为'读时升级并回写 + 独立 schemaVersion'。用户裁定：**不做兼容**（应用未公测、无用户历史）→ 无迁移、无 schemaVersion；旧导出文件不再可导入（无用户，可接受）"
+    alternatives:
+      - { option: "读时升级并回写", rejected_reason: "[原已采纳，2026-09-30 由用户推翻] 无用户历史；且 compat 层迫使契约前置期占位，产生编译死结" }
+      - { option: "不兼容重置", rejected_reason: "[原被否决，现成为实际选择] 无用户历史下重置即预期行为" }
+    status: SUPERSEDED
+    superseded_by: "user-ruling-2026-09-30-no-migration"
+    depends_on: [D10]
+  - id: C5
+    layer: constraint
+    node: 测试处置纪律
+    decision: "按新模型自由重写，允许删改既有判据以适配新结构（用户裁决，推翻推荐的'分层处置'）"
+    alternatives:
+      - { option: "分层处置（行为语义迁移保留 / UI 结构自由重写）", rejected_reason: "[RECOMMENDED, REJECTED BY USER] 用户选择完全自由重写" }
+    implications: "实测代价面：行为锚点 slot-service.test.ts:107/133；UI 锚点 settings.test.tsx:96/109；30 个测试文件引用 globalStrategy/strategy。必须保留 SwitchOutcome needs_recovery 契约"
+    status: RESOLVED
+    registers_risk: RK1
+  - id: C6
+    layer: constraint
+    node: 工程与 a11y 基线
+    decision: "不新增 npm 依赖；新增控件满足 WCAG 2.1 AA；界面统一英文、src/ui CJK 守卫保持 0 命中"
+    status: RESOLVED
+  - id: C7
+    layer: constraint
+    node: 质量门禁
+    decision: "不放宽 eslint 严格度、不新增 eslint-disable；lint 判据 = delta-0；typecheck 0 error；三浏览器 build 通过"
+    status: RESOLVED
+
+# ─────────────────────────── Architecture ───────────────────────────
+  - id: A1
+    layer: architecture
+    node: item1 修复点
+    decision: "新增 applySwitchOutcome(outcome, context) 置于 worker-orchestrator；routeMessage(SWITCH_SLOT) 与 handleCommand(switch-slot-x) 都调用；由其唯一负责恢复窗/通知/诊断"
+    alternatives:
+      - { option: "副作用下沉 slotService", rejected_reason: "服务耦合 windows+notifications" }
+      - { option: "UI 层统一", rejected_reason: "与 D2 冲突" }
+    rationale: "基线修正：两条路径本就共用 slotService.switchSlot，分歧仅在结果副作用"
+    status: RESOLVED
+    depends_on: [D2]
+  - id: A2
+    layer: architecture
+    node: 副作用映射契约
+    decision: "needs_recovery→create-or-focus+no_target通知+诊断；switched+crossWindow→cross_window_switch；其余→仅诊断；全程幂等（同 slotId 复用一个窗；单次调用只跑一遍映射）"
+    alternatives:
+      - { option: "只处理 needs_recovery", rejected_reason: "保留多处副作用点，等于把 item1 成因留在架构里" }
+    status: RESOLVED
+    depends_on: [A1, D12]
+  - id: A3
+    layer: architecture
+    node: 状态归属
+    decision: "sync：三旋钮策略/switchDirection/autoBindGlobal/schemaVersion；local：bindings/cycleCursors/recoverySessions/iconCache"
+    alternatives:
+      - { option: "全部 sync", rejected_reason: "tabId 派生状态跨设备无效/有害，且耗尽 sync 配额" }
+      - { option: "全部 local", rejected_reason: "用户偏好失去跨设备同步（能力回退）" }
+    rationale: "用户意图（应同步）与设备现实（不应同步）切开"
+    status: RESOLVED
+  - id: A4
+    layer: architecture
+    node: Position 起点
+    decision: "复用 binding.tabId 作 Position 起点，不新增游标字段；环实时查询导出"
+    alternatives:
+      - { option: "新增 positionCursor 字段", rejected_reason: "两处可能不一致" }
+      - { option: "扩展 cycleCursors", rejected_reason: "与实时查询矛盾（无需存候选集）" }
+    implications: "Goal D4/D5 的'游标'术语收紧为 binding；binding 仅由提交类动作推进"
+    status: RESOLVED
+    depends_on: [D4]
+  - id: A4b
+    layer: architecture
+    node: binding 更新矩阵
+    decision: "提交类（组合4 Switch to slot x / Strategy C / Recovery Open URL）更新 binding；浏览类（slot 行与 Current Page 的 ⤺/↻、↑/↓、Recovery Prev/Next 除 autoBind 勾选）刻意不更新"
+    alternatives:
+      - { option: "收敛统一（所有动作都更新）", rejected_reason: "[RECOMMENDED, REJECTED BY USER] 用户选择刻意分裂" }
+    implications: "已确认有意行为：Match 循环后按组合4快捷键 → 聚焦回 binding；实现处须显式注释防被当遗漏修掉"
+    status: RESOLVED
+    depends_on: [A4]
+  - id: A5
+    layer: architecture
+    node: SwitchOutcome 扩展
+    decision: "【修正 · BLK-B / B2，2026-09-30 裁决】撤销原计划的 protected_blocked 变体；SwitchOutcome 既有 4 变体完全不动；聚焦/步进复用既有 switched；特权页拦截改用既有 domain error PROTECTED_PAGE（types.ts:247），由恢复窗走窗内报错路径渲染"
+    alternatives:
+      - { option: "新增 protected_blocked 且让 openUrl 产出它（B1）", rejected_reason: "BLK-B：该变体无生产者（switchSlot 允许切特权页；拦截属打开/导航路径）；B1 会为死契约强行造生产者、扩大契约面" }
+      - { option: "细粒度扩展（focused/stepped 等）", rejected_reason: "对用户/UI 是同一件事，只需日志级别区分，不值得扩大契约面" }
+    rationale: "原 A5 的新增经规划者实测判定为无生产者的死契约；改用既有 PROTECTED_PAGE domain error 更少契约面，且贴合 C5 不得移除既有变体的保守取向"
+    status: RESOLVED
+    depends_on: [C2, C5]
+  - id: A6
+    layer: architecture
+    node: 配置形状与消息
+    decision: "SyncState 新增 matchSettings/switchDirection/autoBindGlobal/schemaVersion（单键）；消息 5 新增（SET_SWITCH_DIRECTION/SET_AUTO_BIND_GLOBAL/SET_SLOT_AUTO_BIND/POSITION_CURRENT_PREV/POSITION_CURRENT_NEXT）+ 3 重塑 + 4 不变"
+    alternatives:
+      - { option: "独立键 + 整段提交", rejected_reason: "整段提交会覆盖并发改动" }
+      - { option: "独立键 + granular", rejected_reason: "无需新增存储通路" }
+    rationale: "granular payload 避免覆盖并发改动；单一 syncState 键复用乐观并发与变更监听"
+    status: RESOLVED
+    depends_on: [A3, A4]
+  - id: A7
+    layer: architecture
+    node: 模块结构
+    decision: "4 个 resolver 类 + 工厂；共享纯原语（ruleCheckTabMatch/findMatchCandidates/buildPositionRing/applyPriority/focusOrStep）；resolver 只编排、禁止重写原语"
+    alternatives:
+      - { option: "就地扩展 switchSlot 条件分支", rejected_reason: "判定与 I/O 交织正是本轮不一致的土壤" }
+      - { option: "[Q29] 纯函数 resolveSwitch", rejected_reason: "[RECOMMENDED, REJECTED BY USER] 用户选择 resolver 类" }
+      - { option: "每个 resolver 自包含", rejected_reason: "rule check 会有 4 份实现，改一处漏三处" }
+    status: RESOLVED
+    depends_on: [D3, D4, D5, D9]
+  - id: A8
+    layer: architecture
+    node: schemaVersion 与迁移
+    decision: "【已废弃 2026-09-30】原裁决为 schemaVersion 顶层字段 + 读时迁移回写。用户裁定：**删除 schemaVersion、不做迁移**；`migrateSyncState` 改为**仅填新形状默认值**（不读旧字段）；`globalStrategy` 直接删除"
+    alternatives:
+      - { option: "独立 storage 键", rejected_reason: "已废弃：不需要任何版本锚点" }
+      - { option: "无版本号、仅形状嗅探", rejected_reason: "已废弃：不需要形状嗅探" }
+      - { option: "保留 schemaVersion 备用", rejected_reason: "YAGNI：仅为迁移服务；将来需要时再加、成本相同" }
+    status: SUPERSEDED
+    superseded_by: "user-ruling-2026-09-30-no-migration"
+    depends_on: [C4]
+  - id: A9
+    layer: architecture
+    node: item2 幂等与根因定位
+    decision: "单一创造者：OPEN_PAGE 按目标 base-url 做 in-flight 合流；侧边栏 reject 时先有界重试 OPEN_PAGE，仅 chrome.runtime.id 不存在才直连 tabs.create；开页路径写诊断用于根因定位"
+    alternatives:
+      - { option: "仅 background 侧去重", rejected_reason: "双上下文竞速未消除" }
+      - { option: "移除侧边栏 fallback", rejected_reason: "违反 B11b（SW 冷启时按钮不得静默失效）" }
+    implications: "首要根因假设：冷启 SW 期间 sendMessage 响应通道失效 → 客户端落 catch → 与 background 并发各 create 一次"
+    status: RESOLVED
+  - id: A10
+    layer: architecture
+    node: switch/open 全程合流
+    decision: "按 slotId/recoveryId 的 in-flight 合流 + session 一次性消费（Open URL 成功后标已消费，重复调用返回已完成）；串行合法重触发仍允许"
+    alternatives:
+      - { option: "仅依赖 D12 create-or-focus", rejected_reason: "Open URL 开 2 个的第二来源仍在架构里" }
+      - { option: "全局串行化", rejected_reason: "误伤不同 slot 并发操作" }
+    status: RESOLVED
+    depends_on: [A9, D12]
+  - id: A11
+    layer: architecture
+    node: 恢复窗复用机制
+    decision: "recoverySessions 新增 windowId；按 slotId 查活跃 session 的 windowId → 存在则聚焦否则 create 并记录"
+    status: RESOLVED
+    depends_on: [D12]
+  - id: A12
+    layer: architecture
+    node: 恢复窗数据契约
+    decision: "URL 参数新增 slotId/matchType；动作新增 RECOVERY_PREV_MATCH；autoBind 复选框立即持久化且动作载荷显式携带 autoBind（background 以载荷为准）"
+    alternatives:
+      - { option: "动作执行时读持久化值", rejected_reason: "存在刚切换就点击的竞态" }
+    status: RESOLVED
+    depends_on: [A6, D13, D14]
+  - id: A13
+    layer: architecture
+    node: 权限与拦截边界
+    decision: "权限零扩张；isProtectedUrl 仅用于恢复窗 Open URL 与导航到 slot 目标 URL；OPEN_PAGE 到扩展自身页面放行；file:// 加入 canonical 前缀列表并重跑 gen:prefixes"
+    alternatives:
+      - { option: "无差别对所有导航套用", rejected_reason: "会拦掉扩展自身 settings 页，与 item2 直接冲突" }
+    implications: "连带效应（用户已确认）：file:// 亦不可作 rule 改写目标（同一清单被 rule 校验复用）"
+    status: RESOLVED
+    depends_on: [C2]
+  - id: A14
+    layer: architecture
+    node: 环查询作用域
+    decision: "tabs.query({currentWindow:true}) 一次、按 index 排序、O(n)、不缓存；Position 绝不查全窗口；恢复窗 Prev/Next 沿用既有 accessible-tabs 跨窗查询"
+    status: RESOLVED
+    depends_on: [D11]
+
+# ─────────────────────────────── Detail ───────────────────────────────
+  - id: DT1
+    layer: detail
+    node: 恢复窗游标与 session 生命周期
+    decision: "session 记 candidateCursor（tabId 锚定）；Prev/Next 更新游标且不删除 session；仅 Open URL 一次性消费；Do Nothing/超时移除"
+    alternatives:
+      - { option: "由当前活动页推导", rejected_reason: "用户切到非候选页会让位置漂移" }
+      - { option: "UI 层游标 + 载荷带 index", rejected_reason: "D12 复用窗时位置丢失" }
+    implications: "既有 nextMatch 是 candidates[0] + 立即删 session（recovery-service.ts:109/129），与本项不兼容，须重写"
+    status: RESOLVED
+    depends_on: [D15, D12]
+  - id: DT2
+    layer: detail
+    node: Prev/Next 起点锚定与环绕
+    decision: "首次：活动页在候选内则以它其后一个为起点，否则 Next 起于 [0]、Prev 起于 [last]；游标记 cursorTabId 并每次实时重查按 tabId 定位；游标被关闭则落回 [0]/[last]；环绕"
+    alternatives:
+      - { option: "记 index", rejected_reason: "候选集变化后 index 漂移" }
+      - { option: "不环绕", rejected_reason: "与循环语义不符" }
+    status: RESOLVED
+    depends_on: [DT1]
+  - id: DT3
+    layer: detail
+    node: Open URL 收尾
+    decision: "成功后自动关闭恢复窗并释放槽窗前占位。原则：终止动作关窗、浏览动作留窗"
+    alternatives:
+      - { option: "保持打开", rejected_reason: "session 已消费，后续按钮全废" }
+    status: RESOLVED
+    depends_on: [DT1, D12]
+  - id: DT4
+    layer: detail
+    node: 单页环边界
+    decision: "环恒 >= 1（活动页必在窗内）；环仅 1 页 → 步进 = 原地 no-op，不报错不弹窗；Tab Not Found 严格保留给该槽目标不存在"
+    alternatives:
+      - { option: "视为 Tab Not Found", rejected_reason: "环非空却报找不到，用户眼前就有标签页" }
+    status: RESOLVED
+    depends_on: [D4, D11]
+  - id: DT5
+    layer: detail
+    node: TTL 过期与再次触发
+    decision: "TTL 到期自动关窗并释放占位（不再保留已过期死状态）；再触发 → 新 session + 新窗；复用键（活跃 session windowId）唯一决定复用"
+    alternatives:
+      - { option: "保留死窗并原地复活", rejected_reason: "复用键产生歧义、逻辑更绕" }
+      - { option: "保留死窗且新建窗", rejected_reason: "同槽两窗，违反 D12" }
+    status: RESOLVED
+    depends_on: [D12, A11]
+  - id: DT6
+    layer: detail
+    node: 设置页布局
+    decision: "每槽一行内联紧凑（替换现有 10 个 select）：策略 select（Inherit global/Custom，Custom 内联展开 3 旋钮）+ autoBind 三态 select；默认态 2 控件/槽"
+    alternatives:
+      - { option: "每槽可展开面板", rejected_reason: "多一层点击且默认态信息量低" }
+      - { option: "独立子页", rejected_reason: "全局与每槽分离，用户难以对照" }
+    status: RESOLVED
+    depends_on: [D16, D14]
+  - id: DT7
+    layer: detail
+    node: ↑/↓ 在锁定 tab 失效时 + 载荷锚点
+    decision: "载荷 { anchorTabId?: number }（修正 · BLK-A / A1）：侧边栏传 lockedTabId ?? currentTabId；background 不读侧边栏内存态；锁定 tab 失效时降级为以当前活动页为起点，不报错；不让 Lock 持久化"
+    alternatives:
+      - { option: "载荷 {} 且起点取窗口当前活动页（A2）", rejected_reason: "D8 的 Lock 锚点失效（锁定后切走再按 ↑/↓ 不会先聚焦回锁定 tab）" }
+      - { option: "把 Lock 迁到 background/持久化（A3）", rejected_reason: "与 DT7「不让 Lock 持久化」冲突，范围蔓延" }
+    alternatives:
+      - { option: "报错提示", rejected_reason: "锁定页没了不是 ↑/↓ 用户的错误" }
+      - { option: "让 Lock 持久化", rejected_reason: "范围蔓延，无需求支撑" }
+    implications: "Lock 现状为侧边栏会话内内存态（不持久化）；↑/↓ 也在侧边栏内，无实际影响"
+    status: RESOLVED
+    depends_on: [D8]
+  - id: DT8
+    layer: detail
+    node: 成品文案与默认值
+    decision: "全部接受。全局区：Tab ID(Exists★/No tab ID)、Rule Check(Match★/No match)、Priority(Tab ID★/Rule Check/None)、Switch Direction(Previous Match/Next Match★)、Auto-bind☑默认勾选；每槽：Strategy(Inherit global★/Custom)+Auto-bind(Follow global★/Always on/Always off)；侧边栏新增 ↑/↓ 文案；恢复窗 Auto-bind to this slot + Open URL(仅Exact)/Switch to Previous Match/Switch to Next Match/Do Nothing；窗内错误 This URL cannot be opened / No matching tabs found at this time；toast Incognito access not authorized"
+    rationale: "item3 原文 rule check 'no match(default)' 与已裁决 D9/D10 默认（exists+match+tabId）冲突，按 D10 标注 Match★ 并声明偏差，用户已确认接受"
+    status: RESOLVED
+    depends_on: [D10, D14, DT6]
+  - id: DT9
+    layer: detail
+    node: 测试与验证分层
+    decision: "四层：纯函数单测（4 resolver 穷举含反例 + 共享原语）/ 集成（applySwitchOutcome 映射逐行、只弹1窗只开1页、迁移函数）/ UI（↑/↓、恢复窗、设置页、单页环 no-op）/ 门禁 + 强制独立复验"
+    alternatives:
+      - { option: "仅集成测试", rejected_reason: "事件驱动一致性只有单测能稳定断言；纯判定逻辑单测成本极低回归价值极高" }
+    rationale: "第 4 层独立复验直接针对上一轮执行者自审盲区（N5/N6/N7）"
+    status: RESOLVED
+
+# ───────────────────────────── Risks ─────────────────────────────
+risks:
+  - id: RK1
+    origin: C5
+    risk: "老用户切换行为变更将无测试可证"
+    detail: "原风险：C5 允许自由重写既有判据，叠加新默认不等价于旧 B ⇒ D10 零漂移失去可执行证据"
+    accepted_by: user
+    mitigations: []
+    must_preserve: "SwitchOutcome.type === 'needs_recovery' 被 slot-service.test.ts:146/162、full-suite.test.ts:71/179 锁定，新模型不得移除；SwitchOutcome 4 变体冻结不增不减"
+    status: CLOSED_NOT_APPLICABLE
+    closed_reason: "用户裁定 2026-09-30：不做兼容、不做迁移（应用未公测、无用户历史）⇒ 不存在'老用户行为变更'问题；D10/C4/A8 已废弃"
+    still_binding: "must_preserve 中的跨层契约仍生效（与用户配置无关）"
+
+open_questions: []

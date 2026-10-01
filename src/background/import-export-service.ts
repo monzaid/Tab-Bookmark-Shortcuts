@@ -14,13 +14,12 @@ import type { StorageRepository } from './storage-repository';
 import type {
   SlotDefinition,
   PageRule,
-  MatchStrategy,
+  MatchRuleSettings,
   ExportPayload,
   ImportPreview,
   ImportSlotConflict,
   ImportSlotDecision,
 } from '@shared/types';
-import { DEFAULT_STRATEGY } from '@shared/types';
 import { validateRegex } from '@shared/url-utils';
 
 // ─── Import/Export Service ───────────────────────────────────────────────────
@@ -52,7 +51,9 @@ export class ImportExportService {
           },
         })),
         rules: sync.rules,
-        globalStrategy: sync.globalStrategy,
+        matchSettings: sync.matchSettings,
+        switchDirection: sync.switchDirection,
+        autoBindGlobal: sync.autoBindGlobal,
         configVersion: sync.configVersion,
       };
 
@@ -100,7 +101,18 @@ export class ImportExportService {
 
     const importedSlots = data.slots as SlotDefinition[];
     const importedRules = data.rules as PageRule[];
-    const importedStrategy = (data.globalStrategy as MatchStrategy) ?? DEFAULT_STRATEGY;
+
+    // Ruling 4 (2026-09-30): legacy export files are NO LONGER importable.
+    // Validate the new `matchSettings` shape; a missing/invalid shape is rejected
+    // as IMPORT_INVALID. We deliberately do NOT read the legacy strategy field.
+    if (!this.isValidMatchSettings(data.matchSettings)) {
+      return {
+        success: false,
+        errorCode: 'IMPORT_INVALID',
+        message: 'Missing or invalid matchSettings — legacy export files are not supported',
+      };
+    }
+    const importedMatchSettings = data.matchSettings;
     const importedVersion = (data.configVersion as number) ?? 0;
 
     // B4: static regex safety check on every imported regex (never executed here).
@@ -137,7 +149,9 @@ export class ImportExportService {
       slotConflicts,
       newSlots,
       rules: importedRules,
-      globalStrategy: importedStrategy,
+      matchSettings: importedMatchSettings,
+      switchDirection: data.switchDirection === 'previous' ? 'previous' : 'next',
+      autoBindGlobal: data.autoBindGlobal !== false,
       configVersion: importedVersion,
     };
 
@@ -195,8 +209,10 @@ export class ImportExportService {
       // Replace rules entirely with imported rules
       state.rules = preview.rules;
 
-      // Update global strategy
-      state.globalStrategy = preview.globalStrategy;
+      // Update global settings (tri-knob model)
+      state.matchSettings = preview.matchSettings;
+      state.switchDirection = preview.switchDirection;
+      state.autoBindGlobal = preview.autoBindGlobal;
 
       return state;
     });
@@ -209,6 +225,21 @@ export class ImportExportService {
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────
+
+  /**
+   * Shape guard for the new `matchSettings` field. Returns false for anything
+   * that is not a well-formed `MatchRuleSettings` (including the legacy
+   * legacy-strategy-only payloads), so legacy export files are rejected.
+   */
+  private isValidMatchSettings(value: unknown): value is MatchRuleSettings {
+    if (!value || typeof value !== 'object') return false;
+    const v = value as Record<string, unknown>;
+    return (
+      (v.tabIdMode === 'exists' || v.tabIdMode === 'no-exists') &&
+      (v.ruleCheckMode === 'match' || v.ruleCheckMode === 'no-match') &&
+      (v.priority === 'tabId' || v.priority === 'rule-check' || v.priority === 'none')
+    );
+  }
 
   /**
    * B4: Statically validate every imported regex definition and return a

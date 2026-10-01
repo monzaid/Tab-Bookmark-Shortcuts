@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ImportPreviewTable } from './App';
+import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 
 // Import styles
 import '@ui/styles/base.css';
@@ -11,7 +12,16 @@ if (rootElement) {
   createRoot(rootElement).render(
     <StrictMode>
       <ImportPreviewTable
-        preview={{ valid: true, slotConflicts: [], newSlots: [], rules: [], globalStrategy: 'B', configVersion: 0 }}
+        preview={{
+            valid: true,
+            slotConflicts: [],
+            newSlots: [],
+            rules: [],
+            matchSettings: DEFAULT_MATCH_SETTINGS,
+            switchDirection: 'next',
+            autoBindGlobal: true,
+            configVersion: 0,
+          }}
         onCommit={async () => {}}
         onCancel={() => window.close()}
       />

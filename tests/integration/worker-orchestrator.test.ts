@@ -27,7 +27,7 @@ describe('T21: Service Worker lifecycle, message routing, command dispatch, clea
     it('should initialize and hydrate cache on startup', async () => {
       const sync = await worker.repo.getSyncState();
       expect(sync.configVersion).toBe(0);
-      expect(sync.globalStrategy).toBe('B');
+      expect(sync.matchSettings).toEqual({ tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' });
     });
 
     it('should dispatch save-slot-1 command', async () => {

@@ -84,6 +84,106 @@
   line-height: 1.5;
 }
 
+/* ─── Setting Rows (Global Matching Settings, ACC#2) ─────────────────────── */
+
+/**
+ * A single labelled settings row. Used by the Global Matching Settings section
+ * (Switch Direction / Auto-bind) and kept consistent with the per-slot rows so
+ * the section is not a pile of unstyled controls.
+ */
+.tbs-settings__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-sm) 0;
+  max-width: 520px;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+}
+
+.tbs-settings__row > span:first-child {
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.tbs-settings__row select {
+  min-width: 180px;
+}
+
+/* A run of related knob controls (Tab ID / Rule Check / Priority). */
+.tbs-settings__knobs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-lg);
+  padding: var(--space-sm) 0 var(--space-md);
+  max-width: 720px;
+}
+
+.tbs-settings__knobs > label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.tbs-settings__knobs > label > span {
+  font-weight: 500;
+}
+
+/**
+ * Collapsible in-app reference for the Global Matching Settings section.
+ * Kept collapsed by default so the section stays scannable, while every
+ * control it documents remains one click away.
+ */
+.tbs-settings__help {
+  margin: var(--space-sm) 0 var(--space-md);
+  max-width: 720px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.tbs-settings__help > summary {
+  cursor: pointer;
+  padding: var(--space-xs) 0;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.tbs-settings__help-body {
+  padding: var(--space-sm) var(--space-md);
+  border-left: 2px solid var(--color-border);
+  line-height: 1.5;
+}
+
+.tbs-settings__help-body h4 {
+  margin: var(--space-md) 0 var(--space-xxs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.tbs-settings__help-body p {
+  margin: 0 0 var(--space-xxs);
+}
+
+.tbs-settings__help-list {
+  margin: 0;
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.tbs-settings__help-list dt {
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.tbs-settings__help-list dd {
+  margin: 0 0 var(--space-xxs);
+  padding-left: var(--space-md);
+}
+
 /* ─── Settings Table ──────────────────────────────────────────────────────── */
 
 .tbs-settings__table {

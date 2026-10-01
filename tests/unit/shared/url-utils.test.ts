@@ -360,6 +360,9 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
     });
 
     it('should have exactly the expected protected prefixes (no drift)', () => {
+      // T3: `file://` joined the canonical list (C2/A13). The exact-set
+      // comparison is deliberately PRESERVED (not relaxed to toContain) —
+      // that precision is the drift guard.
       expect([...PROTECTED_URL_PREFIXES].sort()).toEqual(
         [
           'about:',
@@ -367,6 +370,7 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
           'chrome-extension://',
           'chrome://',
           'edge://',
+          'file://',
           'moz-extension://',
           'opera://',
           'vivaldi://',

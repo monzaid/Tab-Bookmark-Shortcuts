@@ -11,16 +11,21 @@
  * - Returns domain states: switched / no_match / needs_recovery / incognito_blocked
  */
 
-import type { BrowserAdapter, NormalizedTab } from '@adapters/contract';
+import type { BrowserAdapter } from '@adapters/contract';
 import type { StorageRepository, WriteResult } from './storage-repository';
 import { PENDING_UNDO_TTL_MS } from './storage-repository';
 import type {
   SlotDefinition,
-  MatchStrategy,
+  MatchRuleSettings,
+  SyncState,
   TabCandidate,
   SwitchOutcome,
 } from '@shared/types';
-import { matchesUrl, sortCandidates, normalizeUrl } from '@shared/url-utils';
+import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
+import { normalizeUrl } from '@shared/url-utils';
+import { resolveSwitch } from './switch/resolve-switch';
+import { findMatchCandidates, buildPositionRing } from './switch/primitives';
+import { resolveUserWindow } from './user-window';
 
 // ─── Slot Service ────────────────────────────────────────────────────────────
 
@@ -52,7 +57,7 @@ export class SlotService {
     slotId: number,
     expectedVersion: number,
     uiMarker?: SlotDefinition['uiMarker'],
-    strategy?: MatchStrategy | 'inherit',
+    strategy?: 'inherit' | MatchRuleSettings,
   ): Promise<{ success: true; slot: SlotDefinition } | { success: false; errorCode: string; message: string }> {
     // Get current active tab
     const tabs = await this.adapter.tabs.query({ active: true, currentWindow: true });
@@ -171,9 +176,14 @@ export class SlotService {
       return { success: false, errorCode: 'SLOT_EMPTY', message: `Slot ${slotId} is not configured` };
     }
 
-    // Determine effective strategy
-    const effectiveStrategy = slot.strategy === 'inherit'
-      ? sync.globalStrategy
+    // Effective settings (slot override or global). Read-side defensive default
+    // (NIT-4): UI mocks / hand-built payloads can omit these fields at runtime
+    // even though the type marks them required, so the widening below is
+    // deliberate. This is NOT a compatibility layer — it never reads the removed
+    // legacy strategy field.
+    const syncRuntime = sync as Partial<SyncState>;
+    const effectiveSettings = slot.strategy === 'inherit'
+      ? (syncRuntime.matchSettings ?? DEFAULT_MATCH_SETTINGS)
       : slot.strategy;
 
     // Check incognito authorization
@@ -182,93 +192,71 @@ export class SlotService {
     // Get binding
     const binding = local.bindings.find((b) => b.slotId === slotId);
 
-    // Strategy A: Session tab first
-    if (effectiveStrategy === 'A' && binding) {
-      try {
-        const tab = await this.adapter.tabs.get(binding.tabId);
-        if (tab.incognito && !incognitoAllowed) {
-          return { success: true, outcome: { type: 'incognito_blocked', slotId } };
-        }
-        await this.activateTab(tab);
-        await this.recordSuccess(slotId, tab);
-        return {
-          success: true,
-          outcome: { type: 'switched', tabId: tab.id, windowId: tab.windowId, crossWindow: await this.isCrossWindow(tab.windowId) },
-        };
-      } catch {
-        // Tab no longer exists, fall through to URL matching
-      }
+    // Resolve the live binding tab (null when it is closed).
+    const bindingTab = binding ? await this.getLiveCandidate(binding.tabId) : null;
+    if (bindingTab && bindingTab.isIncognito && !incognitoAllowed) {
+      return { success: true, outcome: { type: 'incognito_blocked', slotId } };
     }
 
-    // Strategy B: Session tab + rule validation
-    if (effectiveStrategy === 'B' && binding) {
-      try {
-        const tab = await this.adapter.tabs.get(binding.tabId);
-        if (tab.incognito && !incognitoAllowed) {
-          return { success: true, outcome: { type: 'incognito_blocked', slotId } };
-        }
-        // Validate URL still matches
-        if (matchesUrl(tab.url, slot.urlMatch)) {
-          await this.activateTab(tab);
-          await this.recordSuccess(slotId, tab);
-
-          // Initialize cycle cursor with all candidates
-          const allCandidates = await this.findCandidates(slot.urlMatch, incognitoAllowed);
-          const currentIdx = allCandidates.findIndex((c) => c.tabId === tab.id);
-          await this.repo.setCycleCursor({
-            slotId,
-            currentIndex: currentIdx >= 0 ? currentIdx : 0,
-            candidateTabIds: allCandidates.map((c) => c.tabId),
-            updatedAt: new Date().toISOString(),
-          });
-
-          return {
-            success: true,
-            outcome: { type: 'switched', tabId: tab.id, windowId: tab.windowId, crossWindow: await this.isCrossWindow(tab.windowId) },
-          };
-        }
-        // URL no longer matches — fall through to full search
-      } catch {
-        // Tab no longer exists — fall through
-      }
-    }
-
-    // Strategy C (or fallback): Full URL/regex search
+    // Gather resolver inputs (no caching — A14).
     const candidates = await this.findCandidates(slot.urlMatch, incognitoAllowed);
+    const activeTabId = await this.getActiveTabId();
+    const positionalRing = await this.buildCurrentWindowRing();
 
-    if (candidates.length === 0) {
-      // No candidates — needs recovery
-      const recoveryId = await this.createRecoverySession(slot);
-      return {
-        success: true,
-        outcome: { type: 'needs_recovery', recoveryId, slotId },
-      };
-    }
-
-    // Activate first candidate
-    const target = candidates[0];
-    await this.activateTabById(target.tabId, target.windowId);
-    await this.recordSuccess(slotId, { id: target.tabId, windowId: target.windowId } as NormalizedTab);
-
-    // Initialize cycle cursor at index 0
-    await this.repo.setCycleCursor({
-      slotId,
-      currentIndex: 0,
-      candidateTabIds: candidates.map((c) => c.tabId),
-      updatedAt: new Date().toISOString(),
+    const resolution = resolveSwitch({
+      settings: effectiveSettings,
+      urlMatch: slot.urlMatch,
+      bindingTabId: binding?.tabId ?? null,
+      bindingTab,
+      candidates,
+      positionalRing,
+      activeTabId,
+      direction: syncRuntime.switchDirection ?? 'next',
     });
 
-    // Update binding
+    if (resolution.kind === 'noop') {
+      return { success: true, outcome: { type: 'no_match', slotId } };
+    }
+
+    if (resolution.kind === 'recovery') {
+      const recoveryId = await this.createRecoverySession(slot);
+      return { success: true, outcome: { type: 'needs_recovery', recoveryId, slotId } };
+    }
+
+    // resolution.kind === 'switch' — perform activation + commit-class bookkeeping.
+    const targetTab = await this.getLiveCandidate(resolution.targetTabId);
+    await this.activateTabById(resolution.targetTabId, targetTab?.windowId ?? -1);
+    await this.recordSuccess(slotId);
+
+    if (candidates.length > 0) {
+      const currentIdx = candidates.findIndex((c) => c.tabId === resolution.targetTabId);
+      await this.repo.setCycleCursor({
+        slotId,
+        currentIndex: currentIdx >= 0 ? currentIdx : 0,
+        candidateTabIds: candidates.map((c) => c.tabId),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    // Commit class (design §3.4) → update binding.
     await this.repo.setBinding({
       slotId,
-      tabId: target.tabId,
-      windowId: target.windowId,
+      tabId: resolution.targetTabId,
+      windowId: targetTab?.windowId ?? -1,
       boundAt: new Date().toISOString(),
     });
 
+    // `crossWindow` must be derived from the PRE-activation snapshot: activating a
+// tab in another window focuses that window, after which `getCurrent()` would
+// report the target window as current and the flag would always be false.
     return {
       success: true,
-      outcome: { type: 'switched', tabId: target.tabId, windowId: target.windowId, crossWindow: target.isCurrentWindow === false },
+      outcome: {
+        type: 'switched',
+        tabId: resolution.targetTabId,
+        windowId: targetTab?.windowId ?? -1,
+        crossWindow: targetTab ? targetTab.isCurrentWindow === false : false,
+      },
     };
   }
 
@@ -298,12 +286,19 @@ export class SlotService {
       return { success: true, outcome: { type: 'no_match', slotId: lastSlotId } };
     }
 
+    // Direction-aware (D6): the single-command entry honours the global direction.
+    const syncRuntime = sync as Partial<SyncState>;
+    const direction = syncRuntime.switchDirection ?? 'next';
+
     // Get or create cursor
-    let cursor = local.cycleCursors.find((c) => c.slotId === lastSlotId);
+    const cursor = local.cycleCursors.find((c) => c.slotId === lastSlotId);
     let nextIndex = 0;
 
     if (cursor) {
-      nextIndex = (cursor.currentIndex + 1) % candidates.length;
+      const step = direction === 'next' ? 1 : -1;
+      nextIndex = (cursor.currentIndex + step + candidates.length) % candidates.length;
+    } else if (direction === 'previous') {
+      nextIndex = candidates.length - 1;
     }
 
     const target = candidates[nextIndex];
@@ -328,6 +323,67 @@ export class SlotService {
     return {
       success: true,
       outcome: { type: 'switched', tabId: target.tabId, windowId: target.windowId, crossWindow: target.isCurrentWindow === false },
+    };
+  }
+
+  // ─── Position (↑/↓) — Current Page (T8 / D7 / BLK-A / A1) ─────────────
+
+  /**
+   * Step to the previous/next tab BY POSITION within the current window.
+   *
+   * - Ring = live tabs of the current window, ordered by tab index (A14).
+   * - Start point = `anchorTabId` (the sidebar passes `lockedTabId ?? currentTabId`).
+   *   A stale/closed anchor degrades to the current active tab WITHOUT error (DT7).
+   * - A single-tab ring is a no-op (DT4).
+   * - Browsing class: the slot binding is NOT touched (A4b).
+   */
+  async positionPrev(anchorTabId?: number): Promise<{ success: true; outcome: SwitchOutcome } | { success: false; errorCode: string; message: string }> {
+    return this.positionStep('previous', anchorTabId);
+  }
+
+  async positionNext(anchorTabId?: number): Promise<{ success: true; outcome: SwitchOutcome } | { success: false; errorCode: string; message: string }> {
+    return this.positionStep('next', anchorTabId);
+  }
+
+  private async positionStep(
+    direction: 'previous' | 'next',
+    anchorTabId?: number,
+  ): Promise<{ success: true; outcome: SwitchOutcome } | { success: false; errorCode: string; message: string }> {
+    const ring = await this.buildCurrentWindowRing();
+    if (ring.length === 0) {
+      return { success: false, errorCode: 'NO_CANDIDATES', message: 'No tabs in the current window' };
+    }
+    if (ring.length === 1) {
+      // Single-tab ring → no-op, not an error (DT4).
+      return { success: true, outcome: { type: 'no_match', slotId: 0 } };
+    }
+
+    const activeTabId = await this.getActiveTabId();
+    // Start point: a live anchor wins; a stale anchor degrades to the active
+    // tab without error (DT7).
+    const anchorTab = anchorTabId === undefined ? undefined : ring.find((t) => t.tabId === anchorTabId);
+    const startTabId: number | null = anchorTab !== undefined ? anchorTab.tabId : activeTabId;
+
+    const startIdx = startTabId === null ? -1 : ring.findIndex((t) => t.tabId === startTabId);
+    const baseIdx = startIdx >= 0 ? startIdx : 0;
+    const delta = direction === 'next' ? 1 : -1;
+    const targetIdx = (baseIdx + delta + ring.length) % ring.length;
+    const target = ring[targetIdx];
+
+    // ACC#7: the ring is the user's window, so compare against it (not the
+    // focused popup) to avoid a spurious focus jump.
+    const currentWindow = await resolveUserWindow(this.adapter);
+    if (target.windowId !== currentWindow.id) {
+      await this.adapter.windows.update(target.windowId, { focused: true });
+    }
+    await this.adapter.tabs.update(target.tabId, { active: true });
+
+    // Browsing class → binding intentionally NOT updated (A4b).
+    await this.recordSuccess(0);
+
+    return {
+      success: true,
+      outcome: { type: 'switched', tabId: target.tabId, windowId: target.windowId, crossWindow: false },
     };
   }
 
@@ -374,9 +430,15 @@ export class SlotService {
 
     // NOTE: intentionally NOT updating the slot binding here — next-match
     // cycling must keep the binding pointing at the pre-switch tab.
+    //
+    // EMERGENT, INTENTIONAL (design §3.4): after cycling through Matches with
+    // this button, pressing "Switch to slot x" (combination 4) FOCUSES BACK to
+    // the binding — deliberately NOT the page you cycled to. This is the
+    // documented consequence of the commit/browse split ("browsing must not
+    // update the binding"). Do NOT "fix" it as if it were an oversight.
 
     // Record success for global next-match
-    await this.recordSuccess(slotId, { id: target.tabId, windowId: target.windowId } as NormalizedTab);
+    await this.recordSuccess(slotId);
 
     return {
       success: true,
@@ -431,9 +493,13 @@ export class SlotService {
 
     // NOTE: intentionally NOT updating the slot binding here — prev-match
     // cycling must keep the binding pointing at the pre-switch tab.
+    //
+    // EMERGENT, INTENTIONAL (design §3.4): see the twin note in
+    // `nextMatchForSlot` — after cycling with this button, "Switch to slot x"
+    // (combination 4) focuses back to the binding on purpose. Not a defect.
 
     // Record success for global next-match
-    await this.recordSuccess(slotId, { id: target.tabId, windowId: target.windowId } as NormalizedTab);
+    await this.recordSuccess(slotId);
 
     return {
       success: true,
@@ -602,23 +668,15 @@ export class SlotService {
   // ─── Private Helpers ───────────────────────────────────────────────────
 
   /**
-   * Find all matching tab candidates across all windows.
+   * Fetch a live tab as a resolver-shaped candidate, or `null` when the tab no
+   * longer exists (closed). Used for the slot binding and for the resolver's
+   * chosen target.
    */
-  private async findCandidates(
-    urlMatch: SlotDefinition['urlMatch'],
-    incognitoAllowed: boolean,
-  ): Promise<TabCandidate[]> {
-    const allTabs = await this.adapter.tabs.query({});
-    const currentWindow = await this.adapter.windows.getCurrent();
-
-    const candidates: TabCandidate[] = allTabs
-      .filter((tab) => {
-        // Exclude incognito tabs if not authorized
-        if (tab.incognito && !incognitoAllowed) return false;
-        // Match URL
-        return matchesUrl(tab.url, urlMatch);
-      })
-      .map((tab) => ({
+  private async getLiveCandidate(tabId: number): Promise<TabCandidate | null> {
+    try {
+      const tab = await this.adapter.tabs.get(tabId);
+      const currentWindow = await resolveUserWindow(this.adapter);
+      return {
         tabId: tab.id,
         windowId: tab.windowId,
         index: tab.index,
@@ -627,45 +685,114 @@ export class SlotService {
         favIconUrl: tab.favIconUrl,
         isCurrentWindow: tab.windowId === currentWindow.id,
         isIncognito: tab.incognito,
-      }));
+      };
+    } catch {
+      return null;
+    }
+  }
 
-    return sortCandidates(candidates);
+  /** The active tab id of the user's window, or null (ACC#7: not the focused popup). */
+  private async getActiveTabId(): Promise<number | null> {
+    const userWindow = await resolveUserWindow(this.adapter);
+    const tabs = await this.adapter.tabs.query({ active: true, windowId: userWindow.id });
+    return tabs.length > 0 ? tabs[0].id : null;
+  }
+
+  /** Position ring = live tabs of the user's window, ordered by tab index (ACC#7). */
+  private async buildCurrentWindowRing(): Promise<TabCandidate[]> {
+    const currentWindow = await resolveUserWindow(this.adapter);
+    const allTabs = await this.adapter.tabs.query({ windowId: currentWindow.id });
+    const candidates: TabCandidate[] = allTabs.map((tab) => ({
+      tabId: tab.id,
+      windowId: tab.windowId,
+      index: tab.index,
+      url: tab.url,
+      title: tab.title,
+      favIconUrl: tab.favIconUrl,
+      isCurrentWindow: tab.windowId === currentWindow.id,
+      isIncognito: tab.incognito,
+    }));
+    return buildPositionRing(candidates, currentWindow.id);
   }
 
   /**
-   * Activate a tab and focus its window.
+   * Find all matching tab candidates across all windows.
    */
-  private async activateTab(tab: NormalizedTab): Promise<void> {
-    // Focus window first if needed
-    const currentWindow = await this.adapter.windows.getCurrent();
-    if (tab.windowId !== currentWindow.id) {
-      await this.adapter.windows.update(tab.windowId, { focused: true });
-    }
-    // Activate tab
-    await this.adapter.tabs.update(tab.id, { active: true });
+  private async findCandidates(
+    urlMatch: SlotDefinition['urlMatch'],
+    incognitoAllowed: boolean,
+  ): Promise<TabCandidate[]> {
+    const allTabs = await this.adapter.tabs.query({});
+    // ACC#7: order candidates against the USER'S window, not the focused popup.
+    const currentWindow = await resolveUserWindow(this.adapter);
+
+    const candidates: TabCandidate[] = allTabs.map((tab) => ({
+      tabId: tab.id,
+      windowId: tab.windowId,
+      index: tab.index,
+      url: tab.url,
+      title: tab.title,
+      favIconUrl: tab.favIconUrl,
+      isCurrentWindow: tab.windowId === currentWindow.id,
+      isIncognito: tab.incognito,
+    }));
+
+    // Single source of truth for filtering + ordering (A7): reuse the shared primitive.
+    return findMatchCandidates(candidates, urlMatch, incognitoAllowed);
   }
 
   private async activateTabById(tabId: number, windowId: number): Promise<void> {
-    const currentWindow = await this.adapter.windows.getCurrent();
+    // ACC#7/#1a: compare against the USER'S window. `getCurrent()` returns the
+    // focused recovery popup while the user acts from it, which would wrongly
+    // trigger a window-focus jump for a target that is already in the user's
+    // window (and steal focus from the popup).
+    const currentWindow = await resolveUserWindow(this.adapter);
     if (windowId !== currentWindow.id) {
       await this.adapter.windows.update(windowId, { focused: true });
     }
     await this.adapter.tabs.update(tabId, { active: true });
   }
 
-  private async isCrossWindow(targetWindowId: number): Promise<boolean> {
-    const currentWindow = await this.adapter.windows.getCurrent();
-    return currentWindow.id !== targetWindowId;
-  }
+  
 
-  private async recordSuccess(slotId: number, _tab: NormalizedTab): Promise<void> {
+  private async recordSuccess(slotId: number): Promise<void> {
     await this.repo.setLastSuccessSlot(slotId);
   }
 
+  /**
+   * Create (or reuse) the recovery session for a slot.
+   *
+   * FIX-3: invariant "at most ONE active session per slot" (design §3.5). A slot
+   * owns a single singleton window, so letting a second live session accumulate
+   * would leak windows. Repeated `needs_recovery` for the same slot therefore
+   * REUSES the active session (its `windowId` is preserved, so the worker
+   * focuses the window instead of spawning a duplicate).
+   *
+   * The expiry filter mirrors `RecoveryService.getSession`'s lazy check: an
+   * EXPIRED same-slot session is pruned and never treated as reusable — that
+   * keeps the reuse decision consistent with what every consumer of a session
+   * would observe.
+   */
   private async createRecoverySession(slot: SlotDefinition): Promise<string> {
-    const recoveryId = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 5 * 60 * 1000); // 5 min TTL
+    const nowMs = now.getTime();
+
+    const local = await this.repo.getLocalState();
+    const sameSlot = local.recoverySessions.filter((s) => s.slotId === slot.id);
+    const active = sameSlot.find((s) => new Date(s.expiresAt).getTime() >= nowMs);
+
+    // Drop every same-slot session that is expired (or superseded by `active`).
+    for (const stale of sameSlot) {
+      if (stale !== active) {
+        await this.repo.removeRecoverySession(stale.recoveryId);
+      }
+    }
+    if (active) {
+      return active.recoveryId;
+    }
+
+    const recoveryId = `rec-${nowMs}-${Math.random().toString(36).slice(2, 8)}`;
+    const expiresAt = new Date(nowMs + 5 * 60 * 1000); // 5 min TTL
 
     await this.repo.addRecoverySession({
       recoveryId,
@@ -675,6 +802,9 @@ export class SlotService {
       faviconSnapshot: slot.faviconSnapshot,
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
+      // Backfilled by the worker when the recovery window is created/focused.
+      windowId: -1,
+      candidateCursor: null,
     });
 
     return recoveryId;

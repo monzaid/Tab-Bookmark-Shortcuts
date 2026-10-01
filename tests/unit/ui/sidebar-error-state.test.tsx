@@ -38,7 +38,7 @@ function emptyState() {
   return {
     result: {
       success: true,
-      sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] },
+      sync: { configVersion: 1, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
       local: {
         bindings: [],
         cycleCursors: [],

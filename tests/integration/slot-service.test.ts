@@ -3,6 +3,12 @@ import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { SlotService } from '@background/slot-service';
 import type { NormalizedTab, NormalizedWindow } from '@adapters/contract';
+import type { MatchRuleSettings } from '@shared/types';
+
+/** Combination 3 = no-exists + match (semantic successor of the old "C"). */
+const COMBO3: MatchRuleSettings = { tabIdMode: 'no-exists', ruleCheckMode: 'match', priority: 'tabId' };
+/** Combination 1 with priority 'none' — binding must still match its URL. */
+const COMBO1_NONE: MatchRuleSettings = { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'none' };
 
 describe('T8: Slot commands, cross-window matching, activation, cycle', () => {
   const adapter = createMockAdapter();
@@ -104,9 +110,9 @@ describe('T8: Slot commands, cross-window matching, activation, cycle', () => {
   });
 
   describe('Error path — strategy fallback and incognito', () => {
-    it('should fallback to rule search when strategy B tab URL no longer matches', async () => {
+    it('combination 1 + priority "none": falls back to URL search when the bound tab URL no longer matches', async () => {
       adapter.setTabs([tabCurrentA]);
-      const saveResult = await service.saveSlot(1, 0);
+      const saveResult = await service.saveSlot(1, 0, undefined, COMBO1_NONE);
       expect(saveResult.success).toBe(true);
 
       // Verify slot was saved
@@ -121,7 +127,6 @@ describe('T8: Slot commands, cross-window matching, activation, cycle', () => {
 
       const result = await service.switchSlot(1);
       if (!result.success) {
-        // Debug: print the error
         throw new Error(`switchSlot failed: ${result.errorCode} - ${result.message}`);
       }
       expect(result.success).toBe(true);
@@ -130,12 +135,12 @@ describe('T8: Slot commands, cross-window matching, activation, cycle', () => {
       }
     });
 
-    it('should ignore tabId with strategy C (strict rule matching)', async () => {
+    it('combination 3 (no-exists + match): ignores the binding and resolves by URL/regex only', async () => {
       adapter.setTabs([tabCurrentA, tabCurrentB]);
-      await service.saveSlot(1, 0, undefined, 'C');
+      await service.saveSlot(1, 0, undefined, COMBO3);
 
-      // Even though binding points to tab 10, strategy C ignores it
-      // It should still find via URL search (first candidate)
+      // Even though the binding points to tab 10, combination 3 ignores it and
+      // resolves from the URL candidates (first by sort order).
       const result = await service.switchSlot(1);
       expect(result.success).toBe(true);
       if (result.success && result.outcome.type === 'switched') {
@@ -190,6 +195,116 @@ describe('T8: Slot commands, cross-window matching, activation, cycle', () => {
       if (!result.success) {
         expect(result.errorCode).toBe('NO_MATCH');
       }
+    });
+  });
+
+  // ─── T8: combination 4 (Position) three-branch + direction awareness ───────
+  describe('T8: combination 4 (no-exists + no-match) and direction', () => {
+    const COMBO4: MatchRuleSettings = { tabIdMode: 'no-exists', ruleCheckMode: 'no-match', priority: 'tabId' };
+
+    async function setDirection(direction: 'previous' | 'next') {
+      await repo.setSwitchDirection(direction, repo.getConfigVersion());
+    }
+
+    it('focuses the binding when it differs from the active tab', async () => {
+      adapter.setTabs([
+        { id: 10, windowId: 1, index: 0, url: 'https://example.com/page', title: 'A', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+        { id: 11, windowId: 1, index: 1, url: 'https://example.com/page', title: 'B', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+        { id: 12, windowId: 1, index: 2, url: 'https://example.com/page', title: 'C', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+      ]);
+      await service.saveSlot(1, 0, undefined, COMBO4);
+      await repo.setBinding({ slotId: 1, tabId: 10, windowId: 1, boundAt: '2026-01-01T00:00:00Z' });
+
+      const r = await service.switchSlot(1);
+      expect(r.success && r.outcome.type === 'switched' ? r.outcome.tabId : null).toBe(10);
+    });
+
+    it('steps when the binding equals the active tab, honouring direction=next', async () => {
+      adapter.setTabs([
+        { id: 10, windowId: 1, index: 0, url: 'https://example.com/page', title: 'A', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+        { id: 11, windowId: 1, index: 1, url: 'https://example.com/page', title: 'B', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+        { id: 12, windowId: 1, index: 2, url: 'https://example.com/page', title: 'C', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+      ]);
+      await service.saveSlot(1, 0, undefined, COMBO4);
+      await repo.setBinding({ slotId: 1, tabId: 11, windowId: 1, boundAt: '2026-01-01T00:00:00Z' });
+      await setDirection('next');
+
+      const r = await service.switchSlot(1);
+      expect(r.success && r.outcome.type === 'switched' ? r.outcome.tabId : null).toBe(12);
+    });
+
+    it('steps backward when direction=previous', async () => {
+      adapter.setTabs([
+        { id: 10, windowId: 1, index: 0, url: 'https://example.com/page', title: 'A', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+        { id: 11, windowId: 1, index: 1, url: 'https://example.com/page', title: 'B', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+        { id: 12, windowId: 1, index: 2, url: 'https://example.com/page', title: 'C', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+      ]);
+      await service.saveSlot(1, 0, undefined, COMBO4);
+      await repo.setBinding({ slotId: 1, tabId: 11, windowId: 1, boundAt: '2026-01-01T00:00:00Z' });
+      await setDirection('previous');
+
+      const r = await service.switchSlot(1);
+      expect(r.success && r.outcome.type === 'switched' ? r.outcome.tabId : null).toBe(10);
+    });
+
+    it('missing cursor → needs_recovery', async () => {
+      adapter.setTabs([
+        { id: 10, windowId: 1, index: 0, url: 'https://example.com/page', title: 'A', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+      ]);
+      await service.saveSlot(1, 0, undefined, COMBO4);
+      await repo.setBinding({ slotId: 1, tabId: 99, windowId: 1, boundAt: '2026-01-01T00:00:00Z' });
+
+      const r = await service.switchSlot(1);
+      expect(r.success ? r.outcome.type : null).toBe('needs_recovery');
+    });
+
+    it('ACC#7 RED: cursor == active tab steps correctly even when the focused window is the recovery popup', async () => {
+      // Reproduction: the user is looking at the recovery popup (a focused
+      // `type:'popup'` window). The slot binding equals the user's ACTIVE tab in
+      // their real window, so per D4/D5 the action must STEP — not pop Tab Not
+      // Found. Before the fix the ring was built from the focused popup window,
+      // so the cursor was never "in the ring" → `missing` → recovery.
+      adapter.setWindows([
+        { id: 1, focused: false, incognito: false, type: 'normal' },
+        { id: 3, focused: true, incognito: false, type: 'popup' },
+      ]);
+      adapter.setTabs([
+        { id: 10, windowId: 1, index: 0, url: 'https://example.com/page', title: 'A', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+        { id: 11, windowId: 1, index: 1, url: 'https://example.com/page', title: 'B', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+        { id: 12, windowId: 1, index: 2, url: 'https://example.com/page', title: 'C', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+        { id: 30, windowId: 3, index: 0, url: 'chrome-extension://mock-id/src/ui/recovery/index.html', title: 'Tab Not Found', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+      ]);
+      await service.saveSlot(1, 0, undefined, COMBO4);
+      await repo.setBinding({ slotId: 1, tabId: 11, windowId: 1, boundAt: '2026-01-01T00:00:00Z' });
+      await repo.setSwitchDirection('next', repo.getConfigVersion());
+
+      const r = await service.switchSlot(1);
+
+      expect(r.success ? r.outcome.type : null).toBe('switched');
+      if (r.success && r.outcome.type === 'switched') {
+        expect(r.outcome.tabId).toBe(12); // stepped forward within the user's window
+        expect(r.outcome.crossWindow).toBe(false);
+      }
+    });
+
+    it('nextMatch honours direction=previous (single-command entry, D6)', async () => {
+      adapter.setTabs([
+        { id: 10, windowId: 1, index: 0, url: 'https://example.com/page', title: 'A', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+        { id: 11, windowId: 1, index: 1, url: 'https://example.com/page', title: 'B', favIconUrl: '', active: false, incognito: false, status: 'complete' },
+        { id: 12, windowId: 1, index: 2, url: 'https://example.com/page', title: 'C', favIconUrl: '', active: true, incognito: false, status: 'complete' },
+      ]);
+      await service.saveSlot(1, 0);
+      await repo.setLastSuccessSlot(1);
+      await repo.setCycleCursor({ slotId: 1, currentIndex: 0, candidateTabIds: [10, 11, 12], updatedAt: new Date().toISOString() });
+      await setDirection('previous');
+
+      // Cursor at index 0; direction=previous steps backwards → index 2 (tab 12).
+      const next = await service.nextMatch();
+      expect(next.success && next.outcome.type === 'switched' ? next.outcome.tabId : null).toBe(12);
+
+      // And again backwards → index 1 (tab 11).
+      const again = await service.nextMatch();
+      expect(again.success && again.outcome.type === 'switched' ? again.outcome.tabId : null).toBe(11);
     });
   });
 });

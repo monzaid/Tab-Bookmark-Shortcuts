@@ -79,7 +79,7 @@ describe('N5 (P2) — a resolved { success: false } load surfaces the error stat
         return Promise.resolve({
           result: {
             success: true,
-            sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] },
+            sync: { configVersion: 1, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
             local: {
               bindings: [],
               cycleCursors: [],

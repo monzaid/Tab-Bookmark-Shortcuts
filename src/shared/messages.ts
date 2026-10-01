@@ -6,7 +6,8 @@
 
 import type {
   DomainErrorCode,
-  MatchStrategy,
+  MatchRuleSettings,
+  SwitchDirection,
   UrlMatchDefinition,
   SlotUiMarker,
   RuleMode,
@@ -46,7 +47,7 @@ export interface SaveSlotRequest extends RequestBase {
     titleSnapshot: string;
     faviconSnapshot: string;
     uiMarker?: SlotUiMarker;
-    strategy?: MatchStrategy | 'inherit';
+    strategy?: 'inherit' | MatchRuleSettings;
   };
 }
 
@@ -148,12 +149,42 @@ export interface RemoveTabOverrideRequest extends RequestBase {
 // Settings operations
 export interface SetGlobalStrategyRequest extends RequestBase {
   action: 'SET_GLOBAL_STRATEGY';
-  payload: { strategy: MatchStrategy };
+  payload: { matchSettings: MatchRuleSettings };
 }
 
 export interface SetSlotStrategyRequest extends RequestBase {
   action: 'SET_SLOT_STRATEGY';
-  payload: { slotId: number; strategy: MatchStrategy | 'inherit' };
+  payload: { slotId: number; strategy: 'inherit' | MatchRuleSettings };
+}
+
+// Direction + auto-bind settings (design §2.4 — new actions)
+export interface SetSwitchDirectionRequest extends RequestBase {
+  action: 'SET_SWITCH_DIRECTION';
+  payload: { direction: SwitchDirection };
+}
+
+export interface SetAutoBindGlobalRequest extends RequestBase {
+  action: 'SET_AUTO_BIND_GLOBAL';
+  payload: { enabled: boolean };
+}
+
+export interface SetSlotAutoBindRequest extends RequestBase {
+  action: 'SET_SLOT_AUTO_BIND';
+  /** `override: null` = follow global; true/false = explicit override (D14). */
+  payload: { slotId: number; override: boolean | null };
+}
+
+// Position (↑/↓) — Current Page only. BLK-A / A1: the sidebar supplies the
+// start point (`lockedTabId ?? currentTabId`); background never reads sidebar
+// in-memory state. A stale/closed anchor degrades to the active tab (DT7).
+export interface PositionCurrentPrevRequest extends RequestBase {
+  action: 'POSITION_CURRENT_PREV';
+  payload: { anchorTabId?: number };
+}
+
+export interface PositionCurrentNextRequest extends RequestBase {
+  action: 'POSITION_CURRENT_NEXT';
+  payload: { anchorTabId?: number };
 }
 
 export interface UpdateSlotUiMarkerRequest extends RequestBase {
@@ -164,12 +195,17 @@ export interface UpdateSlotUiMarkerRequest extends RequestBase {
 // Recovery operations
 export interface RecoveryOpenUrlRequest extends RequestBase {
   action: 'RECOVERY_OPEN_URL';
-  payload: { recoveryId: string };
+  payload: { recoveryId: string; autoBind: boolean };
 }
 
 export interface RecoveryNextMatchRequest extends RequestBase {
   action: 'RECOVERY_NEXT_MATCH';
-  payload: { recoveryId: string };
+  payload: { recoveryId: string; autoBind: boolean };
+}
+
+export interface RecoveryPrevMatchRequest extends RequestBase {
+  action: 'RECOVERY_PREV_MATCH';
+  payload: { recoveryId: string; autoBind: boolean };
 }
 
 export interface RecoveryDismissRequest extends RequestBase {
@@ -308,9 +344,15 @@ export type UiRequest =
   | RemoveTabOverrideRequest
   | SetGlobalStrategyRequest
   | SetSlotStrategyRequest
+  | SetSwitchDirectionRequest
+  | SetAutoBindGlobalRequest
+  | SetSlotAutoBindRequest
+  | PositionCurrentPrevRequest
+  | PositionCurrentNextRequest
   | UpdateSlotUiMarkerRequest
   | RecoveryOpenUrlRequest
   | RecoveryNextMatchRequest
+  | RecoveryPrevMatchRequest
   | RecoveryDismissRequest
   | ExportConfigRequest
   | ImportPreviewRequest
@@ -391,7 +433,7 @@ export interface ExportConfigResponse {
 }
 
 export interface RecoveryResponse {
-  action: 'RECOVERY_OPEN_URL' | 'RECOVERY_NEXT_MATCH' | 'RECOVERY_DISMISS';
+  action: 'RECOVERY_OPEN_URL' | 'RECOVERY_NEXT_MATCH' | 'RECOVERY_PREV_MATCH' | 'RECOVERY_DISMISS';
   result: { success: true; outcome?: SwitchOutcome } | { success: false; errorCode: DomainErrorCode; message: string };
 }
 

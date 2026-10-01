@@ -11,7 +11,7 @@
  * Does NOT: read/write storage directly in React, silently overwrite on conflict
  */
 
-import type { DomainErrorCode, SyncState, LocalState, SwitchOutcome, TabCandidate, DiagnosticEntry, ImportPreview, ImportSlotConflict } from '@shared/types';
+import type { DomainErrorCode, SyncState, LocalState, SwitchOutcome, TabCandidate, DiagnosticEntry, ImportPreview, ImportSlotConflict, MatchRuleSettings, SwitchDirection } from '@shared/types';
 
 // ─── Error Message Mapping ───────────────────────────────────────────────────
 
@@ -242,22 +242,46 @@ export class MessageClient {
 
   // ─── Settings ──────────────────────────────────────────────────────────
 
-  async setGlobalStrategy(strategy: string): Promise<ClientResult> {
-    return this.send('SET_GLOBAL_STRATEGY', { strategy }, true);
+  async setMatchSettings(matchSettings: MatchRuleSettings): Promise<ClientResult> {
+    return this.send('SET_GLOBAL_STRATEGY', { matchSettings }, true);
   }
 
-  async setSlotStrategy(slotId: number, strategy: string): Promise<ClientResult> {
+  async setSlotStrategy(slotId: number, strategy: 'inherit' | MatchRuleSettings): Promise<ClientResult> {
     return this.send('SET_SLOT_STRATEGY', { slotId, strategy }, true);
+  }
+
+  async setSwitchDirection(direction: SwitchDirection): Promise<ClientResult> {
+    return this.send('SET_SWITCH_DIRECTION', { direction }, true);
+  }
+
+  async setAutoBindGlobal(enabled: boolean): Promise<ClientResult> {
+    return this.send('SET_AUTO_BIND_GLOBAL', { enabled }, true);
+  }
+
+  async setSlotAutoBind(slotId: number, override: boolean | null): Promise<ClientResult> {
+    return this.send('SET_SLOT_AUTO_BIND', { slotId, override }, true);
+  }
+
+  async positionCurrentPrev(anchorTabId?: number): Promise<ClientResult> {
+    return this.send('POSITION_CURRENT_PREV', anchorTabId === undefined ? {} : { anchorTabId });
+  }
+
+  async positionCurrentNext(anchorTabId?: number): Promise<ClientResult> {
+    return this.send('POSITION_CURRENT_NEXT', anchorTabId === undefined ? {} : { anchorTabId });
   }
 
   // ─── Recovery ──────────────────────────────────────────────────────────
 
-  async recoveryOpenUrl(recoveryId: string): Promise<ClientResult> {
-    return this.send('RECOVERY_OPEN_URL', { recoveryId });
+  async recoveryOpenUrl(recoveryId: string, autoBind: boolean): Promise<ClientResult> {
+    return this.send('RECOVERY_OPEN_URL', { recoveryId, autoBind });
   }
 
-  async recoveryNextMatch(recoveryId: string): Promise<ClientResult> {
-    return this.send('RECOVERY_NEXT_MATCH', { recoveryId });
+  async recoveryNextMatch(recoveryId: string, autoBind: boolean): Promise<ClientResult> {
+    return this.send('RECOVERY_NEXT_MATCH', { recoveryId, autoBind });
+  }
+
+  async recoveryPrevMatch(recoveryId: string, autoBind: boolean): Promise<ClientResult> {
+    return this.send('RECOVERY_PREV_MATCH', { recoveryId, autoBind });
   }
 
   async recoveryDismiss(recoveryId: string): Promise<ClientResult> {

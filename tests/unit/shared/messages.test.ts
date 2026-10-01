@@ -6,6 +6,9 @@ import type {
   SwitchSlotRequest,
   NextMatchRequest,
   ContentNavigationReport,
+  SetSlotAutoBindRequest,
+  PositionCurrentNextRequest,
+  PositionCurrentPrevRequest,
 } from '@shared/messages';
 import type {
   DomainErrorCode,
@@ -15,8 +18,9 @@ import type {
   LocalState,
   RecoverySession,
   SwitchOutcome,
+  MatchRuleSettings,
 } from '@shared/types';
-import { DEFAULT_STRATEGY } from '@shared/types';
+import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 
 /**
  * Exhaustive switch helper — compile-time guarantee all actions are handled.
@@ -42,9 +46,15 @@ function handleUiAction(request: UiRequest): string {
     case 'REMOVE_TAB_OVERRIDE': return 'remove-override';
     case 'SET_GLOBAL_STRATEGY': return 'set-strategy';
     case 'SET_SLOT_STRATEGY': return 'set-slot-strategy';
+    case 'SET_SWITCH_DIRECTION': return 'set-direction';
+    case 'SET_AUTO_BIND_GLOBAL': return 'set-auto-bind-global';
+    case 'SET_SLOT_AUTO_BIND': return 'set-slot-auto-bind';
+    case 'POSITION_CURRENT_PREV': return 'position-prev';
+    case 'POSITION_CURRENT_NEXT': return 'position-next';
     case 'UPDATE_SLOT_UI_MARKER': return 'update-marker';
     case 'RECOVERY_OPEN_URL': return 'recovery-open';
     case 'RECOVERY_NEXT_MATCH': return 'recovery-next';
+    case 'RECOVERY_PREV_MATCH': return 'recovery-prev';
     case 'RECOVERY_DISMISS': return 'recovery-dismiss';
     case 'EXPORT_CONFIG': return 'export';
     case 'IMPORT_PREVIEW': return 'import-preview';
@@ -138,7 +148,9 @@ describe('T2: Domain model and message contract', () => {
     it('should construct valid SyncState and LocalState', () => {
       const sync: SyncState = {
         configVersion: 5,
-        globalStrategy: 'B',
+        matchSettings: DEFAULT_MATCH_SETTINGS,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         slots: [],
         rules: [],
       };
@@ -179,6 +191,8 @@ describe('T2: Domain model and message contract', () => {
         faviconSnapshot: '',
         createdAt: '2026-01-01T10:00:00Z',
         expiresAt: '2026-01-01T10:05:00Z',
+        windowId: -1,
+        candidateCursor: null,
       };
       const ttl = new Date(session.expiresAt).getTime() - new Date(session.createdAt).getTime();
       expect(ttl).toBe(5 * 60 * 1000);
@@ -196,8 +210,55 @@ describe('T2: Domain model and message contract', () => {
       expect(incognitoBlocked.type).toBe('incognito_blocked');
     });
 
-    it('should have DEFAULT_STRATEGY as B', () => {
-      expect(DEFAULT_STRATEGY).toBe('B');
+    // ─── T1 RED ⑤ (D17): DEFAULT_MATCH_SETTINGS replaces the removed legacy default ───
+    it('should define DEFAULT_MATCH_SETTINGS as combination 1 + priority tabId', () => {
+      expect(DEFAULT_MATCH_SETTINGS).toEqual({
+        tabIdMode: 'exists',
+        ruleCheckMode: 'match',
+        priority: 'tabId',
+      });
+    });
+
+    it('should accept valid MatchRuleSettings value domains', () => {
+      const settings: MatchRuleSettings = {
+        tabIdMode: 'no-exists',
+        ruleCheckMode: 'no-match',
+        priority: 'none',
+      };
+      expect(settings.priority).toBe('none');
+    });
+
+    it('should allow SET_SLOT_AUTO_BIND override: null (follow global)', () => {
+      const req: SetSlotAutoBindRequest = {
+        requestId: 'req-auto-bind',
+        action: 'SET_SLOT_AUTO_BIND',
+        payload: { slotId: 1, override: null },
+      };
+      expect(req.payload.override).toBeNull();
+    });
+
+    it('should allow POSITION_CURRENT_PREV/NEXT with and without anchorTabId', () => {
+      const withAnchor: PositionCurrentNextRequest = {
+        requestId: 'req-pos-1',
+        action: 'POSITION_CURRENT_NEXT',
+        payload: { anchorTabId: 42 },
+      };
+      const withoutAnchor: PositionCurrentPrevRequest = {
+        requestId: 'req-pos-2',
+        action: 'POSITION_CURRENT_PREV',
+        payload: {},
+      };
+      expect(withAnchor.payload.anchorTabId).toBe(42);
+      expect(withoutAnchor.payload).toEqual({});
+    });
+
+    it('should keep the four frozen SwitchOutcome variants (needs_recovery preserved)', () => {
+      const types = (['switched', 'no_match', 'needs_recovery', 'incognito_blocked'] as const).map(
+        (t) => t,
+      );
+      expect(types).toEqual(['switched', 'no_match', 'needs_recovery', 'incognito_blocked']);
+      const needsRecovery: SwitchOutcome = { type: 'needs_recovery', recoveryId: 'rec-1', slotId: 3 };
+      expect(needsRecovery.type).toBe('needs_recovery');
     });
   });
 
@@ -256,7 +317,9 @@ describe('T2: Domain model and message contract', () => {
       // Compile-time check: SyncState must not have tabId fields
       const sync: SyncState = {
         configVersion: 1,
-        globalStrategy: 'B',
+        matchSettings: DEFAULT_MATCH_SETTINGS,
+        switchDirection: 'next',
+        autoBindGlobal: true,
         slots: [],
         rules: [],
       };

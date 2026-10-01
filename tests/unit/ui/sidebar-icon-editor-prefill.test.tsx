@@ -30,7 +30,7 @@ const BASE_STATE = {
     success: true,
     sync: {
       configVersion: 1,
-      globalStrategy: 'B',
+      matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true,
       slots: [
         {
           id: 1,

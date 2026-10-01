@@ -23,7 +23,7 @@ const mockSendMessage = vi.fn(async (msg: { action?: string }) => {
   return {
     result: {
       success: true,
-      sync: { configVersion: 1, globalStrategy: 'B', slots: [], rules: [] },
+      sync: { configVersion: 1, matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' }, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
       local: {
         bindings: [],
         cycleCursors: [],
@@ -89,6 +89,7 @@ describe('ui-smoke — five page entries render', () => {
         slotUrl="https://example.com"
         onOpenUrl={vi.fn()}
         onNextMatch={vi.fn()}
+        onPrevMatch={vi.fn()}
         onDismiss={vi.fn()}
       />,
     );
@@ -106,7 +107,9 @@ describe('ui-smoke — five page entries render', () => {
           slotConflicts: [],
           newSlots: [],
           rules: [],
-          globalStrategy: 'B',
+          matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' },
+          switchDirection: 'next',
+          autoBindGlobal: true,
           configVersion: 0,
         }}
         onCommit={vi.fn()}

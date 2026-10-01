@@ -69,9 +69,16 @@
   margin-top: var(--space-sm);
 }
 
+/**
+ * ACC#1b: the labels "Switch to Previous Match" / "Switch to Next Match" are
+ * long. `flex-basis: auto` (not 0%) + NO fixed `min-width` floor means each
+ * button keeps its automatic `min-width: auto` (= min-content = full label
+ * width); base.css `white-space: nowrap` then keeps the text on one line inside
+ * the box. A pixel `min-width: 90px` used to override that min-content floor,
+ * letting the boxes shrink below the label width and clip/overflow the text.
+ */
 .tbs-recovery__actions .tbs-btn {
-  flex: 1;
-  min-width: 90px;
+  flex: 1 1 auto;
   justify-content: center;
 }
 

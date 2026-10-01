@@ -15,7 +15,8 @@ import type {
   LocalState,
   SlotDefinition,
   PageRule,
-  MatchStrategy,
+  MatchRuleSettings,
+  SwitchDirection,
   SlotBinding,
   CycleCursor,
   RecoverySession,
@@ -23,7 +24,7 @@ import type {
   DiagnosticEntry,
   DomainErrorCode,
 } from '@shared/types';
-import { DEFAULT_STRATEGY } from '@shared/types';
+import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 import { urlsMatch } from '@shared/url-utils';
 
 // ─── Storage Keys ────────────────────────────────────────────────────────────
@@ -74,7 +75,9 @@ const RETRY_DELAY_MS = 200;
 export function createDefaultSyncState(): SyncState {
   return {
     configVersion: 0,
-    globalStrategy: DEFAULT_STRATEGY,
+    matchSettings: DEFAULT_MATCH_SETTINGS,
+    switchDirection: 'next',
+    autoBindGlobal: true,
     slots: [],
     rules: [],
   };
@@ -166,13 +169,19 @@ export class StorageRepository {
   }
 
   /**
-   * Migrate sync state to current version if needed.
+   * Normalize persisted sync state to the current shape.
+   *
+   * NO MIGRATION (design ruling 2026-09-30): legacy data is ignored and silently
+   * falls back to the new defaults (`exists + match + tabId`). We deliberately
+   * do NOT read the old strategy field, do NOT sniff shapes, and do NOT bump
+   * `configVersion`.
    */
-  private migrateSyncState(state: SyncState): SyncState {
-    // Ensure all required fields exist
+  private migrateSyncState(state: Partial<SyncState>): SyncState {
     return {
       configVersion: state.configVersion ?? 0,
-      globalStrategy: state.globalStrategy ?? DEFAULT_STRATEGY,
+      matchSettings: state.matchSettings ?? DEFAULT_MATCH_SETTINGS,
+      switchDirection: state.switchDirection ?? 'next',
+      autoBindGlobal: state.autoBindGlobal ?? true,
       slots: state.slots ?? [],
       rules: state.rules ?? [],
     };
@@ -612,9 +621,46 @@ export class StorageRepository {
     });
   }
 
-  async setGlobalStrategy(strategy: MatchStrategy, expectedVersion: number): Promise<WriteResult> {
+  async setMatchSettings(settings: MatchRuleSettings, expectedVersion: number): Promise<WriteResult> {
     return this.writeSync(expectedVersion, (state) => {
-      state.globalStrategy = strategy;
+      state.matchSettings = settings;
+      return state;
+    });
+  }
+
+  async setSwitchDirection(direction: SwitchDirection, expectedVersion: number): Promise<WriteResult> {
+    return this.writeSync(expectedVersion, (state) => {
+      state.switchDirection = direction;
+      return state;
+    });
+  }
+
+  async setAutoBindGlobal(enabled: boolean, expectedVersion: number): Promise<WriteResult> {
+    return this.writeSync(expectedVersion, (state) => {
+      state.autoBindGlobal = enabled;
+      return state;
+    });
+  }
+
+  /**
+   * Per-slot auto-bind override (D14). `override: null` clears the override so
+   * the slot follows `autoBindGlobal` again.
+   */
+  async setSlotAutoBindOverride(
+    slotId: number,
+    override: boolean | null,
+    expectedVersion: number,
+  ): Promise<WriteResult> {
+    return this.writeSync(expectedVersion, (state) => {
+      const idx = state.slots.findIndex((s) => s.id === slotId);
+      if (idx < 0) return state;
+      const next = { ...state.slots[idx] };
+      if (override === null) {
+        delete next.autoBindOverride;
+      } else {
+        next.autoBindOverride = override;
+      }
+      state.slots = state.slots.map((s, i) => (i === idx ? next : s));
       return state;
     });
   }
@@ -671,6 +717,22 @@ export class StorageRepository {
     await this.writeLocal((state) => ({
       ...state,
       recoverySessions: [...state.recoverySessions, session],
+    }));
+  }
+
+  /**
+   * Patch a recovery session in place (immutably). Used to persist the browse
+   * cursor and to backfill the recovery window id (T6 / A11 / DT2).
+   */
+  async updateRecoverySession(
+    recoveryId: string,
+    patch: Partial<Pick<RecoverySession, 'candidateCursor' | 'windowId'>>,
+  ): Promise<void> {
+    await this.writeLocal((state) => ({
+      ...state,
+      recoverySessions: state.recoverySessions.map((s) =>
+        s.recoveryId === recoveryId ? { ...s, ...patch } : s,
+      ),
     }));
   }
 
