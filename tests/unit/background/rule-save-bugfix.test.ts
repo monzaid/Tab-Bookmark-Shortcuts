@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { RuleService } from '@background/rule-service';
+import { FieldDeliveryService } from '@background/field-delivery-service';
 import { WorkerOrchestrator } from '@background/worker-orchestrator';
 import type { NormalizedWindow } from '@adapters/contract';
 
@@ -15,6 +16,7 @@ describe('Rule save — simple direct writes', () => {
   const adapter = createMockAdapter();
   let repo: StorageRepository;
   let service: RuleService;
+  let delivery: FieldDeliveryService;
 
   const currentWindow: NormalizedWindow = { id: 1, focused: true, incognito: false, type: 'normal' };
 
@@ -24,13 +26,15 @@ describe('Rule save — simple direct writes', () => {
     repo = new StorageRepository(adapter);
     await repo.initialize();
     service = new RuleService(adapter, repo);
+    // Mirror the production wiring (A2): the delivery coordinator is injected.
+    delivery = new FieldDeliveryService(adapter, repo);
+    service.setDelivery((tabIds) => delivery.recomputeAndRedeliver(tabIds));
   });
 
   describe('createRule', () => {
     it('should create a rule and persist it', async () => {
       const result = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 0,
         title: 'Test Rule',
       });
@@ -51,21 +55,18 @@ describe('Rule save — simple direct writes', () => {
     it('should create multiple rules sequentially without version conflicts', async () => {
       const r1 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/first' },
-        mode: 'auto',
         priority: 0,
       });
       expect(r1.success).toBe(true);
 
       const r2 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/second' },
-        mode: 'manual',
         priority: 5,
       });
       expect(r2.success).toBe(true);
 
       const r3 = await service.createRule({
         urlMatch: { type: 'regex', value: 'https://example\\.com/.*' },
-        mode: 'auto',
         priority: 10,
       });
       expect(r3.success).toBe(true);
@@ -77,7 +78,6 @@ describe('Rule save — simple direct writes', () => {
     it('should reject protected URLs', async () => {
       const result = await service.createRule({
         urlMatch: { type: 'exact', value: 'chrome://extensions' },
-        mode: 'auto',
         priority: 0,
       });
       expect(result.success).toBe(false);
@@ -89,7 +89,6 @@ describe('Rule save — simple direct writes', () => {
     it('should reject invalid regex', async () => {
       const result = await service.createRule({
         urlMatch: { type: 'regex', value: '[invalid' },
-        mode: 'auto',
         priority: 0,
       });
       expect(result.success).toBe(false);
@@ -101,7 +100,6 @@ describe('Rule save — simple direct writes', () => {
     it('should clamp priority to [-100, 100]', async () => {
       const result = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/clamp' },
-        mode: 'auto',
         priority: 999,
       });
       expect(result.success).toBe(true);
@@ -113,14 +111,12 @@ describe('Rule save — simple direct writes', () => {
     it('should reject an exact duplicate rule (atomic duplicate detection)', async () => {
       const first = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/dup' },
-        mode: 'auto',
         priority: 0,
       });
       expect(first.success).toBe(true);
 
       const second = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/dup' },
-        mode: 'auto',
         priority: 0,
       });
       expect(second.success).toBe(false);
@@ -135,7 +131,6 @@ describe('Rule save — simple direct writes', () => {
     it('should only append one rule when two identical CREATE_RULE calls race', async () => {
       const ruleA = {
         urlMatch: { type: 'exact' as const, value: 'https://example.com/race' },
-        mode: 'auto' as const,
         priority: 0,
       };
       // Fire two concurrent identical creates. The atomic duplicate check inside
@@ -157,7 +152,6 @@ describe('Rule save — simple direct writes', () => {
     it('should update an existing rule', async () => {
       const created = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/edit' },
-        mode: 'auto',
         priority: 0,
         title: 'Original',
       });
@@ -189,7 +183,6 @@ describe('Rule save — simple direct writes', () => {
     it('should delete an existing rule', async () => {
       const created = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/delete-me' },
-        mode: 'auto',
         priority: 0,
       });
       expect(created.success).toBe(true);
@@ -209,7 +202,6 @@ describe('Rule save — simple direct writes', () => {
       ]);
       const created = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/reapply' },
-        mode: 'auto',
         priority: 0,
         title: 'Rule Title',
       });
@@ -257,7 +249,6 @@ describe('Rule save — simple direct writes', () => {
         action: 'CREATE_RULE',
         payload: {
           urlMatch: { type: 'exact', value: 'https://example.com/via-worker' },
-          mode: 'auto',
           priority: 0,
         },
       }, {});
@@ -275,7 +266,6 @@ describe('Rule save — simple direct writes', () => {
         action: 'CREATE_RULE',
         payload: {
           urlMatch: { type: 'exact', value: 'https://example.com/a' },
-          mode: 'auto',
           priority: 0,
         },
       }, {});
@@ -287,7 +277,6 @@ describe('Rule save — simple direct writes', () => {
         action: 'CREATE_RULE',
         payload: {
           urlMatch: { type: 'regex', value: 'https://example\\.com/.*' },
-          mode: 'auto',
           priority: 5,
         },
       }, {});
@@ -303,7 +292,6 @@ describe('Rule save — simple direct writes', () => {
         action: 'CREATE_RULE',
         payload: {
           urlMatch: { type: 'exact', value: 'https://example.com/update-me' },
-          mode: 'auto',
           priority: 0,
           title: 'Before',
         },
@@ -329,7 +317,6 @@ describe('Rule save — simple direct writes', () => {
         action: 'CREATE_RULE',
         payload: {
           urlMatch: { type: 'exact', value: 'https://example.com/del' },
-          mode: 'auto',
           priority: 0,
         },
       }, {});
@@ -349,7 +336,6 @@ describe('Rule save — simple direct writes', () => {
       // First write succeeds
       const result1 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/first' },
-        mode: 'auto',
         priority: 0,
       });
       expect(result1.success).toBe(true);
@@ -367,7 +353,6 @@ describe('Rule save — simple direct writes', () => {
       // Second write fails
       await expect(service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/second' },
-        mode: 'auto',
         priority: 0,
       })).rejects.toThrow();
 
@@ -377,7 +362,6 @@ describe('Rule save — simple direct writes', () => {
       // Third write MUST succeed — queue must not be permanently broken
       const result3 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/third' },
-        mode: 'auto',
         priority: 0,
       });
       expect(result3.success).toBe(true);

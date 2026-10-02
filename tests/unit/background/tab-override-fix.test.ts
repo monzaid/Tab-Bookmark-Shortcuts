@@ -1,19 +1,42 @@
 /**
- * Tests for critical bug fixes:
- * - Problem 1: setTabOverride must MERGE (not replace) — title then icon shouldn't wipe title
- * - Problem 2: setTabOverride must send APPLY_REWRITE with computed fields immediately
- * - Problem 6: updateRule must re-apply to matching tabs after save
+ * T19 anchor migration — SEMANTIC-PRESERVED (representation adapted).
+ *
+ * The original Problems 1/2/6 assertions inspected `scripting.executeScript`
+ * payloads carrying an `APPLY_REWRITE`-shaped `force` flag. C2/A2/A5 replaced
+ * that: the content script is now the primary (and only) apply/restore
+ * implementation, delivery goes out as a `FIELD_APPLY` message through
+ * `tabs.sendMessage`, and `force` no longer exists.
+ *
+ * The underlying intents are UNCHANGED and still asserted here:
+ *  - Problem 1: an override MERGE must not wipe the other field;
+ *  - Problem 2: a field write must be delivered immediately;
+ *  - Problem 6: a rule update must re-apply to matching tabs.
+ *
+ * Delivery is driven through the real `FieldDeliveryService` so the assertions
+ * describe the production path rather than a stub.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { RuleService } from '@background/rule-service';
+import { FieldDeliveryService } from '@background/field-delivery-service';
 import type { NormalizedWindow, NormalizedTab } from '@adapters/contract';
+import type { FieldApplyMessage } from '@shared/messages';
 
-describe('Tab Override Merge & Immediate Apply (Problems 1 & 2)', () => {
+type AnyFieldApply = { tabId: number; message: FieldApplyMessage };
+
+function fieldApplies(adapter: ReturnType<typeof createMockAdapter>): AnyFieldApply[] {
+  return adapter.calls
+    .filter((c) => c.method === 'tabs.sendMessage')
+    .map((c) => ({ tabId: c.args[0] as number, message: c.args[1] as FieldApplyMessage }))
+    .filter((c) => c.message?.type === 'FIELD_APPLY');
+}
+
+describe('Tab Override Merge & Immediate Delivery (Problems 1 & 2)', () => {
   const adapter = createMockAdapter();
   let repo: StorageRepository;
   let service: RuleService;
+  let delivery: FieldDeliveryService;
 
   const currentWindow: NormalizedWindow = { id: 1, focused: true, incognito: false, type: 'normal' };
   const tab1: NormalizedTab = { id: 10, windowId: 1, index: 0, url: 'https://example.com/page', title: 'Original', favIconUrl: 'orig.ico', active: true, incognito: false, status: 'complete' };
@@ -25,10 +48,11 @@ describe('Tab Override Merge & Immediate Apply (Problems 1 & 2)', () => {
     repo = new StorageRepository(adapter);
     await repo.initialize();
     service = new RuleService(adapter, repo);
+    delivery = new FieldDeliveryService(adapter, repo);
+    service.setDelivery((tabIds) => delivery.recomputeAndRedeliver(tabIds));
   });
 
   it('should succeed on first setTabOverride call (no version conflict)', async () => {
-    // First call should work — tabOverride is in local storage, no configVersion check
     await service.setTabOverride(10, 'New Title');
 
     const local = await repo.getLocalState();
@@ -38,10 +62,7 @@ describe('Tab Override Merge & Immediate Apply (Problems 1 & 2)', () => {
   });
 
   it('should MERGE title and icon — setting icon must NOT wipe existing title', async () => {
-    // Step 1: set title only
     await service.setTabOverride(10, 'Custom Title');
-
-    // Step 2: set icon only (title should be preserved)
     await service.setTabOverride(10, undefined, { type: 'upload', value: 'data:image/png;base64,abc' });
 
     const local = await repo.getLocalState();
@@ -52,10 +73,7 @@ describe('Tab Override Merge & Immediate Apply (Problems 1 & 2)', () => {
   });
 
   it('should MERGE icon and title — setting title must NOT wipe existing icon', async () => {
-    // Step 1: set icon only
     await service.setTabOverride(10, undefined, { type: 'upload', value: 'data:image/png;base64,xyz' });
-
-    // Step 2: set title only (icon should be preserved)
     await service.setTabOverride(10, 'Another Title');
 
     const local = await repo.getLocalState();
@@ -65,35 +83,26 @@ describe('Tab Override Merge & Immediate Apply (Problems 1 & 2)', () => {
     expect(override!.favicon?.value).toBe('data:image/png;base64,xyz'); // MUST NOT be wiped
   });
 
-  it('should apply override via executeScript immediately after setTabOverride', async () => {
+  it('should deliver a FIELD_APPLY set immediately after setTabOverride', async () => {
     await service.setTabOverride(10, 'Immediate Title');
 
-    const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-    expect(execCalls.length).toBeGreaterThan(0);
-
-    const payload = (execCalls[execCalls.length - 1].args[0] as { args: unknown[] }).args[0] as { title?: string; force?: boolean };
-    expect(payload.title).toBe('Immediate Title');
-    expect(payload.force).toBe(true);
+    const applies = fieldApplies(adapter).filter((c) => c.tabId === 10);
+    expect(applies.length).toBeGreaterThan(0);
+    expect(applies[applies.length - 1].message.title).toEqual({ kind: 'set', value: 'Immediate Title' });
   });
 
-  it('should send APPLY_REWRITE with merged favicon when only icon is updated', async () => {
-    // Set title first
+  it('should deliver the MERGED favicon payload when only the icon is updated', async () => {
     await service.setTabOverride(10, 'Merged Title');
-    // Clear call log
     adapter.calls.length = 0;
 
-    // Now set icon — APPLY_REWRITE should include BOTH title and favicon
-    await service.setTabOverride(10, undefined, { type: 'upload', value: 'data:icon' });
+    const iconValue = 'data:image/png;base64,SUM=';
+    await service.setTabOverride(10, undefined, { type: 'upload', value: iconValue });
 
-    const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-    expect(execCalls.length).toBeGreaterThan(0);
-
-    const lastCall = execCalls[execCalls.length - 1];
-    const payload = (lastCall.args[0] as { args: unknown[] }).args[0] as { title?: string; favicon?: string; force?: boolean };
-    expect(payload.force).toBe(true);
-    // Should include the merged title from previous override
-    expect(payload.title).toBe('Merged Title');
-    expect(payload.favicon).toBe('data:icon');
+    const applies = fieldApplies(adapter).filter((c) => c.tabId === 10);
+    expect(applies.length).toBeGreaterThan(0);
+    const last = applies[applies.length - 1].message;
+    expect(last.title).toEqual({ kind: 'set', value: 'Merged Title' });
+    expect(last.favicon).toEqual({ kind: 'set', value: iconValue });
   });
 });
 
@@ -101,6 +110,7 @@ describe('Rule Update Re-apply to Matching Tabs (Problem 6)', () => {
   const adapter = createMockAdapter();
   let repo: StorageRepository;
   let service: RuleService;
+  let delivery: FieldDeliveryService;
 
   const currentWindow: NormalizedWindow = { id: 1, focused: true, incognito: false, type: 'normal' };
   const tab1: NormalizedTab = { id: 10, windowId: 1, index: 0, url: 'https://example.com/page', title: 'Original', favIconUrl: '', active: true, incognito: false, status: 'complete' };
@@ -113,46 +123,36 @@ describe('Rule Update Re-apply to Matching Tabs (Problem 6)', () => {
     repo = new StorageRepository(adapter);
     await repo.initialize();
     service = new RuleService(adapter, repo);
+    delivery = new FieldDeliveryService(adapter, repo);
+    service.setDelivery((tabIds) => delivery.recomputeAndRedeliver(tabIds));
   });
 
   it('should re-apply to matching tabs after updateRule changes title', async () => {
-    // Create auto rule matching tab1
     const createResult = await service.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
       priority: 5,
       title: 'V1 Title',
     }, 0);
     expect(createResult.success).toBe(true);
     if (!createResult.success) return;
 
-    // Clear calls from creation
     adapter.calls.length = 0;
 
-    // Update the rule title (no version marker — skips lightweight version check)
     const updateResult = await service.updateRule(createResult.rule.id, { title: 'V2 Title' });
     expect(updateResult.success).toBe(true);
 
-    // Should have applied rewrite to matching tab (tab1) but NOT tab2 via executeScript
-    const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-    expect(execCalls.length).toBeGreaterThan(0);
-
-    // Verify the tab 10 (matching) got the apply with force
-    const tab10Calls = execCalls.filter((c) => (c.args[0] as { target: { tabId: number } }).target.tabId === 10);
-    expect(tab10Calls.length).toBeGreaterThan(0);
-    const payload = (tab10Calls[0].args[0] as { args: unknown[] }).args[0] as { title?: string; force?: boolean };
-    expect(payload.title).toBe('V2 Title');
-    expect(payload.force).toBe(true);
-
-    // tab 20 should NOT receive apply (doesn't match)
-    const tab20Calls = execCalls.filter((c) => (c.args[0] as { target: { tabId: number } }).target.tabId === 20);
-    expect(tab20Calls).toHaveLength(0);
+    const applies = fieldApplies(adapter);
+    // tab 10 matches → delivered with the new value.
+    const tab10 = applies.filter((c) => c.tabId === 10);
+    expect(tab10.length).toBeGreaterThan(0);
+    expect(tab10[0].message.title).toEqual({ kind: 'set', value: 'V2 Title' });
+    // tab 20 does not match → never delivered.
+    expect(applies.filter((c) => c.tabId === 20)).toHaveLength(0);
   });
 
-  it('should NOT deliver a rewrite when rule is disabled (nothing to override)', async () => {
+  it('should not deliver a rewrite when the rule is disabled (nothing to override)', async () => {
     const createResult = await service.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
       priority: 5,
       title: 'Rule Title',
     }, 0);
@@ -161,16 +161,15 @@ describe('Rule Update Re-apply to Matching Tabs (Problem 6)', () => {
 
     adapter.calls.length = 0;
 
-    // Disable the rule (no version marker — skips lightweight version check)
     const updateResult = await service.updateRule(createResult.rule.id, { enabled: false });
     expect(updateResult.success).toBe(true);
 
-    // With the rule disabled there is no computed title/favicon to apply, so no
-    // delivery occurs — the site recovers on refresh (no forced empty rewrite).
-    const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-    const tab10Calls = execCalls.filter((c) => (c.args[0] as { target: { tabId: number } }).target.tabId === 10);
-    expect(tab10Calls).toHaveLength(0);
-    const sendCalls = adapter.calls.filter((c) => c.method === 'tabs.sendMessage');
-    expect(sendCalls).toHaveLength(0);
+    // The chain no longer yields a value for the (un-captured) site tier, so the
+    // directive is `none` — nothing is written to the page.
+    const applies = fieldApplies(adapter).filter((c) => c.tabId === 10);
+    for (const a of applies) {
+      expect(a.message.title).toEqual({ kind: 'none' });
+      expect(a.message.favicon).toEqual({ kind: 'none' });
+    }
   });
 });

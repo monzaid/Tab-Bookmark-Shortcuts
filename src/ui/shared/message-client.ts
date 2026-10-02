@@ -11,7 +11,7 @@
  * Does NOT: read/write storage directly in React, silently overwrite on conflict
  */
 
-import type { DomainErrorCode, SyncState, LocalState, SwitchOutcome, TabCandidate, DiagnosticEntry, ImportPreview, ImportSlotConflict, MatchRuleSettings, SwitchDirection } from '@shared/types';
+import type { DomainErrorCode, SyncState, LocalState, SwitchOutcome, DiagnosticEntry, ImportPreview, ImportSlotConflict, MatchRuleSettings, SwitchDirection } from '@shared/types';
 
 // ─── Error Message Mapping ───────────────────────────────────────────────────
 
@@ -95,7 +95,7 @@ export class MessageClient {
         const newValue = changes['syncState'].newValue as SyncState | undefined;
         if (newValue && newValue.configVersion !== this.configVersion) {
           this.configVersion = newValue.configVersion;
-          this.externalChangeListeners.forEach((l) => l(newValue.configVersion));
+          this.externalChangeListeners.forEach((l) => { l(newValue.configVersion); });
         }
       }
     });
@@ -155,12 +155,7 @@ export class MessageClient {
       if (payload !== undefined) message.payload = payload;
       if (includeVersion) message.configVersion = this.configVersion;
 
-      const response = await chrome.runtime.sendMessage(message) as {
-        success?: boolean;
-        errorCode?: DomainErrorCode;
-        message?: string;
-        configVersion?: number;
-      } & Record<string, unknown>;
+      const response = await chrome.runtime.sendMessage(message);
 
       if (!response) {
         return { success: false, errorCode: 'INTERNAL_ERROR', message: getErrorMessage('INTERNAL_ERROR') };
@@ -172,7 +167,7 @@ export class MessageClient {
       }
 
       if (response.success === false) {
-        const code = (response.errorCode ?? 'INTERNAL_ERROR') as DomainErrorCode;
+        const code = (response.errorCode ?? 'INTERNAL_ERROR');
         return { success: false, errorCode: code, message: getErrorMessage(code) };
       }
 
@@ -224,7 +219,7 @@ export class MessageClient {
 
   // ─── Rule Operations ───────────────────────────────────────────────────
 
-  async createRule(payload: { urlMatch: { type: string; value: string }; mode: string; priority: number; title?: string }): Promise<ClientResult> {
+  async createRule(payload: { urlMatch: { type: string; value: string }; priority: number; title?: string }): Promise<ClientResult> {
     return this.send('CREATE_RULE', payload);
   }
 
@@ -234,10 +229,6 @@ export class MessageClient {
 
   async deleteRule(ruleId: string): Promise<ClientResult> {
     return this.send('DELETE_RULE', { ruleId });
-  }
-
-  async applyRuleToTab(ruleId: string, tabId: number): Promise<ClientResult> {
-    return this.send('APPLY_RULE_TO_TAB', { ruleId, tabId });
   }
 
   // ─── Settings ──────────────────────────────────────────────────────────
@@ -314,12 +305,6 @@ export class MessageClient {
 
   async exportDiagnostics(): Promise<ClientResult<{ json: string }>> {
     return this.send('EXPORT_DIAGNOSTICS');
-  }
-
-  // ─── Candidates ────────────────────────────────────────────────────────
-
-  async getCandidates(ruleId?: string): Promise<ClientResult<{ candidates: TabCandidate[] }>> {
-    return this.send('GET_CANDIDATES', { ruleId });
   }
 
   // ─── Tab Override ──────────────────────────────────────────────────────

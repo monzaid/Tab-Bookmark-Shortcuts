@@ -3,18 +3,26 @@ import { createMockAdapter } from '@adapters/mock-adapter';
 import { WorkerOrchestrator } from '@background/worker-orchestrator';
 import { wildcardToRegex } from '@shared/url-utils';
 import type { NormalizedTab, NormalizedWindow } from '@adapters/contract';
+import type { FieldApplyMessage, FieldDirective } from '@shared/messages';
 
 /**
- * Robust rule delivery — scripting.executeScript primary + sendMessage fallback.
+ * T8 / C7 — PRIMARY/BACKUP REVERSAL.
  *
- * Covers:
- * - Rule apply uses scripting.executeScript for ALL matching tabs (not one).
- * - tabs.onUpdated status==='complete' re-applies via executeScript (persistence).
- * - Regex rule (converted from wildcard input) matches multiple tabs and applies.
- * - Fallback: when executeScript throws, tabs.sendMessage is used.
- * - Slot tier: bound-tabId gets slot value, other matching tabs get rule value.
+ * The old suite asserted `scripting.executeScript` as the PRIMARY delivery path
+ * with `tabs.sendMessage` as a fallback. That is exactly the defect fixed here:
+ * the content script is now the ONE apply/restore implementation (it holds the
+ * page-scoped snapshot `restore` needs), and `executeScript` is a stateless
+ * apply-only fallback marked `degraded`.
+ *
+ * The assertions below are therefore INVERTED relative to the pre-T8 file:
+ *  - delivery to every matching tab is asserted on `tabs.sendMessage`;
+ *  - the fallback test forces the content-script path to fail and asserts the
+ *    degraded `executeScript` path is used instead.
+ *
+ * The behavioural intents (multi-tab coverage, refresh persistence, wildcard
+ * regex, slot-tier scoping) are preserved unchanged.
  */
-describe('Robust rule delivery via scripting.executeScript', () => {
+describe('Rule delivery — content script primary, executeScript degraded fallback', () => {
   const adapter = createMockAdapter();
   let worker: WorkerOrchestrator;
 
@@ -25,23 +33,27 @@ describe('Robust rule delivery via scripting.executeScript', () => {
   const tabC: NormalizedTab = { id: 12, windowId: 1, index: 2, url: 'https://example.com/page', title: 'Original C', favIconUrl: '', active: false, incognito: false, status: 'complete' };
   const tabDiff: NormalizedTab = { id: 13, windowId: 1, index: 3, url: 'https://other.com/x', title: 'Other', favIconUrl: '', active: false, incognito: false, status: 'complete' };
 
-  /** Collect { title, favicon } payloads for a tab delivered via executeScript. */
-  interface ApplyPayloadInCall { title?: string; favicon?: string; force?: boolean; }
-  function executeCallsFor(tabId: number): ApplyPayloadInCall[] {
+  /** FIELD_APPLY messages delivered to a tab (primary path). */
+  function fieldAppliesFor(tabId: number): FieldApplyMessage[] {
+    return adapter.calls
+      .filter((c) => c.method === 'tabs.sendMessage' && c.args[0] === tabId)
+      .map((c) => c.args[1] as FieldApplyMessage)
+      .filter((m) => m?.type === 'FIELD_APPLY');
+  }
+
+  function titleSetValue(msg: FieldDirective | undefined): string | undefined {
+    return msg?.kind === 'set' ? msg.value : undefined;
+  }
+
+  /** Values pushed through the degraded executeScript fallback. */
+  function execCallsFor(tabId: number): { title?: string; favicon?: string }[] {
     return adapter.calls
       .filter((c) => c.method === 'scripting.executeScript'
         && (c.args[0] as { target: { tabId: number } }).target.tabId === tabId)
       .map((c) => {
         const args = (c.args[0] as { args: unknown[] }).args;
-        return (args[0] as ApplyPayloadInCall) ?? {};
+        return (args[0] as { title?: string; favicon?: string }) ?? {};
       });
-  }
-
-  /** Collect sendMessage APPLY_REWRITE payloads for a tab (fallback path). */
-  function sendCallsFor(tabId: number) {
-    return adapter.calls
-      .filter((c) => c.method === 'tabs.sendMessage' && c.args[0] === tabId)
-      .map((c) => c.args[1] as { type: string; payload: { title?: string; favicon?: string } });
   }
 
   beforeEach(async () => {
@@ -51,70 +63,64 @@ describe('Robust rule delivery via scripting.executeScript', () => {
     await worker.initialize();
   });
 
-  describe('Rule apply uses executeScript for ALL matching tabs', () => {
-    it('should call scripting.executeScript for every matching tab with the rule title', async () => {
+  describe('Delivery uses the content script for ALL matching tabs', () => {
+    it('should FIELD_APPLY to every matching tab with the rule title', async () => {
       adapter.setTabs([tabA, tabB, tabC, tabDiff]);
 
       const result = await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Rewritten Title',
       }, 0);
       expect(result.success).toBe(true);
 
-      // tabA, tabB, tabC match; tabDiff does not.
       for (const tabId of [10, 11, 12]) {
-        const calls = executeCallsFor(tabId);
-        expect(calls.length).toBeGreaterThan(0);
-        expect(calls.some((p) => p.title === 'Rewritten Title')).toBe(true);
+        const msgs = fieldAppliesFor(tabId);
+        expect(msgs.length).toBeGreaterThan(0);
+        expect(msgs.some((m) => titleSetValue(m.title) === 'Rewritten Title')).toBe(true);
       }
-      expect(executeCallsFor(13)).toHaveLength(0);
+      expect(fieldAppliesFor(13)).toHaveLength(0);
     });
 
-    it('should apply favicon via executeScript to every matching tab', async () => {
+    it('should deliver the favicon directive to every matching tab', async () => {
       adapter.setTabs([tabA, tabB]);
 
       const result = await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         favicon: { type: 'url', value: 'https://example.com/favicon.ico' },
       }, 0);
       expect(result.success).toBe(true);
 
       for (const tabId of [10, 11]) {
-        const calls = executeCallsFor(tabId);
-        expect(calls.some((p) => p.favicon === 'https://example.com/favicon.ico')).toBe(true);
+        const msgs = fieldAppliesFor(tabId);
+        expect(msgs.some((m) => m.favicon?.kind === 'set' && m.favicon.value === 'https://example.com/favicon.ico')).toBe(true);
       }
     });
   });
 
-  describe('Refresh persistence via tabs.onUpdated', () => {
-    it('should re-apply via executeScript on status==="complete"', async () => {
+  describe('Refresh persistence via tabs.onUpdated (routed to the single entry)', () => {
+    it('should re-deliver on status==="complete"', async () => {
       adapter.setTabs([tabA]);
 
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Persisted Title',
       }, 0);
 
-      // Clear calls to isolate the onUpdated-triggered re-apply.
       adapter.calls.length = 0;
 
       adapter.emitTabUpdated(10, { status: 'complete' }, tabA);
       await new Promise((r) => setTimeout(r, 50));
 
-      const calls = executeCallsFor(10);
-      expect(calls.some((p) => p.title === 'Persisted Title')).toBe(true);
+      const msgs = fieldAppliesFor(10);
+      expect(msgs.some((m) => titleSetValue(m.title) === 'Persisted Title')).toBe(true);
     });
   });
 
   describe('Regex rule (wildcard-converted) matches multiple tabs and applies', () => {
     it('should apply a wildcard-converted regex rule to all matching tabs', async () => {
-      // Simulate what the UI does: convert `https://example.com/*` to a valid regex.
       const conversion = wildcardToRegex('https://example.com/*');
       expect(conversion.converted).toBe(true);
       const storedRegex = conversion.pattern;
@@ -127,40 +133,39 @@ describe('Robust rule delivery via scripting.executeScript', () => {
 
       const result = await worker.ruleService.createRule({
         urlMatch: { type: 'regex', value: storedRegex },
-        mode: 'auto',
         priority: 5,
         title: 'Regex Title',
       }, 0);
       expect(result.success).toBe(true);
 
-      // Both example.com tabs match via regex; other.com does not.
       for (const tabId of [10, 11]) {
-        const calls = executeCallsFor(tabId);
-        expect(calls.length).toBeGreaterThan(0);
-        expect(calls.some((p) => p.title === 'Regex Title')).toBe(true);
+        const msgs = fieldAppliesFor(tabId);
+        expect(msgs.length).toBeGreaterThan(0);
+        expect(msgs.some((m) => titleSetValue(m.title) === 'Regex Title')).toBe(true);
       }
-      expect(executeCallsFor(13)).toHaveLength(0);
+      expect(fieldAppliesFor(13)).toHaveLength(0);
     });
   });
 
-  describe('Fallback to sendMessage when executeScript throws', () => {
-    it('should fall back to tabs.sendMessage when executeScript fails', async () => {
+  describe('Degraded fallback when the content script is unreachable', () => {
+    it('should fall back to the apply-only executeScript path and mark the tab degraded', async () => {
       adapter.setTabs([tabA]);
-      // Force executeScript to fail — e.g. restricted page where scripting is unavailable.
-      adapter.state.executeScriptError = { code: 'BROWSER_API_ERROR', message: 'Cannot access restricted page' };
+      // The content script is unreachable on this tab → primary path throws.
+      adapter.state.sendMessageError = { code: 'BROWSER_API_ERROR', message: 'Could not establish connection' };
 
       const result = await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Fallback Title',
       }, 0);
       expect(result.success).toBe(true);
 
-      // executeScript was attempted and failed; sendMessage fallback used.
-      const sends = sendCallsFor(10);
-      expect(sends.length).toBeGreaterThan(0);
-      expect(sends.some((p) => p.payload.title === 'Fallback Title')).toBe(true);
+      // The degraded path pushed the SET value through executeScript.
+      const execs = execCallsFor(10);
+      expect(execs.length).toBeGreaterThan(0);
+      expect(execs.some((p) => p.title === 'Fallback Title')).toBe(true);
+      // …and the tab is reported degraded (restore is unavailable there).
+      expect(worker.delivery.isDegraded(10)).toBe(true);
     });
   });
 
@@ -185,7 +190,6 @@ describe('Robust rule delivery via scripting.executeScript', () => {
       await seedSlotBinding(10, 1, 'Bound Tab Slot Title', 'https://slot.com/icon.png');
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Shared Rule Title',
       }, 0);
@@ -197,10 +201,10 @@ describe('Robust rule delivery via scripting.executeScript', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // Bound tab (10) gets slot value.
-      expect(executeCallsFor(10).some((p) => p.title === 'Bound Tab Slot Title')).toBe(true);
+      expect(fieldAppliesFor(10).some((m) => titleSetValue(m.title) === 'Bound Tab Slot Title')).toBe(true);
       // Other tab (11) does NOT get slot value; it gets the rule value.
-      expect(executeCallsFor(11).some((p) => p.title === 'Bound Tab Slot Title')).toBe(false);
-      expect(executeCallsFor(11).some((p) => p.title === 'Shared Rule Title')).toBe(true);
+      expect(fieldAppliesFor(11).some((m) => titleSetValue(m.title) === 'Bound Tab Slot Title')).toBe(false);
+      expect(fieldAppliesFor(11).some((m) => titleSetValue(m.title) === 'Shared Rule Title')).toBe(true);
     });
   });
 });

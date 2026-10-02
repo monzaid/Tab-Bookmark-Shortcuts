@@ -1,6 +1,16 @@
+/**
+ * T8 — content script is the ONLY apply/restore implementation (A4/C2).
+ *
+ * Rewritten for the `FIELD_APPLY` three-state protocol:
+ *   { kind: 'set', value } | { kind: 'restore' } | { kind: 'none' }
+ *
+ * The per-URL guard (`appliedUrls`) is gone (A9) — scheduling now belongs to
+ * the background's single entry, so an unconditional, idempotent apply is the
+ * correct behaviour and the restored `restore` semantics are what actually
+ * fixes "clearing only worked on the executeScript path".
+ */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// Mock chrome.runtime before importing content script
 const mockSendMessage = vi.fn().mockResolvedValue(undefined);
 const mockAddListener = vi.fn();
 
@@ -11,309 +21,139 @@ vi.stubGlobal('chrome', {
   },
 });
 
-// Mock window.location
-const mockLocation = { href: 'https://example.com/page' };
-vi.stubGlobal('window', {
-  location: mockLocation,
-  addEventListener: vi.fn(),
-});
-
-// Mock document with full API surface needed by content script
-const mockTitle = { value: '' };
-const mockHeadAppendChild = vi.fn();
-const mockQuerySelectorAll = vi.fn().mockReturnValue([]);
-const mockQuerySelector = vi.fn().mockReturnValue(null);
-const mockCreateElement = vi.fn().mockReturnValue({ rel: '', href: '', type: '' });
-const mockDocAddEventListener = vi.fn();
-
-vi.stubGlobal('document', {
-  get title() { return mockTitle.value; },
-  set title(v: string) { mockTitle.value = v; },
-  head: { appendChild: mockHeadAppendChild },
-  querySelector: mockQuerySelector,
-  querySelectorAll: mockQuerySelectorAll,
-  createElement: mockCreateElement,
-  addEventListener: mockDocAddEventListener,
-  readyState: 'loading',
-});
-
-// Mock history
-const mockHistory = {
-  pushState: vi.fn(),
-  replaceState: vi.fn(),
-};
-vi.stubGlobal('history', mockHistory);
-
-describe('T11: Content script — document_start, single rewrite protocol', () => {
-  beforeEach(() => {
+describe('T8: Content script — FIELD_APPLY set / restore / none', () => {
+  beforeEach(async () => {
     vi.clearAllMocks();
-    mockLocation.href = 'https://example.com/page';
-    mockTitle.value = '';
-    mockQuerySelectorAll.mockReturnValue([]);
-    mockQuerySelector.mockReturnValue(null);
+    document.head.innerHTML = '';
+    document.title = 'Original';
+    const mod = await import('@content/index');
+    mod.resetCapturedSite();
   });
 
-  describe('Happy path — navigation reporting and rewrite', () => {
-    it('should report initial navigation once per URL', async () => {
-      const { reportNavigation, reportedUrls } = await import('@content/index');
-      reportedUrls.clear();
-      mockSendMessage.mockClear();
+  it('applies a `set` title directive and lazily captures the site value', async () => {
+    const { applyFieldMessage } = await import('@content/index');
 
-      reportNavigation('initial');
-      expect(mockSendMessage).toHaveBeenCalledTimes(1);
-      expect(mockSendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action: 'CONTENT_NAVIGATION',
-          payload: expect.objectContaining({
-            url: 'https://example.com/page',
-            navigationType: 'initial',
-          }),
-        })
-      );
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'Rewritten' } });
 
-      // Second call with same URL should not report again
-      reportNavigation('initial');
-      expect(mockSendMessage).toHaveBeenCalledTimes(1);
-    });
-
-    it('should report different URLs separately', async () => {
-      const { reportNavigation, reportedUrls } = await import('@content/index');
-      reportedUrls.clear();
-
-      reportNavigation('initial');
-      mockLocation.href = 'https://example.com/other';
-      reportNavigation('pushstate');
-
-      expect(mockSendMessage).toHaveBeenCalledTimes(2);
-    });
-
-    it('should apply title and favicon rewrite once per URL', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
-
-      applyRewrite('Custom Title', 'https://example.com/icon.png');
-      expect(mockTitle.value).toBe('Custom Title');
-
-      // Second apply should be ignored (once per URL)
-      applyRewrite('Another Title', 'https://other.com/icon.png');
-      expect(mockTitle.value).toBe('Custom Title'); // unchanged
-    });
-
-    it('should handle APPLY_REWRITE message', async () => {
-      const { handleMessage, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
-
-      handleMessage({
-        type: 'APPLY_REWRITE',
-        payload: { title: 'Message Title', favicon: 'https://example.com/fav.ico' },
-      });
-
-      expect(mockTitle.value).toBe('Message Title');
-    });
-
-    it('should allow forced re-application bypassing once-per-URL (Problem 3)', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
-      mockLocation.href = 'https://example.com/page';
-
-      // First apply
-      applyRewrite('First Title');
-      expect(mockTitle.value).toBe('First Title');
-
-      // Normal second apply is blocked
-      applyRewrite('Second Title');
-      expect(mockTitle.value).toBe('First Title');
-
-      // Forced apply bypasses the once-per-URL guard
-      applyRewrite('Forced Title', undefined, true);
-      expect(mockTitle.value).toBe('Forced Title');
-    });
-
-    it('should handle APPLY_REWRITE with force flag (Problem 3)', async () => {
-      const { handleMessage, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
-      mockLocation.href = 'https://example.com/force-test';
-
-      handleMessage({
-        type: 'APPLY_REWRITE',
-        payload: { title: 'Initial' },
-      });
-      expect(mockTitle.value).toBe('Initial');
-
-      handleMessage({
-        type: 'APPLY_REWRITE',
-        payload: { title: 'Updated', force: true },
-      });
-      expect(mockTitle.value).toBe('Updated');
-    });
-
-    it('should remove all existing favicon links and create new one', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
-      mockLocation.href = 'https://example.com/favicon-test';
-
-      const mockOldLink1 = { remove: vi.fn() };
-      const mockOldLink2 = { remove: vi.fn() };
-      mockQuerySelectorAll.mockReturnValue([mockOldLink1, mockOldLink2]);
-
-      applyRewrite(undefined, 'data:image/png;base64,abc123');
-
-      // Should remove all old links
-      expect(mockQuerySelectorAll).toHaveBeenCalledWith('link[rel*="icon"]');
-      expect(mockOldLink1.remove).toHaveBeenCalled();
-      expect(mockOldLink2.remove).toHaveBeenCalled();
-
-      // Should create new link
-      expect(mockCreateElement).toHaveBeenCalledWith('link');
-      expect(mockHeadAppendChild).toHaveBeenCalled();
-    });
+    expect(document.title).toBe('Rewritten');
+    // Lazy capture reported the ORIGINAL title before the rewrite.
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'SITE_SNAPSHOT_REPORT',
+        payload: expect.objectContaining({ title: 'Original' }),
+      }),
+    );
   });
 
-  describe('T32 (B9-7) — favicon fallback channel enforces the protocol allowlist', () => {
-    it('should NOT create a link for javascript: / file: / blob: favicons', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
+  it('restores the site original title on a `restore` directive', async () => {
+    const { applyFieldMessage } = await import('@content/index');
 
-      for (const dangerous of ['javascript:alert(1)', 'file:///etc/passwd', 'blob:https://x/y']) {
-        vi.clearAllMocks();
-        mockQuerySelectorAll.mockReturnValue([]);
-        appliedUrls.clear();
-        mockLocation.href = `https://example.com/t32-${encodeURIComponent(dangerous)}`;
+    // First write captures 'Original', then rewrites.
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'Rewritten' } });
+    expect(document.title).toBe('Rewritten');
 
-        applyRewrite(undefined, dangerous);
-
-        expect(mockCreateElement, `createElement must not run for ${dangerous}`).not.toHaveBeenCalled();
-        expect(mockHeadAppendChild, `head must not receive a link for ${dangerous}`).not.toHaveBeenCalled();
-      }
-    });
-
-    it('should NOT create a link for data:text/html (script-capable data URI)', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
-      vi.clearAllMocks();
-      mockQuerySelectorAll.mockReturnValue([]);
-      appliedUrls.clear();
-      mockLocation.href = 'https://example.com/t32-html';
-
-      applyRewrite(undefined, 'data:text/html,<script>alert(1)</script>');
-
-      expect(mockCreateElement).not.toHaveBeenCalled();
-      expect(mockHeadAppendChild).not.toHaveBeenCalled();
-    });
-
-    it('should STILL create a link for http(s) and data:image favicons', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
-
-      for (const safe of ['https://cdn.example.com/fav.ico', 'http://cdn.example.com/fav.png', 'data:image/png;base64,abc']) {
-        vi.clearAllMocks();
-        mockQuerySelectorAll.mockReturnValue([]);
-        mockCreateElement.mockReturnValue({ rel: '', href: '', type: '' });
-        appliedUrls.clear();
-        mockLocation.href = `https://example.com/t32-safe-${encodeURIComponent(safe)}`;
-
-        applyRewrite(undefined, safe);
-
-        expect(mockCreateElement, `expected a link for ${safe}`).toHaveBeenCalledWith('link');
-        expect(mockHeadAppendChild, `expected appendChild for ${safe}`).toHaveBeenCalled();
-      }
-    });
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'restore' } });
+    expect(document.title).toBe('Original');
   });
 
-  describe('Error path — protected URLs and invalid messages', () => {
-    it('should not report navigation for protected URLs', async () => {
-      const { reportNavigation, reportedUrls } = await import('@content/index');
-      reportedUrls.clear();
-      mockLocation.href = 'chrome://settings';
+  it('does not clear the title to an empty string when restoring', async () => {
+    const { applyFieldMessage } = await import('@content/index');
 
-      reportNavigation('initial');
-      expect(mockSendMessage).not.toHaveBeenCalled();
-    });
-
-    it('should not apply rewrite to protected URLs', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
-      mockLocation.href = 'chrome://extensions';
-
-      applyRewrite('Hacked Title');
-      expect(mockTitle.value).toBe(''); // unchanged
-    });
-
-    it('should ignore invalid messages', async () => {
-      const { handleMessage, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
-
-      handleMessage(null);
-      handleMessage(undefined);
-      handleMessage('string');
-      handleMessage({ type: 'UNKNOWN_TYPE' });
-
-      expect(mockTitle.value).toBe(''); // no changes
-    });
-
-    it('should not access document body', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
-      mockLocation.href = 'https://safe.com/page';
-
-      applyRewrite('Title Only');
-      expect(mockTitle.value).toBe('Title Only');
-    });
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'X' } });
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'restore' } });
+    expect(document.title).not.toBe('');
   });
 
-  // ─── B13 (T14): bounded URL sets ─────────────────────────────────────────
-  describe('B13 — reported/applied URL sets are bounded', () => {
-    it('should keep reportedUrls bounded at 100 after 200 distinct URLs', async () => {
-      const { reportNavigation, reportedUrls } = await import('@content/index');
-      reportedUrls.clear();
+  it('leaves the document untouched on a `none` directive', async () => {
+    const { applyFieldMessage } = await import('@content/index');
 
-      for (let i = 0; i < 200; i++) {
-        mockLocation.href = `https://example.com/page-${String(i)}`;
-        reportNavigation('pushstate');
-      }
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'none' } });
+    expect(document.title).toBe('Original');
+    expect(mockSendMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'SITE_SNAPSHOT_REPORT' }),
+    );
+  });
 
-      expect(reportedUrls.size).toBeLessThanOrEqual(100);
-    });
+  it('inserts our own favicon link and never removes the site original', async () => {
+    const { applyFieldMessage } = await import('@content/index');
 
-    it('should keep appliedUrls bounded at 100 after 200 distinct URLs', async () => {
-      const { applyRewrite, appliedUrls } = await import('@content/index');
-      appliedUrls.clear();
+    const siteLink = document.createElement('link');
+    siteLink.rel = 'icon';
+    siteLink.href = 'https://site.example/original.ico';
+    document.head.appendChild(siteLink);
 
-      for (let i = 0; i < 200; i++) {
-        mockLocation.href = `https://example.com/applied-${String(i)}`;
-        applyRewrite(`Title ${String(i)}`);
-      }
+    applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'set', value: 'https://cdn/new.png' } });
 
-      expect(appliedUrls.size).toBeLessThanOrEqual(100);
-    });
+    const links = document.head.querySelectorAll('link[rel*="icon"]');
+    expect(links.length).toBe(2);
+    expect(Array.from(links).some((l) => l.getAttribute('href') === 'https://cdn/new.png')).toBe(true);
+    expect(document.head.contains(siteLink)).toBe(true);
+  });
 
-    it('should preserve once-per-URL dedup within capacity (B13 must not change semantics)', async () => {
-      const { reportNavigation, reportedUrls } = await import('@content/index');
-      reportedUrls.clear();
-      mockSendMessage.mockClear();
+  it('restores by removing only the link we inserted (site link survives)', async () => {
+    const { applyFieldMessage } = await import('@content/index');
 
-      mockLocation.href = 'https://example.com/dedup';
-      reportNavigation('initial');
-      reportNavigation('initial');
-      reportNavigation('pushstate');
+    const siteLink = document.createElement('link');
+    siteLink.rel = 'icon';
+    siteLink.href = 'https://site.example/original.ico';
+    document.head.appendChild(siteLink);
 
-      // Still exactly one report for the same URL
-      expect(mockSendMessage).toHaveBeenCalledTimes(1);
-    });
+    applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'set', value: 'https://cdn/new.png' } });
+    applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'restore' } });
 
-    it('should evict the OLDEST entry first (LRU order)', async () => {
-      const { reportNavigation, reportedUrls } = await import('@content/index');
-      reportedUrls.clear();
+    const links = document.head.querySelectorAll('link[rel*="icon"]');
+    expect(links.length).toBe(1);
+    expect(links[0]).toBe(siteLink);
+  });
 
-      mockLocation.href = 'https://example.com/first';
-      reportNavigation('initial');
+  it('refuses to write an unsafe favicon protocol', async () => {
+    const { applyFieldMessage } = await import('@content/index');
 
-      // Push the first URL out by filling past the cap
-      for (let i = 0; i < 100; i++) {
-        mockLocation.href = `https://example.com/fill-${String(i)}`;
-        reportNavigation('pushstate');
-      }
+    applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'set', value: 'javascript:alert(1)' } });
+    expect(document.head.querySelectorAll('link[rel*="icon"]').length).toBe(0);
+  });
 
-      // The oldest URL must have been evicted; the newest must still be present
-      expect(reportedUrls.has('https://example.com/first')).toBe(false);
-      expect(reportedUrls.has('https://example.com/fill-99')).toBe(true);
-    });
+  it('captures the site snapshot only once (a second write must not overwrite it)', async () => {
+    const { applyFieldMessage } = await import('@content/index');
+
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'First' } });
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'Second' } });
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'restore' } });
+
+    // The captured value is the ORIGINAL, not our first rewrite.
+    expect(document.title).toBe('Original');
+  });
+
+  it('re-captures after a navigation reset', async () => {
+    const { applyFieldMessage, resetCapturedSite } = await import('@content/index');
+
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'Page1' } });
+    document.title = 'Page2';
+    resetCapturedSite(); // simulates a real navigation
+
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'Page2 Rewritten' } });
+    applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'restore' } });
+
+    expect(document.title).toBe('Page2');
+  });
+
+  it('handleMessage dispatches FIELD_APPLY', async () => {
+    const { handleMessage } = await import('@content/index');
+
+    handleMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'Via Message' } });
+    expect(document.title).toBe('Via Message');
+  });
+
+  it('ignores unknown message types', async () => {
+    const { handleMessage } = await import('@content/index');
+
+    handleMessage({ type: 'APPLY_REWRITE', payload: { title: 'Legacy' } });
+    expect(document.title).toBe('Original');
+  });
+
+  it('no longer exports a per-URL apply guard (A9)', async () => {
+    const mod = await import('@content/index');
+    expect('appliedUrls' in mod).toBe(false);
+    expect('applyRewrite' in mod).toBe(false);
   });
 });

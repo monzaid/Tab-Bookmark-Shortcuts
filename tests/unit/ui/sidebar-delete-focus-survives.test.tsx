@@ -20,6 +20,15 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SidebarApp } from '@ui/sidebar/App';
 
+/**
+ * T19 anchor migration: the Confirm primitive now enforces a ~120ms protection
+ * window (CT3-b4) so the keypress/click that OPENED the dialog cannot activate
+ * it. Tests that fire the confirmation programmatically must wait it out.
+ */
+async function flushConfirmGuard(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 150));
+}
+
 const mockSendMessage = vi.fn();
 
 const BOUND_STATE = {
@@ -120,6 +129,7 @@ describe('N7 — focus is not lost on the destructive delete path', () => {
     await user.click(menuItem);
 
     const deleteButton = await screen.findByRole('button', { name: 'Delete' });
+    await flushConfirmGuard();
     await user.click(deleteButton);
 
     // The slot is now unbound: `⋯` (and the whole actions section) is gone.

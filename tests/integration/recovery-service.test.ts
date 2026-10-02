@@ -148,7 +148,6 @@ describe('T9: Recovery sessions with real-time re-query', () => {
       await repo.addRule({
         id: 'rule-1',
         urlMatch: { type: 'regex', value: 'https://example\\.com/.*' },
-        mode: 'auto',
         priority: 0,
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',

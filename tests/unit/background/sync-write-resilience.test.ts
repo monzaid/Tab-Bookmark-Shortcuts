@@ -40,7 +40,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
         // Rule write falls back to local storage and succeeds
         const result = await service.createRule({
           urlMatch: { type: 'exact', value: 'https://example.com/fallback' },
-          mode: 'auto',
           priority: 0,
         });
         expect(result.success).toBe(true);
@@ -87,7 +86,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
         // Rule write throws on quota error
         await expect(service.createRule({
           urlMatch: { type: 'exact', value: 'https://example.com/quota' },
-          mode: 'auto',
           priority: 0,
         })).rejects.toThrow(/quota/i);
       } finally {
@@ -122,7 +120,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
 
       const result = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/large-icon' },
-        mode: 'auto',
         priority: 0,
         favicon: { type: 'upload', value: largeDataUri },
       });
@@ -149,7 +146,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
 
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/resolve-test' },
-        mode: 'auto',
         priority: 0,
         favicon: { type: 'upload', value: largeDataUri },
       });
@@ -166,7 +162,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
 
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/small-icon' },
-        mode: 'auto',
         priority: 0,
         favicon: { type: 'upload', value: smallDataUri },
       });
@@ -181,7 +176,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
 
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/url-icon' },
-        mode: 'auto',
         priority: 0,
         favicon: { type: 'url', value: urlIcon },
       });
@@ -197,7 +191,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
       // First write succeeds
       const r1 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/a' },
-        mode: 'manual',
         priority: 0,
       });
       expect(r1.success).toBe(true);
@@ -215,7 +208,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
       // Second write throws
       await expect(service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/b' },
-        mode: 'manual',
         priority: 0,
       })).rejects.toThrow(/quota/i);
 
@@ -225,7 +217,6 @@ describe('Sync write resilience — retry, fallback, icon offloading', () => {
       // Queue must still work
       const r3 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/c' },
-        mode: 'manual',
         priority: 0,
       });
       expect(r3.success).toBe(true);

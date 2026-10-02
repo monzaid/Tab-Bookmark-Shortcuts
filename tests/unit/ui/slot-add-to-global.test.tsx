@@ -91,7 +91,7 @@ async function openSlotAddToGlobal(slotNumber: number) {
   fireEvent.click(screen.getByRole('button', { name: `More options for slot ${slotNumber}` }));
   fireEvent.click(screen.getByRole('menuitem', { name: 'Add to Global Rules' }));
   await waitFor(() => {
-    expect(screen.getByLabelText('Match URL')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: /Match URL/ })).toBeInTheDocument();
   });
 }
 
@@ -111,7 +111,7 @@ describe('Bug 1: "Add to Global Rules" prefills rule modal from slot data only',
   it('prefills URL with the regex slot\'s own pattern, not current page URL', async () => {
     await openSlotAddToGlobal(1);
 
-    const urlInput = screen.getByLabelText('Match URL') as HTMLInputElement;
+    const urlInput = screen.getByRole('textbox', { name: /Match URL/ }) as HTMLInputElement;
     expect(urlInput.value).toBe('https://slot-regex\\.test/.*');
     expect(urlInput.value).not.toBe(CURRENT_PAGE_URL);
   });
@@ -119,21 +119,22 @@ describe('Bug 1: "Add to Global Rules" prefills rule modal from slot data only',
   it('prefills Match Type with the slot\'s match type (regex)', async () => {
     await openSlotAddToGlobal(1);
 
-    expect(screen.getByLabelText('Regex')).toBeChecked();
+    // T19 anchor migration: the shared RadioGroup labels the option "Regex pattern".
+    expect(screen.getByLabelText('Regex pattern')).toBeChecked();
     expect(screen.getByLabelText('Exact URL')).not.toBeChecked();
   });
 
   it('prefills title from the slot (uiMarker customTitle)', async () => {
     await openSlotAddToGlobal(1);
 
-    const titleInput = screen.getByLabelText('Custom title') as HTMLInputElement;
+    const titleInput = screen.getByLabelText('Custom title text') as HTMLInputElement;
     expect(titleInput.value).toBe('Slot Custom Title');
   });
 
   it('prefills exact slot with its own URL and exact match type', async () => {
     await openSlotAddToGlobal(2);
 
-    const urlInput = screen.getByLabelText('Match URL') as HTMLInputElement;
+    const urlInput = screen.getByRole('textbox', { name: /Match URL/ }) as HTMLInputElement;
     expect(urlInput.value).toBe('https://exact-slot.test/page');
     expect(screen.getByLabelText('Exact URL')).toBeChecked();
   });
@@ -165,10 +166,10 @@ describe('Bug 1: "Add to Global Rules" prefills rule modal from slot data only',
     fireEvent.click(screen.getByRole('button', { name: 'Add to global rules' }));
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Match URL')).toBeInTheDocument();
+      expect(screen.getByRole('textbox', { name: /Match URL/ })).toBeInTheDocument();
     });
 
-    const urlInput = screen.getByLabelText('Match URL') as HTMLInputElement;
+    const urlInput = screen.getByRole('textbox', { name: /Match URL/ }) as HTMLInputElement;
     expect(urlInput.value).toBe(CURRENT_PAGE_URL);
     expect(screen.getByLabelText('Exact URL')).toBeChecked();
   });

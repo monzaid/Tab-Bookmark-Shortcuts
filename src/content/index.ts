@@ -62,8 +62,20 @@ class BoundedUrlSet {
 
 /** Track which URLs have already been reported to enforce once-per-URL reporting */
 const reportedUrls = new BoundedUrlSet();
-/** Track which URLs have had rewrite applied (bypassed with force) */
-const appliedUrls = new BoundedUrlSet();
+
+/**
+ * Page-scoped original values (A4 / A7).
+ *
+ * `restore` means "put the ORIGINAL value back", and only the content script
+ * holds a page-scoped snapshot that can survive across messages — the
+ * `executeScript` fallback is stateless and therefore apply-only. The snapshot
+ * is captured lazily, immediately BEFORE the first rewrite.
+ */
+let capturedTitle: string | null = null;
+let capturedFaviconHref: string | null = null;
+let siteCaptured = false;
+/** The `<link rel="icon">` WE inserted (never the site's own links). */
+let injectedIconLink: HTMLLinkElement | null = null;
 
 /**
  * Protected URL prefixes — content script should not operate on these.
@@ -185,6 +197,45 @@ function isSafeFaviconValue(value: string): boolean {
   return false;
 }
 
+/** Read the site's own current favicon href (null when there is none). */
+function readSiteFaviconHref(): string | null {
+  const link = document.querySelector<HTMLLinkElement>('link[rel*="icon"]');
+  return link?.href ?? null;
+}
+
+/**
+ * Capture the ORIGINAL page title/favicon once, immediately before the first
+ * rewrite, and report it to the worker (A7 lazy capture). A second call is a
+ * no-op — restoring must target the pre-rewrite value, never our own output.
+ */
+function captureSiteOnce(): void {
+  if (siteCaptured) return;
+  siteCaptured = true;
+  capturedTitle = document.title;
+  capturedFaviconHref = readSiteFaviconHref();
+
+  try {
+    chrome.runtime.sendMessage({
+      requestId: `cs-snap-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      action: 'SITE_SNAPSHOT_REPORT',
+      payload: { tabId: -1, title: capturedTitle, faviconHref: capturedFaviconHref },
+    }).catch(() => {
+      // Worker might not be ready — the in-page snapshot is still valid.
+    });
+  } catch {
+    // Extension context invalidated — ignore.
+  }
+}
+
+/** Reset the captured snapshot on a real navigation (a re-capture is required). */
+function resetCapturedSite(): void {
+  siteCaptured = false;
+  capturedTitle = null;
+  capturedFaviconHref = null;
+  injectedIconLink = null;
+}
+
+/** Insert (or replace) the favicon link WE own, leaving the site's links alone. */
 function setFavicon(dataUri: string): void {
   if (!document.head) {
     // document_start: head not available yet — defer
@@ -192,20 +243,31 @@ function setFavicon(dataUri: string): void {
     return;
   }
 
-  // Remove ALL existing favicon links (icon, shortcut icon, apple-touch-icon, etc.)
-  document.querySelectorAll('link[rel*="icon"]').forEach((l) => l.remove());
-
-  // B9-7 (T32): never write a dangerous protocol into link.href. Existing links
-  // have already been removed, so a rejected value simply leaves the page with
-  // no replacement icon rather than executing anything.
+  // B9-7 (T32): never write a dangerous protocol into link.href.
   if (!isSafeFaviconValue(dataUri)) return;
 
-  // Create new link
+  if (injectedIconLink && document.contains(injectedIconLink)) {
+    injectedIconLink.href = dataUri;
+    return;
+  }
   const link = document.createElement('link');
   link.rel = 'icon';
   link.type = 'image/png';
   link.href = dataUri;
   document.head.appendChild(link);
+  injectedIconLink = link;
+}
+
+/**
+ * Restore the site's ORIGINAL favicon by removing only the link WE inserted.
+ * The site's own `<link rel="icon">` was never removed, so the page falls back
+ * to it naturally.
+ */
+function restoreFavicon(): void {
+  if (injectedIconLink && document.contains(injectedIconLink)) {
+    injectedIconLink.remove();
+  }
+  injectedIconLink = null;
 }
 
 /**
@@ -219,26 +281,47 @@ function flushPendingFavicon(): void {
   }
 }
 
-function applyRewrite(title?: string, favicon?: string, force = false): void {
-  const url = getCurrentUrl();
+/** Apply a single per-field directive (A4). */
+function applyDirective(
+  field: 'title' | 'favicon',
+  directive: import('@shared/messages').FieldDirective | undefined,
+): void {
+  if (!directive || directive.kind === 'none') return;
 
-  // Skip protected pages
+  if (field === 'title') {
+    if (directive.kind === 'set') {
+      document.title = directive.value;
+    } else if (capturedTitle !== null) {
+      document.title = capturedTitle;
+    }
+    return;
+  }
+
+  if (directive.kind === 'set') {
+    setFavicon(directive.value);
+  } else {
+    restoreFavicon();
+  }
+}
+
+/**
+ * Handle a `FIELD_APPLY` message — the ONLY delivery protocol (A4/C2).
+ *
+ * The per-URL guard is deliberately GONE (A9): scheduling is now owned by the
+ * background's single entry point (leading/trailing), so an unconditional apply
+ * is correct and idempotent.
+ */
+function applyFieldMessage(msg: import('@shared/messages').FieldApplyMessage): void {
+  const url = getCurrentUrl();
+  // Protected pages are never rewritten (content-script side of A8).
   if (isProtectedUrl(url)) return;
 
-  // Only apply once per URL unless forced (user edits must re-apply)
-  if (!force && appliedUrls.has(url)) return;
+  const willRewrite =
+    msg.title?.kind === 'set' || msg.favicon?.kind === 'set';
+  if (willRewrite) captureSiteOnce();
 
-  appliedUrls.add(url);
-
-  // Apply title — works even at document_start (document.title is always available)
-  if (title) {
-    document.title = title;
-  }
-
-  // Apply favicon — may defer if head not ready
-  if (favicon) {
-    setFavicon(favicon);
-  }
+  applyDirective('title', msg.title);
+  applyDirective('favicon', msg.favicon);
 }
 
 // ─── Message Listener ────────────────────────────────────────────────────────
@@ -246,9 +329,11 @@ function applyRewrite(title?: string, favicon?: string, force = false): void {
 function handleMessage(message: unknown): void {
   if (!message || typeof message !== 'object') return;
 
-  const msg = message as WorkerToContentMessage;
-  if (msg.type === 'APPLY_REWRITE') {
-    applyRewrite(msg.payload.title, msg.payload.favicon, msg.payload.force);
+  const msg = message as Partial<WorkerToContentMessage>;
+  // Defensive at runtime: the wire value is untrusted, so comparing against the
+  // literal is meaningful even though the narrowed type says otherwise.
+  if ((msg as { type?: unknown }).type === 'FIELD_APPLY') {
+    applyFieldMessage(msg as WorkerToContentMessage);
   }
 }
 
@@ -260,11 +345,15 @@ function wrapHistoryMethods(): void {
 
   history.pushState = function (...args: Parameters<typeof history.pushState>) {
     originalPushState(...args);
+    // A7: a real navigation invalidates the page-scoped snapshot — the next
+    // rewrite must re-capture the (possibly different) page's original value.
+    resetCapturedSite();
     reportNavigation('pushstate');
   };
 
   history.replaceState = function (...args: Parameters<typeof history.replaceState>) {
     originalReplaceState(...args);
+    resetCapturedSite();
     reportNavigation('replacestate');
   };
 }
@@ -315,11 +404,13 @@ export {
   isProtectedUrl,
   reportNavigation,
   reportReady,
-  applyRewrite,
+  applyFieldMessage,
   setFavicon,
+  restoreFavicon,
+  captureSiteOnce,
+  resetCapturedSite,
   flushPendingFavicon,
   handleMessage,
   reportedUrls,
-  appliedUrls,
   initialize,
 };

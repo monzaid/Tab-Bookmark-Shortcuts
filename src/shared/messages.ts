@@ -10,17 +10,15 @@ import type {
   SwitchDirection,
   UrlMatchDefinition,
   SlotUiMarker,
-  RuleMode,
   IconSource,
   ImportPreview,
   ImportSlotConflict,
-  TabCandidate,
   SwitchOutcome,
   DiagnosticEntry,
   SlotDefinition,
   SyncState,
   LocalState,
-  DashboardItem,
+  DashboardRow,
 } from './types';
 
 // ─── Base Message Envelope ───────────────────────────────────────────────────
@@ -96,7 +94,6 @@ export interface CreateRuleRequest extends RequestBase {
   action: 'CREATE_RULE';
   payload: {
     urlMatch: UrlMatchDefinition;
-    mode: RuleMode;
     priority: number;
     title?: string;
     favicon?: IconSource;
@@ -109,7 +106,6 @@ export interface UpdateRuleRequest extends RequestBase {
   payload: {
     ruleId: string;
     urlMatch?: UrlMatchDefinition;
-    mode?: RuleMode;
     priority?: number;
     title?: string;
     favicon?: IconSource;
@@ -122,11 +118,6 @@ export interface UpdateRuleRequest extends RequestBase {
 export interface DeleteRuleRequest extends RequestBase {
   action: 'DELETE_RULE';
   payload: { ruleId: string };
-}
-
-export interface ApplyRuleToTabRequest extends RequestBase {
-  action: 'APPLY_RULE_TO_TAB';
-  payload: { ruleId: string; tabId: number };
 }
 
 // Tab override operations
@@ -257,11 +248,6 @@ export interface GetCommandsRequest extends RequestBase {
   action: 'GET_COMMANDS';
 }
 
-export interface GetCandidatesRequest extends RequestBase {
-  action: 'GET_CANDIDATES';
-  payload: { slotId?: number; ruleId?: string };
-}
-
 // Icon operations
 export interface DownloadIconRequest extends RequestBase {
   action: 'DOWNLOAD_ICON';
@@ -326,6 +312,16 @@ export interface ContentReadyReport extends RequestBase {
   payload: { tabId: number; url: string };
 }
 
+/**
+ * A7: the content script reports the ORIGINAL page value the first time it is
+ * about to rewrite the page, so the worker can persist it in the strictly
+ * sealed `local.siteSnapshot` store. Never carries a URL or page content.
+ */
+export interface SiteSnapshotReport extends RequestBase {
+  action: 'SITE_SNAPSHOT_REPORT';
+  payload: { tabId: number; title: string | null; faviconHref: string | null };
+}
+
 // ─── Union of All Requests ───────────────────────────────────────────────────
 
 export type UiRequest =
@@ -339,7 +335,6 @@ export type UiRequest =
   | CreateRuleRequest
   | UpdateRuleRequest
   | DeleteRuleRequest
-  | ApplyRuleToTabRequest
   | SetTabOverrideRequest
   | RemoveTabOverrideRequest
   | SetGlobalStrategyRequest
@@ -363,7 +358,6 @@ export type UiRequest =
   | GetStateRequest
   | GetDashboardRequest
   | GetCommandsRequest
-  | GetCandidatesRequest
   | DownloadIconRequest
   | UploadIconRequest
   | OpenPageRequest
@@ -376,7 +370,8 @@ export type UiRequest =
 
 export type ContentRequest =
   | ContentNavigationReport
-  | ContentReadyReport;
+  | ContentReadyReport
+  | SiteSnapshotReport;
 
 export type AnyRequest = UiRequest | ContentRequest;
 
@@ -404,7 +399,7 @@ export interface GetStateResponse {
 
 export interface GetDashboardResponse {
   action: 'GET_DASHBOARD';
-  result: { success: true; items: DashboardItem[] } | { success: false; errorCode: DomainErrorCode; message: string };
+  result: { success: true; rows: DashboardRow[] } | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
 export interface GetCommandsResponse {
@@ -412,10 +407,7 @@ export interface GetCommandsResponse {
   result: { success: true; commands: Array<{ name: string; shortcut: string | null; description: string }> } | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
-export interface GetCandidatesResponse {
-  action: 'GET_CANDIDATES';
-  result: { success: true; candidates: TabCandidate[] } | { success: false; errorCode: DomainErrorCode; message: string };
-}
+
 
 export interface ImportPreviewResponse {
   action: 'IMPORT_PREVIEW';
@@ -444,17 +436,25 @@ export interface GenericResponse {
 
 // ─── Worker → Content Messages ───────────────────────────────────────────────
 
-export interface ApplyRewriteMessage {
-  type: 'APPLY_REWRITE';
-  payload: {
-    title?: string;
-    favicon?: string;
-    /** Force re-application bypassing once-per-URL guard (user-initiated edits) */
-    force?: boolean;
-  };
+/**
+ * A4: per-field three-state delivery directive.
+ *
+ * "Clear" is deliberately NOT expressible here — clearing is implemented as
+ * "delete the stored value → recompute the chain → deliver the chain result",
+ * so a `restore` (or a `set` to the next tier's value) is what actually arrives.
+ */
+export type FieldDirective =
+  | { kind: 'set'; value: string }
+  | { kind: 'restore' }
+  | { kind: 'none' };
+
+export interface FieldApplyMessage {
+  type: 'FIELD_APPLY';
+  title?: FieldDirective;
+  favicon?: FieldDirective;
 }
 
-export type WorkerToContentMessage = ApplyRewriteMessage;
+export type WorkerToContentMessage = FieldApplyMessage;
 
 // ─── External Change Notification (Worker → UI) ──────────────────────────────
 

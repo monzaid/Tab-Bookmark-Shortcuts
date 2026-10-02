@@ -24,7 +24,9 @@ import { SidebarAdapter } from './sidebar-adapter';
 import type { AnyRequest, ResponseBase } from '@shared/messages';
 import { openOrReusePage } from '@shared/open-page';
 import { isProtectedUrl, isSafeFaviconProtocol, validateRegex } from '@shared/url-utils';
-import { applyFieldsToTab } from './apply-fields';
+import { resolveFieldChain } from '@shared/field-chain';
+import { FieldDeliveryService } from './field-delivery-service';
+import { SiteSnapshotStore } from './site-snapshot-store';
 
 // ─── Worker Orchestrator ─────────────────────────────────────────────────────
 
@@ -53,7 +55,6 @@ const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
   'CREATE_RULE',
   'UPDATE_RULE',
   'DELETE_RULE',
-  'APPLY_RULE_TO_TAB',
   'SET_TAB_OVERRIDE',
   'REMOVE_TAB_OVERRIDE',
   'SET_GLOBAL_STRATEGY',
@@ -78,7 +79,6 @@ const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
   'GET_STATE',
   'GET_DASHBOARD',
   'GET_COMMANDS',
-  'GET_CANDIDATES',
   'DOWNLOAD_ICON',
   'UPLOAD_ICON',
   'OPEN_PAGE',
@@ -87,6 +87,7 @@ const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
   'CONFLICT_OVERWRITE',
   'CONTENT_NAVIGATION',
   'CONTENT_READY',
+  'SITE_SNAPSHOT_REPORT',
 ];
 
 /** T21: whether an inbound message carries an action this worker handles. */
@@ -108,6 +109,10 @@ export class WorkerOrchestrator {
   readonly incognito: IncognitoService;
   /** B11c / T18: sole owner of OPEN_SIDEBAR capability + opening. */
   readonly sidebarAdapter: SidebarAdapter;
+  /** A2: the write-side delivery coordinator (single entry, coalesced). */
+  readonly delivery: FieldDeliveryService;
+  /** A7: the site-original value store (strictly local). */
+  readonly siteSnapshots: SiteSnapshotStore;
 
   private initialized = false;
 
@@ -122,6 +127,10 @@ export class WorkerOrchestrator {
     this.notifications = new NotificationService(adapter);
     this.incognito = new IncognitoService(adapter);
     this.sidebarAdapter = new SidebarAdapter(adapter);
+    this.delivery = new FieldDeliveryService(adapter, this.repo);
+    this.siteSnapshots = new SiteSnapshotStore(this.repo);
+    // A2/A3: every rule write routes through the single delivery entry.
+    this.ruleService.setDelivery((tabIds) => this.delivery.recomputeAndRedeliver(tabIds));
   }
 
   /**
@@ -414,7 +423,7 @@ export class WorkerOrchestrator {
     const url = tab.url ?? changeInfo.url;
     if (!url) return;
 
-    await this.handleContentNavigation(tabId, url, true);
+    await this.handleContentNavigation(tabId, url);
   }
 
   // ─── Message Routing ───────────────────────────────────────────────────
@@ -549,16 +558,7 @@ export class WorkerOrchestrator {
         try {
           // expectedUpdatedAt is a version marker, not a rule field — extract it
           // so it never leaks into the persisted rule object.
-          const payload = request.payload as {
-            ruleId: string;
-            expectedUpdatedAt?: string;
-            urlMatch?: import('@shared/types').UrlMatchDefinition;
-            mode?: import('@shared/types').RuleMode;
-            priority?: number;
-            title?: string;
-            favicon?: import('@shared/types').IconSource;
-            enabled?: boolean;
-          };
+          const payload = request.payload;
           const { ruleId, expectedUpdatedAt, ...updates } = payload;
           return await this.ruleService.updateRule(ruleId, updates, expectedUpdatedAt);
         } catch (e) {
@@ -575,9 +575,6 @@ export class WorkerOrchestrator {
           return failure;
         }
       }
-
-      case 'APPLY_RULE_TO_TAB':
-        return this.ruleService.applyToTab(request.payload.ruleId, request.payload.tabId);
 
       // ─── Tab override ────────────────────────────────────────────────
       case 'SET_TAB_OVERRIDE': {
@@ -701,7 +698,12 @@ export class WorkerOrchestrator {
           urlMatch: { type: request.payload.matchType, value: request.payload.url },
           updatedAt: new Date().toISOString(),
         };
-        return this.repo.saveSlot(updatedSlot, version);
+        const savedUrl = await this.repo.saveSlot(updatedSlot, version);
+        if (!savedUrl.success) return savedUrl;
+        // A3/spy #7: a slot URL edit must redeliver to the slot's bound tab.
+        const bindingForSlot = (await this.repo.getLocalState()).bindings.find((b) => b.slotId === slot.id);
+        if (bindingForSlot) await this.delivery.recomputeAndRedeliver([bindingForSlot.tabId]);
+        return savedUrl;
       }
 
       // ─── Recovery ────────────────────────────────────────────────────
@@ -758,58 +760,26 @@ export class WorkerOrchestrator {
       }
 
       case 'GET_DASHBOARD': {
-        const sync = await this.repo.getSyncState();
-        const local = await this.repo.getLocalState();
+        return this.buildDashboard();
+      }
 
-        // Map tabId -> url for current-page entries.
-        const allTabs = await this.adapter.tabs.query({});
-        const tabUrlById = new Map<number, string>();
-        for (const t of allTabs) if (t.url) tabUrlById.set(t.id, t.url);
-
-        const items: import('@shared/types').DashboardItem[] = [];
-
-        // Current-page overrides (tabOverrides)
-        for (const o of local.tabOverrides) {
-          items.push({
-            id: `cp-${o.tabId}`,
-            kind: 'current-page',
-            label: `Tab ${o.tabId}`,
-            title: o.title?.trim() ? o.title : null,
-            icon: o.favicon?.value?.trim() ? o.favicon.value : null,
-            url: tabUrlById.get(o.tabId) ?? null,
-            tabId: o.tabId,
-          });
-        }
-
-        // Slot uiMarkers (custom title / icon set via the slot object)
-        for (const slot of sync.slots) {
-          const hasData = slot.uiMarker.customTitle?.trim() || slot.uiMarker.icon?.value;
-          if (!hasData) continue;
-          items.push({
-            id: `slot-${slot.id}`,
-            kind: 'slot',
-            label: `Slot ${slot.id}`,
-            title: slot.uiMarker.customTitle?.trim() || null,
-            icon: slot.uiMarker.icon?.value?.trim() || null,
-            url: slot.urlMatch.value ?? null,
-            slotId: slot.id,
-          });
-        }
-
-        return { success: true, items };
+      case 'SITE_SNAPSHOT_REPORT': {
+        // A7: the content script lazily captures the ORIGINAL page value before
+        // its first rewrite and reports it here. The tabId comes from the sender
+        // (never trusted from the payload shape alone at the routing layer).
+        const tabId = sender.tab?.id ?? request.payload.tabId;
+        await this.repo.setSiteSnapshot({
+          tabId,
+          title: request.payload.title,
+          faviconHref: request.payload.faviconHref,
+          capturedAt: new Date().toISOString(),
+        });
+        return { success: true };
       }
 
       case 'GET_COMMANDS': {
         const commands = await this.adapter.commands.getAll();
         return { success: true, commands };
-      }
-
-      case 'GET_CANDIDATES': {
-        if (request.payload.ruleId) {
-          return this.ruleService.getManualCandidates(request.payload.ruleId);
-        }
-        // Slot candidates handled by switch logic
-        return { success: true, candidates: [] };
       }
 
       // ─── Icon operations ─────────────────────────────────────────────
@@ -915,19 +885,19 @@ export class WorkerOrchestrator {
 
       // ─── Content script messages ─────────────────────────────────────
       case 'CONTENT_NAVIGATION': {
-        // Handle navigation report from content script
+        // A5: route through the single delivery entry (no `force` any more).
         const tabId = sender.tab?.id;
         if (tabId) {
-          await this.handleContentNavigation(tabId, request.payload.url, false);
+          await this.handleContentNavigation(tabId, request.payload.url);
         }
         return { success: true };
       }
 
       case 'CONTENT_READY': {
-        // DOM is ready — re-push overrides with force to ensure favicon is applied
+        // DOM is ready — the same single entry recomputes + redelivers.
         const tabId = sender.tab?.id;
         if (tabId) {
-          await this.handleContentNavigation(tabId, request.payload.url, true);
+          await this.handleContentNavigation(tabId, request.payload.url);
         }
         return { success: true };
       }
@@ -939,20 +909,85 @@ export class WorkerOrchestrator {
 
   // ─── Content Navigation Handler ────────────────────────────────────────
 
-  private async handleContentNavigation(tabId: number, url: string, force = false): Promise<void> {
-    // Compute fields via the shared source of truth (RuleService.computeFields).
-    // This resolves the full priority chain: slot (bound tab) → override → rule → site.
-    const computed = await this.ruleService.computeFields(tabId, url, '', '');
+  /**
+   * A5: all three navigation triggers (`tabs.onUpdated`, `CONTENT_NAVIGATION`,
+   * `CONTENT_READY`) route to the SAME single delivery entry. `force` no longer
+   * exists — delivery is idempotent ("write the current chain state").
+   */
+  private async handleContentNavigation(tabId: number, url: string): Promise<void> {
+    void url;
+    await this.delivery.recomputeAndRedeliver([tabId]);
+  }
 
-    if (computed.title || computed.favicon) {
-      // Robust delivery: executeScript primary (works on already-open tabs),
-      // sendMessage fallback for restricted pages.
-      await applyFieldsToTab(this.adapter, tabId, {
-        title: computed.title ?? undefined,
-        favicon: computed.favicon ?? undefined,
-        force,
+  // ─── Data Dashboard (A10) ──────────────────────────────────────────────
+
+  /**
+   * Build the Data Dashboard rows.
+   *
+   * The chain is computed ONCE, here, for every row (A10): the UI never
+   * assembles a second copy, so the displayed value and the delivered value
+   * cannot drift. `delivery` likewise reports only what the background can
+   * actually observe (a protected URL, or an un-captured site value).
+   */
+  private async buildDashboard(): Promise<{ success: true; rows: import('@shared/types').DashboardRow[] }> {
+    const sync = await this.repo.getSyncState();
+    const local = await this.repo.getLocalState();
+
+    const allTabs = await this.adapter.tabs.query({});
+    const tabById = new Map(allTabs.map((t) => [t.id, t]));
+    const rows: import('@shared/types').DashboardRow[] = [];
+
+    const deliveryFor = (url: string | null, tabId: number | undefined): import('@shared/types').DashboardRow['delivery'] => {
+      if (url && isProtectedUrl(url)) return 'protected';
+      if (tabId !== undefined && tabById.get(tabId) === undefined) return 'unknown';
+      return 'ok';
+    };
+
+    const chainFor = (tabId: number, tabUrl: string): import('@shared/types').DashboardRow['chain'] => ({
+      title: resolveFieldChain('title', { sync, local, tabId, tabUrl }),
+      favicon: resolveFieldChain('favicon', { sync, local, tabId, tabUrl }),
+    });
+
+    // 1. Explicit tab overrides.
+    for (const o of local.tabOverrides) {
+      const tab = tabById.get(o.tabId);
+      const url = tab?.url ?? null;
+      rows.push({
+        id: `cp-${o.tabId}`,
+        kind: 'override',
+        label: `Tab ${o.tabId}`,
+        url,
+        anchor: { kind: 'override', tabId: o.tabId },
+        tabId: o.tabId,
+        chain: chainFor(o.tabId, url ?? ''),
+        delivery: deliveryFor(url, o.tabId),
       });
     }
+
+    // 2. Slots whose title/icon was explicitly set.
+    for (const slot of sync.slots) {
+      const hasData = Boolean(slot.uiMarker.customTitle?.trim() || slot.uiMarker.icon?.value);
+      if (!hasData) continue;
+      const binding = local.bindings.find((b) => b.slotId === slot.id);
+      const tabId = binding?.tabId;
+      const url = slot.urlMatch.value || null;
+      rows.push({
+        id: `slot-${slot.id}`,
+        kind: 'slot',
+        label: `Slot ${slot.id}`,
+        url,
+        anchor: { kind: 'slot', slotId: slot.id },
+        slotId: slot.id,
+        ...(tabId !== undefined ? { tabId } : {}),
+        chain:
+          tabId !== undefined
+            ? chainFor(tabId, tabById.get(tabId)?.url ?? url ?? '')
+            : { title: resolveFieldChain('title', { sync, local, tabId: -1, tabUrl: url ?? '' }), favicon: resolveFieldChain('favicon', { sync, local, tabId: -1, tabUrl: url ?? '' }) },
+        delivery: tabId !== undefined ? deliveryFor(url, tabId) : 'unknown',
+      });
+    }
+
+    return { success: true, rows };
   }
 
   /**
@@ -967,10 +1002,10 @@ export class WorkerOrchestrator {
     const local = await this.repo.getLocalState();
     const binding = local.bindings.find((b) => b.slotId === slotId);
     if (!binding) return;
+    // A8: protection is decided inside the delivery entry — not here.
     try {
       const tab = await this.adapter.tabs.get(binding.tabId);
-      if (isProtectedUrl(tab.url)) return;
-      await this.handleContentNavigation(binding.tabId, tab.url, true);
+      await this.handleContentNavigation(binding.tabId, tab.url);
     } catch {
       // Tab no longer exists — nothing to re-apply.
     }

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { RuleService } from '@background/rule-service';
@@ -20,14 +20,17 @@ describe('T10: Page rules, field override computation, manual apply', () => {
   });
 
   describe('Happy path — rule creation and field computation', () => {
-    it('should create auto rule and apply to matching tabs', async () => {
+    it('should create rule and hand the matching tab to the delivery entry', async () => {
       adapter.setTabs([
         { id: 1, windowId: 1, index: 0, url: 'https://example.com/page', title: 'Original', favIconUrl: '', active: true, incognito: false, status: 'complete' },
       ]);
 
+      // A2: delivery is injected by the worker; capture the affected set here.
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
+
       const result = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 10,
         title: 'Custom Title',
       }, 0);
@@ -38,16 +41,13 @@ describe('T10: Page rules, field override computation, manual apply', () => {
         expect(result.rule.priority).toBe(10);
       }
 
-      // Verify rewrite was delivered via scripting.executeScript
-      const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-      expect(execCalls.length).toBeGreaterThan(0);
+      expect(delivered.flat()).toContain(1);
     });
 
     it('should compute fields with override → rule → site chain', async () => {
       // Create a rule
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Rule Title',
       }, 0);
@@ -64,14 +64,12 @@ describe('T10: Page rules, field override computation, manual apply', () => {
     it('should select highest priority rule when multiple match', async () => {
       await service.createRule({
         urlMatch: { type: 'regex', value: 'https://example\\.com/.*' },
-        mode: 'auto',
         priority: 5,
         title: 'Low Priority',
       }, 0);
 
       await service.createRule({
         urlMatch: { type: 'regex', value: 'https://example\\.com/page' },
-        mode: 'auto',
         priority: 10,
         title: 'High Priority',
       }, 1);
@@ -81,7 +79,13 @@ describe('T10: Page rules, field override computation, manual apply', () => {
       expect(computed.titleSource).toBe('rule');
     });
 
-    it('should return manual candidates across windows', async () => {
+    // ── T19 anchor migration: SEMANTIC-LOST (Q11) ──────────────────────────
+    // `getManualCandidates` / `applyToTab` / `APPLY_RULE_TO_TAB` were the
+    // manual-mode dispatch path. Q11 deletes manual mode entirely (every rule
+    // participates in the chain), so these anchors are replaced by the new
+    // behavior: creating ANY rule redelivers to all matching tabs across
+    // windows — there is no manual/auto split left to test.
+    it('redelivers a new rule to matching tabs across windows (was: manual candidates)', async () => {
       adapter.setWindows([
         { id: 1, focused: true, incognito: false, type: 'normal' },
         { id: 2, focused: false, incognito: false, type: 'normal' },
@@ -91,23 +95,20 @@ describe('T10: Page rules, field override computation, manual apply', () => {
         { id: 2, windowId: 2, index: 0, url: 'https://example.com/b', title: 'B', favIconUrl: '', active: false, incognito: false, status: 'complete' },
       ]);
 
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
+
       const createResult = await service.createRule({
         urlMatch: { type: 'regex', value: 'https://example\\.com/.*' },
-        mode: 'manual',
         priority: 0,
-        title: 'Manual Rule',
+        title: 'Chain Rule',
       }, 0);
 
       expect(createResult.success).toBe(true);
       if (!createResult.success) return;
 
-      const candidates = await service.getManualCandidates(createResult.rule.id);
-      expect(candidates.success).toBe(true);
-      if (candidates.success) {
-        expect(candidates.candidates).toHaveLength(2);
-        // Current window first
-        expect(candidates.candidates[0].isCurrentWindow).toBe(true);
-      }
+      // Both matching tabs across windows are handed to delivery.
+      expect(new Set(delivered.flat())).toEqual(new Set([1, 2]));
     });
   });
 
@@ -115,7 +116,6 @@ describe('T10: Page rules, field override computation, manual apply', () => {
     it('should reject rule for protected URL', async () => {
       const result = await service.createRule({
         urlMatch: { type: 'exact', value: 'chrome://settings' },
-        mode: 'auto',
         priority: 0,
       }, 0);
 
@@ -128,13 +128,11 @@ describe('T10: Page rules, field override computation, manual apply', () => {
     it('should block identical exact URL rules', async () => {
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 0,
       }, 0);
 
       const result = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'manual',
         priority: 5,
       }, 1);
 
@@ -148,7 +146,6 @@ describe('T10: Page rules, field override computation, manual apply', () => {
     it('should reject invalid regex', async () => {
       const result = await service.createRule({
         urlMatch: { type: 'regex', value: '(' },
-        mode: 'auto',
         priority: 0,
       }, 0);
 
@@ -161,7 +158,6 @@ describe('T10: Page rules, field override computation, manual apply', () => {
     it('should reject regex exceeding 500 chars', async () => {
       const result = await service.createRule({
         urlMatch: { type: 'regex', value: 'a'.repeat(501) },
-        mode: 'auto',
         priority: 0,
       }, 0);
 
@@ -171,50 +167,51 @@ describe('T10: Page rules, field override computation, manual apply', () => {
       }
     });
 
-    it('should not auto-apply manual rules', async () => {
+    // ── T19 anchor migration: SEMANTIC-LOST (Q11) ────────────────────────
+    // "manual rules are not auto-applied" no longer exists: every rule
+    // participates, so the equivalent current assertion is that the delete
+    // path redelivers to matching tabs (the manual split is gone entirely).
+    it('no longer distinguishes manual rules — creation always redelivers', async () => {
       adapter.setTabs([
         { id: 1, windowId: 1, index: 0, url: 'https://example.com/page', title: 'Original', favIconUrl: '', active: true, incognito: false, status: 'complete' },
       ]);
 
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
+
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'manual',
         priority: 0,
-        title: 'Manual Only',
+        title: 'Every Rule Participates',
       }, 0);
 
-      // No delivery should have been triggered for manual rules
-      const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-      const sendCalls = adapter.calls.filter((c) => c.method === 'tabs.sendMessage');
-      expect(execCalls).toHaveLength(0);
-      expect(sendCalls).toHaveLength(0);
+      expect(delivered.flat()).toContain(1);
     });
 
-    it('should reject apply to protected page tab', async () => {
+    it('hands a protected page tab to the entry, which decides protection (A8)', async () => {
       adapter.setTabs([
         { id: 1, windowId: 1, index: 0, url: 'chrome://extensions', title: 'Extensions', favIconUrl: '', active: true, incognito: false, status: 'complete' },
       ]);
 
+      // The affected set is computed by URL match only; the PROTECTION decision
+      // is centralized at the delivery entry (A8), asserted in
+      // protected-delivery.test.ts.
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
+
       const createResult = await service.createRule({
         urlMatch: { type: 'regex', value: '.*' },
-        mode: 'manual',
         priority: 0,
         title: 'Test',
       }, 0);
 
-      if (!createResult.success) return;
-
-      const result = await service.applyToTab(createResult.rule.id, 1);
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.errorCode).toBe('PROTECTED_PAGE');
-      }
+      expect(createResult.success).toBe(true);
+      expect(delivered.flat()).toContain(1);
     });
 
     it('should clamp priority to -100..100', async () => {
       const result = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/clamp' },
-        mode: 'auto',
         priority: 999,
       }, 0);
 
@@ -306,8 +303,12 @@ describe('T10: Page rules, field override computation, manual apply', () => {
       expect(computed.favicon).toBeNull();
     });
 
-    it('B7b: reapplyToMatchingTabs reads sync state only once regardless of tab count', async () => {
-      // 6 tabs all matching the same rule
+    // ── T19 anchor migration (SEMANTIC-LOST → upgraded) ──────────────────
+    // The private `reapplyToMatchingTabs` fan-out was replaced by the A2 single
+    // delivery entry. The service's job is now only to compute the AFFECTED SET
+    // (A3) and hand it to the injected coordinator; the fan-out / retry /
+    // coalescing behavior is covered by field-delivery-service.test.ts.
+    it('B7b/A3: applyToMatchingTabs computes the affected set without a per-tab state read', async () => {
       adapter.setTabs(
         Array.from({ length: 6 }, (_, i) => ({
           id: i + 1,
@@ -322,31 +323,22 @@ describe('T10: Page rules, field override computation, manual apply', () => {
         })),
       );
 
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
+
       const created = await service.createRule({
         urlMatch: { type: 'regex', value: '^https://multi\\.example/' },
-        mode: 'manual',
         priority: 5,
         title: 'Multi',
       }, 0);
       expect(created.success).toBe(true);
 
-      // `getSyncState()` is memory-cached, so IPC counting cannot observe the
-      // fan-out — count the state READ itself, which is what B7b collapses.
-      const stateReadSpy = vi.spyOn(repo, 'getSyncState');
-
-      // Drive the private reapply path directly (same cast style as other tests).
-      await (
-        service as unknown as {
-          reapplyToMatchingTabs: (r: unknown, clearOnEmpty?: boolean) => Promise<void>;
-        }
-      ).reapplyToMatchingTabs({ urlMatch: { type: 'regex', value: '^https://multi\\.example/' } });
-
-      // 6 matching tabs must NOT cause 6 state reads.
-      expect(stateReadSpy.mock.calls.length).toBeLessThanOrEqual(2);
-      stateReadSpy.mockRestore();
+      // All 6 matching tabs are handed to the coordinator in ONE call.
+      const lastDelivery = delivered[delivered.length - 1];
+      expect(new Set(lastDelivery)).toEqual(new Set([1, 2, 3, 4, 5, 6]));
     });
 
-    it('B12: reapplyToMatchingTabs delivers to every matching tab with bounded concurrency', async () => {
+    it('B12/A3: every matching tab is included in the affected set', async () => {
       const TAB_COUNT = 20;
       adapter.setTabs(
         Array.from({ length: TAB_COUNT }, (_, i) => ({
@@ -362,51 +354,19 @@ describe('T10: Page rules, field override computation, manual apply', () => {
         })),
       );
 
-      // An AUTO rule is required: the field chain only considers `mode === 'auto'`,
-      // and without computed title/favicon applyFieldsToTab skips delivery entirely.
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
+
       const created = await service.createRule({
         urlMatch: { type: 'regex', value: '^https://shard\\.example/' },
-        mode: 'auto',
         priority: 5,
         title: 'Sharded',
       }, 0);
       expect(created.success).toBe(true);
-      if (!created.success) return;
 
-      // Snapshot the real executeScript, then instrument concurrency on top.
-      const originalExecute = adapter.scripting.executeScript.bind(adapter.scripting);
-      let inFlight = 0;
-      let peak = 0;
-      const delivered: number[] = [];
-
-      adapter.scripting.executeScript = async (options) => {
-        inFlight++;
-        peak = Math.max(peak, inFlight);
-        delivered.push(options.target.tabId);
-        try {
-          await new Promise((r) => setTimeout(r, 1));
-          return await originalExecute(options);
-        } finally {
-          inFlight--;
-        }
-      };
-
-      try {
-        await (
-          service as unknown as {
-            reapplyToMatchingTabs: (r: unknown, clearOnEmpty?: boolean) => Promise<void>;
-          }
-        ).reapplyToMatchingTabs(created.rule);
-      } finally {
-        adapter.scripting.executeScript = originalExecute;
-      }
-
-      // Every matching tab must be delivered exactly once
-      expect(new Set(delivered).size).toBe(TAB_COUNT);
-      expect(delivered).toHaveLength(TAB_COUNT);
-      // Concurrency must be bounded (serial baseline would peak at 1)
-      expect(peak).toBeGreaterThan(1);
-      expect(peak).toBeLessThanOrEqual(8);
+      const lastDelivery = delivered[delivered.length - 1];
+      expect(new Set(lastDelivery).size).toBe(TAB_COUNT);
+      expect(lastDelivery).toHaveLength(TAB_COUNT);
     });
 
     it('B7b: computeFields output is unchanged by the pure-function refactor', async () => {
@@ -416,7 +376,6 @@ describe('T10: Page rules, field override computation, manual apply', () => {
 
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://equiv.example/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Rule Title',
         favicon: { type: 'url', value: 'https://rule.example/icon.png' },
@@ -471,7 +430,6 @@ describe('T10: Page rules, field override computation, manual apply', () => {
         state.rules.push({
           id: 'bad-rule',
           urlMatch: { type: 'exact', value: 'https://bad-rule.example/page' },
-          mode: 'auto',
           priority: 5,
           favicon: { type: 'url', value: 'javascript:alert(1)' },
           enabled: true,
@@ -489,7 +447,6 @@ describe('T10: Page rules, field override computation, manual apply', () => {
     it('T33 (B9-8): createRule/updateRule must reject a dangerous favicon value', async () => {
       const created = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://write.example/page' },
-        mode: 'auto',
         priority: 1,
         title: 'T',
         favicon: { type: 'url', value: 'javascript:alert(1)' },
@@ -498,7 +455,6 @@ describe('T10: Page rules, field override computation, manual apply', () => {
 
       const direct = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://write2.example/page' },
-        mode: 'auto',
         priority: 1,
         favicon: { type: 'url', value: 'https://safe.example/i.png' },
       }, 0);
@@ -517,7 +473,6 @@ describe('T10: Page rules, field override computation, manual apply', () => {
       ]);
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://safe-tier.example/page' },
-        mode: 'auto',
         priority: 5,
         favicon: { type: 'url', value: 'https://cdn.example.com/i.png' },
       }, 0);

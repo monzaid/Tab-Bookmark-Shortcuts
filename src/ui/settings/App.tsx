@@ -10,12 +10,22 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { Button, Toast, StatusBadge } from '@ui/shared/components';
-import { IconEditor, renderIconToDataUri } from '@ui/components/IconEditor';
+import { Button, Toast, StatusBadge, Confirm } from '@ui/shared/components';
+import { EmptyState } from '@ui/shared/empty-state';
+import { renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, IconSource, DashboardItem } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, IconSource, DashboardRow } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
-import { wildcardToRegex } from '@shared/url-utils';
+
+import { RuleFormFields } from '@ui/shared/rule-form-fields';
+import { FieldEditor } from '@ui/shared/field-editor';
+import type { FieldMode } from '@ui/shared/field-editor';
+import { resolveFieldChain } from '@shared/field-chain';
+import type { ChainResult, TierOwner } from '@shared/field-chain';
+import { useJumpToRow } from '@ui/shared/use-jump-to-row';
+import { UndoBar } from '@ui/shared/undo-bar';
+import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
+import { normalizedRegexPattern, validateRuleForm } from '@shared/form-validation';
 import { getMessageClient } from '@ui/shared/message-client';
 import { MatchSettingsHelp } from './MatchSettingsHelp';
 
@@ -29,8 +39,8 @@ interface CommandInfo {
 
 type SettingsSection = 'slots' | 'rules' | 'strategy' | 'dashboard' | 'import-export' | 'diagnostics';
 
-/** Sortable column keys for the Page Rules table. */
-type SortKey = 'urlMatch' | 'title' | 'mode' | 'priority' | 'enabled';
+/** Sortable column keys for the Page Rules table (Q11: no `mode` column). */
+type SortKey = 'urlMatch' | 'title' | 'priority' | 'enabled';
 
 /** Compare function types per column (string vs numeric) for stable sorting. */
 function compareRules(a: PageRule, b: PageRule, key: SortKey): number {
@@ -39,13 +49,26 @@ function compareRules(a: PageRule, b: PageRule, key: SortKey): number {
       return a.urlMatch.value.localeCompare(b.urlMatch.value);
     case 'title':
       return (a.title ?? '').localeCompare(b.title ?? '');
-    case 'mode':
-      return a.mode.localeCompare(b.mode);
     case 'priority':
       return a.priority - b.priority;
     case 'enabled':
       return Number(a.enabled !== false) - Number(b.enabled !== false);
   }
+}
+
+/**
+ * A chain result for a surface that has no page context (the settings rule
+ * editors edit the rule DEFINITION, not a live page). Every tier is unset and
+ * the site value is unknown, so the FieldEditor renders `—` badges without
+ * inventing page state.
+ */
+function emptyChain(): ChainResult {
+  return resolveFieldChain('title', {
+    sync: { configVersion: 0, matchSettings: DEFAULT_MATCH_SETTINGS, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
+    local: { bindings: [], cycleCursors: [], lastSuccessSlotId: null, recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [] },
+    tabId: -1,
+    tabUrl: '',
+  });
 }
 
 // ─── Message helper (B11: all cross-context messaging goes through here) ────
@@ -388,26 +411,19 @@ function StrategySection({
 interface RuleFormState {
   url: string;
   matchType: 'exact' | 'regex';
-  title: string;
-  iconUrl: string;
+  titleMode: FieldMode;
+  iconMode: FieldMode;
+  iconConfig?: IconConfig;
   priority: number;
-  mode: 'auto' | 'manual';
-  iconMode: 'url' | 'custom' | 'reset';
-  iconConfig: IconConfig;
-  /** Cached previous non-reset mode so switching back restores prior input. */
-  prevIconMode: 'url' | 'custom' | null;
 }
 
 const EMPTY_RULE_FORM: RuleFormState = {
   url: '',
   matchType: 'exact',
-  title: '',
-  iconUrl: '',
+  titleMode: { kind: 'use-chain' },
+  iconMode: { kind: 'use-chain' },
+  iconConfig: undefined,
   priority: 0,
-  mode: 'auto',
-  iconMode: 'url',
-  iconConfig: { bgColor: '#2563EB', text: '', textColor: '#FFFFFF' },
-  prevIconMode: null,
 };
 
 // ─── Inline Rule Editor (Module 2: row-level expandable editor) ─────────────
@@ -416,7 +432,7 @@ interface InlineRuleEditorProps {
   rule: PageRule;
   onSave: (
     ruleId: string,
-    updates: Partial<Pick<PageRule, 'urlMatch' | 'mode' | 'priority' | 'title' | 'favicon' | 'enabled'>>,
+    updates: Partial<Pick<PageRule, 'urlMatch' | 'priority' | 'title' | 'favicon' | 'enabled'>>,
     expectedUpdatedAt: string,
   ) => Promise<{ success: boolean; errorCode?: string; message?: string }>;
   onCancel: () => void;
@@ -431,19 +447,21 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
   const hasIcon = !!rule.favicon?.value;
   const isCustomIcon = hasIcon && rule.favicon!.value.startsWith('data:');
 
+  // The editor drives the SHARED field set (SC8); it only owns the values.
   const [url, setUrl] = useState(rule.urlMatch.value);
   const [matchType, setMatchType] = useState<'exact' | 'regex'>(rule.urlMatch.type);
-  const [title, setTitle] = useState(rule.title ?? '');
-  const [iconMode, setIconMode] = useState<'url' | 'custom' | 'reset'>(isCustomIcon ? 'custom' : 'url');
-  // Cache the previous non-reset mode so switching away and back restores the
-  // user's prior URL text / Custom config (mode-change never clears the cache).
-  const [prevIconMode, setPrevIconMode] = useState<'url' | 'custom' | null>(null);
-  const [iconUrl, setIconUrl] = useState(hasIcon && !isCustomIcon ? rule.favicon!.value : '');
-  const [iconConfig, setIconConfig] = useState<IconConfig>(
-    isCustomIcon ? { dataUri: rule.favicon!.value } : { bgColor: '#2563EB', text: '', textColor: '#FFFFFF' },
+  const [titleMode, setTitleMode] = useState<FieldMode>(
+    rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' },
+  );
+  const [iconMode, setIconMode] = useState<FieldMode>(
+    hasIcon
+      ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value }
+      : { kind: 'use-chain' },
+  );
+  const [iconConfig, setIconConfig] = useState<IconConfig | undefined>(
+    isCustomIcon ? { dataUri: rule.favicon!.value } : undefined,
   );
   const [priority, setPriority] = useState(rule.priority);
-  const [mode, setMode] = useState<'auto' | 'manual'>(rule.mode);
   const [enabled, setEnabled] = useState(rule.enabled !== false);
   const [status, setStatus] = useState<'idle' | 'saving'>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -455,32 +473,36 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
   // the newer marker and overwriting the other channel's change.
   const [expectedUpdatedAt] = useState(rule.updatedAt);
 
+  // An inline editor always edits an EXISTING rule → no `mode` opt-out, but the
+  // Clear capability applies.
+  const titleChain = useMemo(() => emptyChain(), []);
+  const iconChain = useMemo(() => emptyChain(), []);
+
   const handleSave = useCallback(async () => {
-    if (!url.trim()) { setError('URL is required'); return; }
-
-    // Auto-convert wildcard patterns to regex, then validate
-    let urlValue = url.trim();
-    if (matchType === 'regex') {
-      const conversion = wildcardToRegex(urlValue);
-      if (conversion.converted) urlValue = conversion.pattern;
-      try {
-        new RegExp(urlValue);
-      } catch (e) {
-        setError(`Invalid regex: ${e instanceof Error ? e.message : 'syntax error'}`);
-        return;
-      }
+    const validation = validateRuleForm({
+      matchType,
+      url,
+      titleMode: titleMode.kind === 'set' ? 'set' : 'use-chain',
+      titleValue: titleMode.kind === 'set' ? titleMode.value : '',
+      iconMode: iconMode.kind === 'set' ? 'url' : 'use-chain',
+      iconValue: iconMode.kind === 'set' ? iconMode.value : '',
+      iconConfig: iconConfig ? { dataUri: iconConfig.dataUri ?? '' } : undefined,
+    });
+    if (!validation.valid) {
+      setError(validation.errors[0]?.message ?? 'Invalid form');
+      return;
     }
 
-    // Compute favicon based on iconMode (mutually exclusive):
-    // URL → text input; Custom → rendered data URI; Reset → clear the icon.
+    const urlValue = matchType === 'regex' ? normalizedRegexPattern(url) : url.trim();
+
+    // Compute favicon from the mode model (mutually exclusive):
+    // set → URL text or the rendered custom data URI; use-chain → cleared.
     let favicon: IconSource | undefined;
-    if (iconMode === 'custom') {
-      const dataUri = renderIconToDataUri(iconConfig, 64);
+    if (iconMode.kind === 'set') {
+      const dataUri = iconConfig?.dataUri ?? (iconConfig ? renderIconToDataUri(iconConfig, 64) : '');
       if (dataUri) favicon = { type: 'upload', value: dataUri };
-    } else if (iconMode === 'url' && iconUrl.trim()) {
-      favicon = { type: 'url', value: iconUrl.trim() };
+      else if (iconMode.value.trim()) favicon = { type: 'url', value: iconMode.value.trim() };
     }
-    // Reset mode → favicon stays undefined → cleared (falls back to rule chain).
 
     setStatus('saving');
     setError(null);
@@ -489,9 +511,8 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
       rule.id,
       {
         urlMatch: { type: matchType, value: urlValue },
-        mode,
         priority: Math.max(-100, Math.min(100, priority)),
-        title: title.trim() || undefined,
+        title: titleMode.kind === 'set' ? (titleMode.value.trim() || undefined) : undefined,
         favicon,
         enabled,
       },
@@ -509,119 +530,59 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
       );
       return;
     }
-    // Auto-hide the Edit Rule interface after a successful update. The parent
-    // (handleInlineSave) shows the "✓ Rule updated" notice below.
     setStatus('idle');
     setError(null);
     onCancel();
-  }, [url, matchType, title, iconMode, iconUrl, iconConfig, priority, mode, enabled, rule.id, expectedUpdatedAt, onSave, onCancel]);
+  }, [url, matchType, titleMode, iconMode, iconConfig, priority, enabled, rule.id, expectedUpdatedAt, onSave, onCancel]);
 
   return (
-    <tr className="tbs-settings__inline-editor-row">
-      <td colSpan={8}>
+    <tr
+      className="tbs-settings__inline-editor-row"
+      // D-16 / IMP-15: Escape collapses the row.
+      onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onCancel(); } }}
+    >
+      <td colSpan={7}>
         <div className="tbs-settings__rule-form" role="form" aria-label={`Edit rule ${rule.id}`}>
           <h3>Edit Rule</h3>
           {error && <p className="tbs-settings__rule-form-error" role="alert">{error}</p>}
           <div className="tbs-settings__rule-form-grid">
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Match URL *</label>
-              <div className="tbs-inline-field">
-                <input
-                  type="text"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  aria-label="Match URL"
-                />
-                <button
-                  type="button"
-                  className="tbs-inline-field__reset"
-                  onClick={() => setUrl(rule.urlMatch.value)}
-                  aria-label="Reset Match URL"
-                  title="Reset Match URL"
-                >
-                  ↺
-                </button>
-              </div>
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Match Type</label>
-              <div className="tbs-settings__rule-form-radio" role="radiogroup" aria-label="Match type">
-                <label><input type="radio" checked={matchType === 'exact'} onChange={() => setMatchType('exact')} /> Exact URL</label>
-                <label><input type="radio" checked={matchType === 'regex'} onChange={() => setMatchType('regex')} /> Regex</label>
-              </div>
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Custom Title (optional)</label>
-              <div className="tbs-inline-field">
-                <input
-                  type="text"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  aria-label="Custom Title"
-                />
-                <button
-                  type="button"
-                  className="tbs-inline-field__reset"
-                  onClick={() => setTitle(rule.title ?? '')}
-                  aria-label="Reset Custom Title"
-                  title="Reset Custom Title"
-                >
-                  ↺
-                </button>
-              </div>
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Icon (optional)</label>
-              <div className="tbs-settings__rule-form-radio" role="radiogroup" aria-label="Icon mode">
-                <label>
-                  <input type="radio" checked={iconMode === 'url'} onChange={() => { setPrevIconMode(iconMode !== 'reset' ? iconMode : prevIconMode); setIconMode('url'); }} />
-                  URL
-                </label>
-                <label>
-                  <input type="radio" checked={iconMode === 'custom'} onChange={() => { setPrevIconMode(iconMode !== 'reset' ? iconMode : prevIconMode); setIconMode('custom'); }} />
-                  Custom
-                </label>
-                <label>
-                  <input type="radio" checked={iconMode === 'reset'} onChange={() => { setPrevIconMode(iconMode !== 'reset' ? iconMode : prevIconMode); setIconMode('reset'); }} />
-                  Reset
-                </label>
-              </div>
-              {iconMode === 'url' && (
-                <input
-                  type="text"
-                  value={iconUrl}
-                  onChange={(e) => setIconUrl(e.target.value)}
-                  aria-label="Icon URL"
-                />
-              )}
-              {iconMode === 'custom' && (
-                <IconEditor value={iconConfig} onChange={setIconConfig} size={48} />
-              )}
-              {iconMode === 'reset' && (
-                <p className="tbs-settings__hint">Icon will be cleared and shown as "—".</p>
-              )}
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Priority (-100 to 100)</label>
-              <input
-                type="number"
-                min={-100}
-                max={100}
-                value={priority}
-                onChange={(e) => setPriority(parseInt(e.target.value) || 0)}
-                aria-label="Priority"
-              />
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">
-                <input type="checkbox" checked={mode === 'auto'} onChange={(e) => setMode(e.target.checked ? 'auto' : 'manual')} />
-                {' '}Auto-apply on match
-              </label>
-              <label className="tbs-form-field__label" style={{ marginTop: 4 }}>
-                <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-                {' '}Enabled
-              </label>
-            </div>
+            <RuleFormFields
+              variant="edit"
+              value={{
+                url,
+                matchType,
+                titleMode,
+                iconMode,
+                iconConfig,
+                priority,
+                enabled,
+              }}
+              onChange={(patch) => {
+                if (patch.url !== undefined) setUrl(patch.url);
+                if (patch.matchType !== undefined) setMatchType(patch.matchType);
+                if (patch.titleMode !== undefined) setTitleMode(patch.titleMode);
+                if (patch.iconMode !== undefined) setIconMode(patch.iconMode);
+                if (patch.iconConfig !== undefined) setIconConfig(patch.iconConfig);
+                if (patch.priority !== undefined) setPriority(patch.priority);
+                if (patch.enabled !== undefined) setEnabled(patch.enabled);
+              }}
+              prefill={{ url: rule.urlMatch.value }}
+              chain={titleChain}
+              titleChain={titleChain}
+              iconChain={iconChain}
+              baselineTitle={{ mode: rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' } }}
+              baselineIcon={{
+                mode: hasIcon ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value } : { kind: 'use-chain' },
+                iconConfig: isCustomIcon ? { dataUri: rule.favicon!.value } : undefined,
+              }}
+              onResetTitleEdit={() => { setTitleMode(rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' }); }}
+              onResetIconEdit={() => { setIconMode(hasIcon ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value } : { kind: 'use-chain' }); }}
+              onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
+              onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
+              submitMode={{ kind: 'immediate' }}
+              showEnabled
+              idPrefix={`rf-${rule.id}`}
+            />
           </div>
           <div className="tbs-settings__rule-form-actions">
             <Button size="sm" variant="ghost" onClick={onCancel} aria-label="Cancel">Cancel</Button>
@@ -654,19 +615,30 @@ function RulesSection() {
   const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [batchProcessing, setBatchProcessing] = useState(false);
+  /** D-12: destructive actions are confirmed (N1: `Confirm` imported here). */
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
+  /** D-11/D-15: load failure state driving the three-way empty/error panel. */
+  const [loadError, setLoadError] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   /** Sort state for the rules table (key + direction). null = no sort (insertion order). */
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' } | null>(null);
 
-  // Load rules from background
+  // Load rules from background (D-15: a failure becomes a non-blocking error state).
   const loadRules = useCallback(async () => {
     try {
       const res = await sendMessage('GET_STATE');
       const result = extractResult(res);
       if (result?.success && (result.sync as Record<string, unknown>)?.rules) {
         setRules((result.sync as { rules: PageRule[] }).rules);
+        setLoadError(false);
+      } else if (result && result.success === false) {
+        setLoadError(true);
       }
     } catch {
-      // silently fail
+      setLoadError(true);
+    } finally {
+      setHasLoadedOnce(true);
     }
   }, []);
 
@@ -698,7 +670,7 @@ function RulesSection() {
   // Module 2: save from an inline editor with expectedUpdatedAt version check
   const handleInlineSave = useCallback(async (
     ruleId: string,
-    updates: Partial<Pick<PageRule, 'urlMatch' | 'mode' | 'priority' | 'title' | 'favicon' | 'enabled'>>,
+    updates: Partial<Pick<PageRule, 'urlMatch' | 'priority' | 'title' | 'favicon' | 'enabled'>>,
     expectedUpdatedAt: string,
   ): Promise<{ success: boolean; errorCode?: string; message?: string }> => {
     try {
@@ -722,54 +694,48 @@ function RulesSection() {
   }, [loadRules]);
 
   const handleSaveRule = async () => {
-    if (!form.url.trim()) { setError('URL is required'); return; }
-
-    // Problem 2: Auto-convert wildcard patterns to valid regex
-    let urlValue = form.url.trim();
-    if (form.matchType === 'regex') {
-      const conversion = wildcardToRegex(urlValue);
-      if (conversion.converted) {
-        urlValue = conversion.pattern;
-      }
-      // Final validation
-      try {
-        new RegExp(urlValue);
-      } catch (e) {
-        setError(`Invalid regex: ${e instanceof Error ? e.message : 'syntax error'}`);
-        return;
-      }
+    // E1-a: the SHARED validator converts the wildcard BEFORE validating, so the
+    // validated string is exactly the stored string (no bare `new RegExp` here).
+    const validation = validateRuleForm({
+      matchType: form.matchType,
+      url: form.url,
+      titleMode: form.titleMode.kind === 'set' ? 'set' : 'use-chain',
+      titleValue: form.titleMode.kind === 'set' ? form.titleMode.value : '',
+      iconMode: form.iconMode.kind === 'set' ? 'url' : 'use-chain',
+      iconValue: form.iconMode.kind === 'set' ? form.iconMode.value : '',
+      iconConfig: form.iconConfig ? { dataUri: form.iconConfig.dataUri ?? '' } : undefined,
+    });
+    if (!validation.valid) {
+      setError(validation.errors[0]?.message ?? 'Invalid form');
+      return;
     }
+
+    const urlValue = form.matchType === 'regex' ? normalizedRegexPattern(form.url) : form.url.trim();
 
     setSaving(true);
     setError(null);
 
-    // Problem 4: Compute favicon based on iconMode (mutually exclusive):
-    // URL → text input; Custom → rendered data URI; Reset → clear the icon.
+    // DT5 mode model: `set` → URL text or the rendered custom data URI.
     let favicon: { type: string; value: string } | undefined;
-    if (form.iconMode === 'custom') {
-      const dataUri = renderIconToDataUri(form.iconConfig, 64);
+    if (form.iconMode.kind === 'set') {
+      const dataUri = form.iconConfig?.dataUri ?? (form.iconConfig ? renderIconToDataUri(form.iconConfig, 64) : '');
       if (dataUri) favicon = { type: 'upload', value: dataUri };
-    } else if (form.iconMode === 'url' && form.iconUrl.trim()) {
-      favicon = { type: 'url', value: form.iconUrl.trim() };
+      else if (form.iconMode.value.trim()) favicon = { type: 'url', value: form.iconMode.value.trim() };
     }
-    // Reset mode → favicon stays undefined → cleared (falls back to rule chain).
 
     try {
       // Create new rule — conflict/duplicate detection happens in the background
       const res = await sendMessage('CREATE_RULE', {
         urlMatch: { type: form.matchType, value: urlValue },
-        mode: form.mode,
         priority: Math.max(-100, Math.min(100, form.priority)),
-        title: form.title.trim() || undefined,
+        title: form.titleMode.kind === 'set' ? (form.titleMode.value.trim() || undefined) : undefined,
         favicon,
       });
       const result = extractResult(res);
       if (result?.success) {
-        // Auto-hide the form after a successful save and show a floating toast,
-        // matching the Data Dashboard Edit success style.
         setShowForm(false);
         setForm(EMPTY_RULE_FORM);
-        setToast({ variant: 'success', message: 'rule created' });
+        setToast({ variant: 'success', message: 'Rule created' });
         void loadRules();
       } else {
         setError((result?.message as string) || 'Failed to create rule');
@@ -783,10 +749,16 @@ function RulesSection() {
 
   const handleDeleteRule = async (ruleId: string) => {
     try {
-      await sendMessage('DELETE_RULE', { ruleId });
+      const res = await sendMessage('DELETE_RULE', { ruleId });
+      const result = extractResult(res);
+      if (result?.success) {
+        setToast({ variant: 'success', message: 'Rule deleted' });
+      } else {
+        setToast({ variant: 'error', message: (result?.message as string) || 'Failed to delete rule' });
+      }
       void loadRules();
     } catch {
-      // silently fail
+      setToast({ variant: 'error', message: 'Failed to delete rule' });
     }
   };
 
@@ -813,13 +785,27 @@ function RulesSection() {
   // Batch operations
   const handleBatchDelete = async () => {
     setBatchProcessing(true);
-    for (const id of selectedIds) {
+    // D-12: report partial failures honestly instead of swallowing them.
+    const ids = [...selectedIds];
+    let failed = 0;
+    for (const id of ids) {
       try {
-        await sendMessage('DELETE_RULE', { ruleId: id });
-      } catch { /* continue */ }
+        const res = await sendMessage('DELETE_RULE', { ruleId: id });
+        const result = extractResult(res);
+        if (!result?.success) failed += 1;
+      } catch {
+        failed += 1;
+      }
     }
     setSelectedIds(new Set());
     setBatchProcessing(false);
+    const deleted = ids.length - failed;
+    setToast(
+      failed === 0
+        ? { variant: 'success', message: `Deleted ${String(deleted)} ${deleted === 1 ? 'rule' : 'rules'}` }
+        : { variant: 'error', message: `Deleted ${String(deleted)} of ${String(ids.length)} · ${String(failed)} failed` },
+    );
+    setConfirmBatchDelete(false);
     void loadRules();
   };
 
@@ -862,6 +848,20 @@ function RulesSection() {
     return [...matching].sort((a, b) => dir * compareRules(a, b, sort.key));
   })();
 
+  // D-13 (default (a) AUTO-PRUNE): a selection must never outlive visibility.
+  // "What you see is what you operate on" — a hidden id is removed from the
+  // selection whenever the visible set changes.
+  useEffect(() => {
+    const visible = new Set(filteredRules.map((r) => r.id));
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set<string>();
+      for (const id of prev) if (visible.has(id)) next.add(id);
+      return next.size === prev.size ? prev : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, sort, rules]);
+
   const toggleSort = (key: SortKey) => {
     setSort((prev) => {
       if (prev && prev.key === key) {
@@ -881,7 +881,7 @@ function RulesSection() {
           className="tbs-settings__search"
           placeholder="Search rules..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => { setSearch(e.target.value); }}
           aria-label="Search rules"
         />
         <Button size="sm" variant="primary" aria-label="Create new rule" onClick={handleNewRule}>+ New Rule</Button>
@@ -893,129 +893,45 @@ function RulesSection() {
           <span>{selectedIds.size} selected</span>
           <Button size="sm" variant="secondary" onClick={() => void handleBatchSetEnabled(true)} disabled={batchProcessing}>Enable</Button>
           <Button size="sm" variant="secondary" onClick={() => void handleBatchSetEnabled(false)} disabled={batchProcessing}>Disable</Button>
-          <Button size="sm" variant="danger" onClick={() => void handleBatchDelete()} disabled={batchProcessing}>
+          <Button size="sm" variant="danger" onClick={() => { setConfirmBatchDelete(true); }} disabled={batchProcessing}>
             {batchProcessing ? 'Processing...' : 'Delete'}
           </Button>
         </div>
       )}
 
-      {/* Inline rule creation form (new rules). Editing happens inline per-row below. */}
+      {/* IMP-3: "New Rule" stays a TOP-INLINE form (position is intentionally
+          different from the per-row InlineRuleEditor); its field set comes from the
+          shared RuleFormFields so both surfaces are identical by construction. */}
       {showForm && (
         <div className="tbs-settings__rule-form" role="form" aria-label="Create new rule">
           <h3>New Rule</h3>
           {error && <p className="tbs-settings__rule-form-error" role="alert">{error}</p>}
-          <div className="tbs-settings__rule-form-grid">
-            <div className="tbs-form-field">
-              <label htmlFor="rf-url" className="tbs-form-field__label">Match URL *</label>
-              <div className="tbs-inline-field">
-                <input
-                  id="rf-url"
-                  type="text"
-                  value={form.url}
-                  onChange={(e) => setForm({ ...form, url: e.target.value })}
-                  placeholder="https://example.com/page"
-                />
-                <button
-                  type="button"
-                  className="tbs-inline-field__reset"
-                  onClick={() => setForm({ ...form, url: '' })}
-                  aria-label="Reset Match URL"
-                  title="Reset Match URL"
-                >
-                  ↺
-                </button>
-              </div>
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Match Type</label>
-              <div className="tbs-settings__rule-form-radio">
-                <label><input type="radio" name="rf-match" checked={form.matchType === 'exact'} onChange={() => setForm({ ...form, matchType: 'exact' })} /> Exact URL</label>
-                <label><input type="radio" name="rf-match" checked={form.matchType === 'regex'} onChange={() => setForm({ ...form, matchType: 'regex' })} /> Regex</label>
-              </div>
-              {/* Problem 5: Real-time regex validation feedback */}
-              {form.matchType === 'regex' && form.url.trim() && (() => {
-                try {
-                  new RegExp(form.url.trim());
-                  return <span className="tbs-settings__regex-valid" role="status">✓ Valid regex</span>;
-                } catch (e) {
-                  return <span className="tbs-settings__regex-invalid" role="alert">✗ {e instanceof Error ? e.message : 'Invalid regex'}</span>;
-                }
-              })()}
-            </div>
-            <div className="tbs-form-field">
-              <label htmlFor="rf-title" className="tbs-form-field__label">Custom Title (optional)</label>
-              <div className="tbs-inline-field">
-                <input
-                  id="rf-title"
-                  type="text"
-                  value={form.title}
-                  onChange={(e) => setForm({ ...form, title: e.target.value })}
-                  placeholder="Leave empty to keep original"
-                />
-                <button
-                  type="button"
-                  className="tbs-inline-field__reset"
-                  onClick={() => setForm({ ...form, title: '' })}
-                  aria-label="Reset Custom Title"
-                  title="Reset Custom Title"
-                >
-                  ↺
-                </button>
-              </div>
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Icon (optional)</label>
-              <div className="tbs-settings__rule-form-radio" role="radiogroup" aria-label="Icon mode">
-                <label>
-                  <input type="radio" name="rf-icon-mode" checked={form.iconMode === 'url'} onChange={() => setForm((prev) => ({ ...prev, prevIconMode: prev.iconMode !== 'reset' ? prev.iconMode : prev.prevIconMode, iconMode: 'url' }))} />
-                  URL
-                </label>
-                <label>
-                  <input type="radio" name="rf-icon-mode" checked={form.iconMode === 'custom'} onChange={() => setForm((prev) => ({ ...prev, prevIconMode: prev.iconMode !== 'reset' ? prev.iconMode : prev.prevIconMode, iconMode: 'custom' }))} />
-                  Custom
-                </label>
-                <label>
-                  <input type="radio" name="rf-icon-mode" checked={form.iconMode === 'reset'} onChange={() => setForm((prev) => ({ ...prev, prevIconMode: prev.iconMode !== 'reset' ? prev.iconMode : prev.prevIconMode, iconMode: 'reset' }))} />
-                  Reset
-                </label>
-              </div>
-              {form.iconMode === 'url' && (
-                <input
-                  id="rf-icon"
-                  type="text"
-                  value={form.iconUrl}
-                  onChange={(e) => setForm({ ...form, iconUrl: e.target.value })}
-                  placeholder="https:// or data: URI"
-                  aria-label="Icon URL"
-                />
-              )}
-              {form.iconMode === 'custom' && (
-                <IconEditor value={form.iconConfig} onChange={(cfg) => setForm({ ...form, iconConfig: cfg })} size={48} />
-              )}
-              {form.iconMode === 'reset' && (
-                <p className="tbs-settings__hint">Icon will be cleared and shown as "—".</p>
-              )}
-            </div>
-            <div className="tbs-form-field">
-              <label htmlFor="rf-priority" className="tbs-form-field__label">Priority (-100 to 100)</label>
-              <input
-                id="rf-priority"
-                type="number"
-                min={-100}
-                max={100}
-                value={form.priority}
-                onChange={(e) => setForm({ ...form, priority: parseInt(e.target.value) || 0 })}
-              />
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">
-                <input type="checkbox" checked={form.mode === 'auto'} onChange={(e) => setForm({ ...form, mode: e.target.checked ? 'auto' : 'manual' })} />
-                {' '}Auto-apply on match
-              </label>
-            </div>
-          </div>
+          <RuleFormFields
+            variant="create"
+            idPrefix="new-rule"
+            value={{
+              url: form.url,
+              matchType: form.matchType,
+              titleMode: form.titleMode,
+              iconMode: form.iconMode,
+              iconConfig: form.iconConfig,
+              priority: form.priority,
+            }}
+            onChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
+            prefill={{ url: '' }}
+            chain={emptyChain()}
+            titleChain={emptyChain()}
+            iconChain={emptyChain()}
+            baselineTitle={{ mode: { kind: 'use-chain' } }}
+            baselineIcon={{ mode: { kind: 'use-chain' } }}
+            onResetTitleEdit={() => setForm((prev) => ({ ...prev, titleMode: { kind: 'use-chain' } }))}
+            onResetIconEdit={() => setForm((prev) => ({ ...prev, iconMode: { kind: 'use-chain' }, iconConfig: undefined }))}
+            onClearTitle={() => setForm((prev) => ({ ...prev, titleMode: { kind: 'use-chain' } }))}
+            onClearIcon={() => setForm((prev) => ({ ...prev, iconMode: { kind: 'use-chain' }, iconConfig: undefined }))}
+            submitMode={{ kind: 'immediate' }}
+          />
           <div className="tbs-settings__rule-form-actions">
-            <Button size="sm" variant="ghost" onClick={() => setShowForm(false)}>Cancel</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setShowForm(false); }}>Cancel</Button>
             <Button size="sm" variant="primary" onClick={() => void handleSaveRule()} loading={saving} disabled={!form.url.trim()}>
               Save Rule
             </Button>
@@ -1034,42 +950,13 @@ function RulesSection() {
                 aria-label="Select all rules"
               />
             </th>
+            {/* IMP-9: column order is ☑ / Icon / Title / URL Pattern / Priority / Enabled / Actions. */}
             <th scope="col" style={{ width: '32px' }}>Icon</th>
             <th scope="col">
               <button
                 type="button"
                 className="tbs-settings__sortable"
-                onClick={() => toggleSort('urlMatch')}
-                aria-label="Sort by URL Pattern"
-              >
-                URL Pattern {sort?.key === 'urlMatch' ? (sort.dir === 'asc' ? '▲' : '▼') : ''}
-              </button>
-            </th>
-            <th scope="col">
-              <button
-                type="button"
-                className="tbs-settings__sortable"
-                onClick={() => toggleSort('mode')}
-                aria-label="Sort by Mode"
-              >
-                Mode {sort?.key === 'mode' ? (sort.dir === 'asc' ? '▲' : '▼') : ''}
-              </button>
-            </th>
-            <th scope="col">
-              <button
-                type="button"
-                className="tbs-settings__sortable"
-                onClick={() => toggleSort('priority')}
-                aria-label="Sort by Priority"
-              >
-                Priority {sort?.key === 'priority' ? (sort.dir === 'asc' ? '▲' : '▼') : ''}
-              </button>
-            </th>
-            <th scope="col">
-              <button
-                type="button"
-                className="tbs-settings__sortable"
-                onClick={() => toggleSort('title')}
+                onClick={() => { toggleSort('title'); }}
                 aria-label="Sort by Title"
               >
                 Title {sort?.key === 'title' ? (sort.dir === 'asc' ? '▲' : '▼') : ''}
@@ -1079,7 +966,27 @@ function RulesSection() {
               <button
                 type="button"
                 className="tbs-settings__sortable"
-                onClick={() => toggleSort('enabled')}
+                onClick={() => { toggleSort('urlMatch'); }}
+                aria-label="Sort by URL Pattern"
+              >
+                URL Pattern {sort?.key === 'urlMatch' ? (sort.dir === 'asc' ? '▲' : '▼') : ''}
+              </button>
+            </th>
+            <th scope="col">
+              <button
+                type="button"
+                className="tbs-settings__sortable"
+                onClick={() => { toggleSort('priority'); }}
+                aria-label="Sort by Priority"
+              >
+                Priority {sort?.key === 'priority' ? (sort.dir === 'asc' ? '▲' : '▼') : ''}
+              </button>
+            </th>
+            <th scope="col">
+              <button
+                type="button"
+                className="tbs-settings__sortable"
+                onClick={() => { toggleSort('enabled'); }}
                 aria-label="Sort by Enabled"
               >
                 Enabled {sort?.key === 'enabled' ? (sort.dir === 'asc' ? '▲' : '▼') : ''}
@@ -1091,7 +998,7 @@ function RulesSection() {
                 <button
                   type="button"
                   className="tbs-settings__sort-reset"
-                  onClick={() => setSort(null)}
+                  onClick={() => { setSort(null); }}
                   aria-label="Reset sorting"
                   title="Reset sorting"
                 >
@@ -1109,7 +1016,7 @@ function RulesSection() {
                   <input
                     type="checkbox"
                     checked={selectedIds.has(rule.id)}
-                    onChange={() => toggleSelect(rule.id)}
+                    onChange={() => { toggleSelect(rule.id); }}
                     aria-label={`Select rule ${rule.id}`}
                   />
                 </td>
@@ -1120,14 +1027,12 @@ function RulesSection() {
                     <span style={{ display: 'inline-block', width: 16, height: 16, borderRadius: 2, background: '#9CA3AF', verticalAlign: 'middle', textAlign: 'center', fontSize: 10, lineHeight: '16px', color: '#fff' }}>🌐</span>
                   )}
                 </td>
+                {/* IMP-9: Title precedes URL Pattern (cells are NOT merged). */}
+                <td>{rule.title ?? '—'}</td>
                 <td title={rule.urlMatch.value}>
                   <code>{rule.urlMatch.type === 'regex' ? `/${rule.urlMatch.value}/` : rule.urlMatch.value}</code>
                 </td>
-                <td>
-                  <StatusBadge status={rule.mode === 'auto' ? 'active' : 'pending'} label={rule.mode} />
-                </td>
                 <td>{rule.priority}</td>
-                <td>{rule.title ?? '—'}</td>
                 <td>
                   <label className="tbs-settings__toggle" title={rule.enabled !== false ? 'Enabled' : 'Disabled'}>
                     <input
@@ -1144,13 +1049,13 @@ function RulesSection() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => toggleExpand(rule.id)}
+                      onClick={() => { toggleExpand(rule.id); }}
                       aria-label={`Edit rule ${rule.id}`}
                       aria-expanded={expandedRuleIds.has(rule.id)}
                     >
                       ✏️
                     </Button>
-                    <Button size="sm" variant="danger" onClick={() => void handleDeleteRule(rule.id)} aria-label={`Delete rule ${rule.id}`}>
+                    <Button size="sm" variant="danger" onClick={() => { setConfirmDeleteId(rule.id); }} aria-label={`Delete rule ${rule.title ?? rule.urlMatch.value}`}>
                       🗑️
                     </Button>
                   </div>
@@ -1161,23 +1066,58 @@ function RulesSection() {
                 <InlineRuleEditor
                   rule={rule}
                   onSave={handleInlineSave}
-                  onCancel={() => toggleExpand(rule.id)}
+                  onCancel={() => { toggleExpand(rule.id); }}
                 />
               )}
             </Fragment>
           ))}
           {filteredRules.length === 0 && (
             <tr>
-              <td colSpan={8} style={{ textAlign: 'center', color: 'var(--color-text-tertiary)' }}>
-                No rules configured. Create one here or use the sidebar &quot;+&quot; button.
+              <td colSpan={7}>
+                {loadError && !hasLoadedOnce ? (
+                  <EmptyState variant="error-first" action={{ label: 'Retry', onClick: () => void loadRules() }} />
+                ) : loadError ? (
+                  <EmptyState variant="error-stale" action={{ label: 'Retry', onClick: () => void loadRules() }} />
+                ) : search.trim() ? (
+                  <EmptyState variant="no-match" action={{ label: 'Clear search', onClick: () => { setSearch(''); } }} />
+                ) : (
+                  <EmptyState
+                    variant="empty"
+                    message="No rules configured. Create one here or use the sidebar &quot;+&quot; button."
+                  />
+                )}
               </td>
             </tr>
           )}
         </tbody>
       </table>
 
+      {/* D-12 / N1: destructive actions are confirmed (single + batch). */}
+      <Confirm
+        open={confirmDeleteId !== null}
+        title="Delete rule?"
+        message="This rule will be removed. Pages it matched fall back to the next layer in the chain."
+        confirmLabel="Delete"
+        variant="danger"
+        onCancel={() => { setConfirmDeleteId(null); }}
+        onConfirm={() => {
+          const id = confirmDeleteId;
+          setConfirmDeleteId(null);
+          if (id) void handleDeleteRule(id);
+        }}
+      />
+      <Confirm
+        open={confirmBatchDelete}
+        title="Delete selected rules?"
+        message={`${String(selectedIds.size)} selected ${selectedIds.size === 1 ? 'rule' : 'rules'} will be removed.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onCancel={() => { setConfirmBatchDelete(false); }}
+        onConfirm={() => void handleBatchDelete()}
+      />
+
       {toast && (
-        <Toast variant={toast.variant} message={toast.message} onDismiss={() => setToast(null)} />
+        <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />
       )}
     </section>
   );
@@ -1185,33 +1125,72 @@ function RulesSection() {
 
 // ─── Data Dashboard Section ────────────────────────────────────────────────
 
+/**
+ * A10 / T16: the dashboard renders the background-computed `DashboardRow`
+ * directly. The `chain` is NOT recomputed here — the UI would otherwise be a
+ * second implementation of the field chain (the defect this iteration removes).
+ */
 interface DashboardEntry {
   id: string;
-  kind: 'current-page' | 'slot';
+  kind: 'override' | 'slot' | 'rule-hit';
   label: string;
-  title: string | null;
-  icon: string | null;
   url: string | null;
+  anchor: TierOwner | null;
   tabId?: number;
   slotId?: number;
+  ruleId?: string;
+  chain: { title: ChainResult; favicon: ChainResult };
+  delivery: 'ok' | 'degraded' | 'protected' | 'unknown';
 }
 
-// Local edit-form buffer for a single dashboard entry (issue 3).
+/**
+ * IMP-4: inline edit draft. One draft per row, held in a Map so several rows
+ * can be edited at once with independent dirty state.
+ */
 interface DashboardEditForm {
-  entryId: string;
-  title: string;
-  icon: string;
-  originalTitle: string | null;
-  originalIcon: string | null;
-  /** Icon mode: URL text input, Custom icon editor, or Reset (clear icon). */
-  iconMode: 'url' | 'custom' | 'reset';
-  iconConfig: IconConfig;
-  /** Cached previous mode so switching back restores the user's prior input. */
-  prevIconMode: 'url' | 'custom' | null;
+  titleMode: FieldMode;
+  iconMode: FieldMode;
+  iconConfig?: IconConfig;
 }
 
 type DashboardSortKey = 'label' | 'title';
 type SortDir = 'asc' | 'desc';
+
+/** IMP-5 / G1: the delivery copy, and whether a row can be applied here at all. */
+function deliveryLabel(delivery: DashboardEntry['delivery']): string | null {
+  switch (delivery) {
+    case 'ok':
+      return null; // a healthy row shows nothing
+    case 'protected':
+      return "Can't rewrite this page";
+    case 'degraded':
+      return "Limited: can't restore the site value";
+    case 'unknown':
+      return '—';
+  }
+}
+
+function isNotApplicable(delivery: DashboardEntry['delivery']): boolean {
+  // G1-a: `unknown` is NOT "not applicable" — otherwise the sentence is always true.
+  return delivery === 'protected' || delivery === 'degraded';
+}
+
+/**
+ * IMP-19 / RK-4: a row's Save is enabled ONLY when that row's draft actually
+ * differs from its committed value. The comparison is the honest definition of
+ * "dirty" — it does not light up merely because the mode is `set`.
+ */
+function isDraftDirty(entry: DashboardEntry, draft: DashboardEditForm): boolean {
+  const currentTitle = entry.chain.title.winner.value;
+  const currentIcon = entry.chain.favicon.winner.value;
+
+  const draftTitle = draft.titleMode.kind === 'set' ? draft.titleMode.value.trim() : null;
+  const draftIcon = draft.iconMode.kind === 'set'
+    ? (draft.iconConfig?.dataUri || draft.iconMode.value.trim() || null)
+    : null;
+
+  return draftTitle !== (currentTitle ?? null) || draftIcon !== (currentIcon ?? null);
+}
 
 function DashboardSection() {
   const [entries, setEntries] = useState<DashboardEntry[]>([]);
@@ -1220,17 +1199,40 @@ function DashboardSection() {
   const [busy, setBusy] = useState(false);
   const [sortKey, setSortKey] = useState<DashboardSortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>('asc');
-  const [editing, setEditing] = useState<DashboardEditForm | null>(null);
+  /** IMP-4: per-row drafts so several rows can be edited simultaneously. */
+  const [drafts, setDrafts] = useState<Map<string, DashboardEditForm>>(new Map());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showUrl, setShowUrl] = useState(false);
+  /** D-20: destructive reset is confirmed. */
+  const [confirmReset, setConfirmReset] = useState<{ kind: 'entry'; id: string } | { kind: 'all' } | { kind: 'selected' } | null>(null);
+  /** IMP-6/DT9: the generalized atomic undo for an immediate Clear. */
+  const [undoState, setUndoState] = useState<UndoState | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   const sortedEntries = useMemo(() => {
     if (!sortKey) return entries;
     const dir = sortDir === 'asc' ? 1 : -1;
+    const key = sortKey;
     const sorted = [...entries].sort((a, b) => {
-      return (a[sortKey] ?? '').localeCompare(b[sortKey] ?? '', undefined, { numeric: true }) * dir;
+      const av = key === 'label' ? a.label : (a.chain.title.winner.value ?? '');
+      const bv = key === 'label' ? b.label : (b.chain.title.winner.value ?? '');
+      return av.localeCompare(bv, undefined, { numeric: true }) * dir;
     });
     return sorted;
   }, [entries, sortKey, sortDir]);
+
+  // IMP-4 / N8: the header select-all and the rows share ONE list.
+  const visibleEntries = sortedEntries;
+
+  // G1: "N items · none can be applied here" — `unknown` is excluded.
+  const summary = useMemo(() => {
+    if (visibleEntries.length === 0) return null;
+    const applicable = visibleEntries.filter((e) => !isNotApplicable(e.delivery));
+    if (applicable.length > 0) return null;
+    const pulled = visibleEntries.filter((e) => isNotApplicable(e.delivery)).length;
+    return `${String(pulled)} ${pulled === 1 ? 'item' : 'items'} · none can be applied here`;
+  }, [visibleEntries]);
 
   const toggleSort = (key: DashboardSortKey) => {
     if (sortKey === key) {
@@ -1250,20 +1252,25 @@ function DashboardSection() {
     try {
       const res = await sendMessage('GET_DASHBOARD');
       const result = extractResult(res);
-      if (!result?.success) return;
-      const rows: DashboardEntry[] = (result.items as DashboardItem[]).map((i) => ({
-        id: i.id,
-        kind: i.kind,
-        label: i.label,
-        title: i.title ?? null,
-        icon: i.icon ?? null,
-        url: i.url ?? null,
-        tabId: i.tabId,
-        slotId: i.slotId,
+      if (!result?.success) { setLoadError(true); return; }
+      const rows: DashboardEntry[] = (result.rows as DashboardRow[]).map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        label: r.label,
+        url: r.url,
+        anchor: r.anchor,
+        tabId: r.tabId,
+        slotId: r.slotId,
+        ruleId: r.ruleId,
+        chain: r.chain,
+        delivery: r.delivery,
       }));
       setEntries(rows);
+      setLoadError(false);
     } catch {
-      // ignore
+      setLoadError(true);
+    } finally {
+      setHasLoaded(true);
     }
   }, []);
 
@@ -1273,7 +1280,7 @@ function DashboardSection() {
       if (areaName === 'sync' || areaName === 'local') void load();
     };
     chrome.storage?.onChanged?.addListener(onStorageChanged);
-    return () => chrome.storage?.onChanged?.removeListener(onStorageChanged);
+    return () => { chrome.storage?.onChanged?.removeListener(onStorageChanged); };
   }, [load]);
 
   const toggleSelect = (id: string) => {
@@ -1285,23 +1292,38 @@ function DashboardSection() {
     });
   };
 
+  // F1/F1b (T13): the source badge is the only cross-surface jump entry point.
+  // The Dashboard's own rows are the targets for its anchors.
+  const { jumpTo, announcement } = useJumpToRow({
+    resolveRow: (anchor) => document.querySelector<HTMLElement>(`[data-dash-anchor="${anchor.kind}:${anchor.kind === 'rule' ? anchor.ruleId : anchor.kind === 'slot' ? String(anchor.slotId) : anchor.kind === 'override' ? String(anchor.tabId) : 'site'}"]`),
+    firstRow: () => document.querySelector<HTMLElement>('tr[data-dash-row]'),
+    searchRef: { current: null },
+  });
+
+  /**
+   * Clear (Q13/N10/DT11): the tier set to write is decided by `clearChain`, so
+   * the dashboard does not invent its own notion of "reset". Writes unify on
+   * `null` (no legacy empty-string paths).
+   */
   const resetEntry = async (entry: DashboardEntry) => {
     setBusy(true);
     try {
-      if (entry.kind === 'current-page' && entry.tabId != null) {
+      if (entry.kind === 'override' && entry.tabId != null) {
+        // Q13/N10/DT11: clear via `null`, never the legacy `{type:'url',value:''}`.
         await sendMessage('REMOVE_TAB_OVERRIDE', { tabId: entry.tabId });
       } else if (entry.kind === 'slot' && entry.slotId != null) {
         await sendMessage('UPDATE_SLOT_UI_MARKER', {
           slotId: entry.slotId,
-          uiMarker: { customTitle: '', icon: { type: 'url', value: '' } },
+          uiMarker: { customTitle: '', icon: null },
         });
       }
-      setToast({ variant: 'success', message: `${entry.label} reset` });
+      setToast({ variant: 'success', message: `${entry.label} cleared` });
       void load();
     } catch {
-      setToast({ variant: 'error', message: `Failed to reset ${entry.label}` });
+      setToast({ variant: 'error', message: `Failed to clear ${entry.label}` });
     } finally {
       setBusy(false);
+      setConfirmReset(null);
     }
   };
 
@@ -1309,22 +1331,23 @@ function DashboardSection() {
     setBusy(true);
     try {
       for (const entry of entries) {
-        if (entry.kind === 'current-page' && entry.tabId != null) {
+        if (entry.kind === 'override' && entry.tabId != null) {
           await sendMessage('REMOVE_TAB_OVERRIDE', { tabId: entry.tabId });
         } else if (entry.kind === 'slot' && entry.slotId != null) {
           await sendMessage('UPDATE_SLOT_UI_MARKER', {
             slotId: entry.slotId,
-            uiMarker: { customTitle: '', icon: { type: 'url', value: '' } },
+            uiMarker: { customTitle: '', icon: null },
           });
         }
       }
-      setToast({ variant: 'success', message: 'All items reset' });
+      setToast({ variant: 'success', message: 'All items cleared' });
       setSelected(new Set());
       void load();
     } catch {
-      setToast({ variant: 'error', message: 'Failed to reset all items' });
+      setToast({ variant: 'error', message: 'Failed to clear all items' });
     } finally {
       setBusy(false);
+      setConfirmReset(null);
     }
   };
 
@@ -1333,141 +1356,196 @@ function DashboardSection() {
     try {
       for (const entry of entries) {
         if (!selected.has(entry.id)) continue;
-        if (entry.kind === 'current-page' && entry.tabId != null) {
+        if (entry.kind === 'override' && entry.tabId != null) {
           await sendMessage('REMOVE_TAB_OVERRIDE', { tabId: entry.tabId });
         } else if (entry.kind === 'slot' && entry.slotId != null) {
           await sendMessage('UPDATE_SLOT_UI_MARKER', {
             slotId: entry.slotId,
-            uiMarker: { customTitle: '', icon: { type: 'url', value: '' } },
+            uiMarker: { customTitle: '', icon: null },
           });
         }
       }
-      setToast({ variant: 'success', message: 'Selected items reset' });
+      setToast({ variant: 'success', message: 'Selected items cleared' });
       setSelected(new Set());
       void load();
     } catch {
-      setToast({ variant: 'error', message: 'Failed to reset selected items' });
+      setToast({ variant: 'error', message: 'Failed to clear selected items' });
+    } finally {
+      setBusy(false);
+      setConfirmReset(null);
+    }
+  };
+
+  // ─── Field-level operations (DRIVEN BY THE SHARED FIELD MODEL) ───────────
+
+  /**
+   * Clear a single field at this level (falls back through the chain).
+   *
+   * DT9/RK-3: because Clear is immediate and CAN destroy a global config
+   * (`slot.uiMarker` / `rule.title`), it raises the generalized `UndoBar` with
+   * an ATOMIC batch snapshot of the value it just removed.
+   */
+  const clearEntryField = async (entry: DashboardEntry, field: 'title' | 'icon') => {
+    setBusy(true);
+    const previous = field === 'title'
+      ? entry.chain.title.winner.value
+      : entry.chain.favicon.winner.value;
+    try {
+      if (entry.kind === 'override' && entry.tabId != null) {
+        if (field === 'title') await sendMessage('SET_TAB_OVERRIDE', { tabId: entry.tabId, title: '' });
+        else await sendMessage('SET_TAB_OVERRIDE', { tabId: entry.tabId, favicon: null });
+      } else if (entry.kind === 'slot' && entry.slotId != null) {
+        await sendMessage('UPDATE_SLOT_UI_MARKER', {
+          slotId: entry.slotId,
+          uiMarker: field === 'title' ? { customTitle: '' } : { icon: null },
+        });
+      }
+      setToast({ variant: 'success', message: field === 'title' ? 'Title cleared' : 'Icon cleared' });
+      // IMP-6 / DT9: offer the atomic undo for the removed value.
+      setUndoState({
+        message: field === 'title' ? `${entry.label} title cleared` : `${entry.label} icon cleared`,
+        snapshot: {
+          writes: entry.kind === 'override' && entry.tabId != null
+            ? [{ kind: 'tab-override', tabId: entry.tabId, ...(field === 'title' ? { title: previous } : { favicon: previous }) }]
+            : entry.slotId != null
+              ? [{ kind: 'slot-marker', slotId: entry.slotId, ...(field === 'title' ? { customTitle: previous } : { iconValue: previous }) }]
+              : [],
+          affectedTabIds: entry.tabId != null ? [entry.tabId] : [],
+        },
+        expiresAt: Date.now() + 5000,
+      });
+      void load();
+    } catch {
+      setToast({ variant: 'error', message: 'Failed to clear' });
     } finally {
       setBusy(false);
     }
   };
 
-  // ─── Field-level operations (issue 1/2/3) ────────────────────────────────
-
-  /** Clear the Title at the current level (falls through to slot → rule → original). */
-  const resetEntryTitle = async (entry: DashboardEntry) => {
+  /** IMP-6 / DT9: replay the whole batch atomically, then redeliver once. */
+  const handleUndo = async (snapshot: UndoSnapshot) => {
     setBusy(true);
     try {
-      if (entry.kind === 'current-page' && entry.tabId != null) {
-        await sendMessage('SET_TAB_OVERRIDE', { tabId: entry.tabId, title: '' });
-      } else if (entry.kind === 'slot' && entry.slotId != null) {
-        await sendMessage('UPDATE_SLOT_UI_MARKER', {
-          slotId: entry.slotId,
-          uiMarker: { customTitle: '' },
-        });
+      for (const write of snapshot.writes) {
+        if (write.kind === 'tab-override') {
+          await sendMessage('SET_TAB_OVERRIDE', {
+            tabId: write.tabId,
+            ...(write.title !== undefined ? { title: write.title ?? '' } : {}),
+            ...(write.favicon !== undefined ? { favicon: write.favicon ? { type: 'upload', value: write.favicon } : null } : {}),
+          });
+        } else if (write.kind === 'slot-marker') {
+          await sendMessage('UPDATE_SLOT_UI_MARKER', {
+            slotId: write.slotId,
+            uiMarker: {
+              ...(write.customTitle !== undefined ? { customTitle: write.customTitle ?? '' } : {}),
+              ...(write.iconValue !== undefined ? { icon: write.iconValue ? { type: 'upload', value: write.iconValue } : null } : {}),
+            },
+          });
+        }
       }
-      setToast({ variant: 'success', message: `${entry.label} title cleared` });
+      setUndoState(null);
+      setToast({ variant: 'success', message: 'Restored' });
       void load();
     } catch {
-      setToast({ variant: 'error', message: `Failed to clear ${entry.label} title` });
+      setToast({ variant: 'error', message: 'Failed to restore' });
     } finally {
       setBusy(false);
     }
   };
 
   const openEdit = (entry: DashboardEntry) => {
-    const existingIcon = entry.icon ?? '';
-    const isCustom = existingIcon.startsWith('data:');
-    setEditing({
-      entryId: entry.id,
-      title: entry.title ?? '',
-      icon: existingIcon,
-      originalTitle: entry.title,
-      originalIcon: entry.icon,
-      // If the existing icon is a data URI it was a Custom icon; otherwise use URL mode.
-      iconMode: isCustom ? 'custom' : 'url',
-      iconConfig: isCustom
-        ? { dataUri: existingIcon }
-        : { bgColor: '#2563EB', text: '', textColor: '#FFFFFF' },
-      prevIconMode: null,
+    const t = entry.chain.title.winner.value;
+    const i = entry.chain.favicon.winner.value;
+    setExpanded((prev) => new Set(prev).add(entry.id));
+    setDrafts((prev) => {
+      const next = new Map(prev);
+      next.set(entry.id, {
+        titleMode: t !== null ? { kind: 'set', value: t } : { kind: 'use-chain' },
+        iconMode: i !== null ? { kind: 'set', value: i.startsWith('data:') ? '' : i } : { kind: 'use-chain' },
+        iconConfig: i?.startsWith('data:') ? { dataUri: i } : undefined,
+      });
+      return next;
     });
   };
 
-  const applyEditTitle = async () => {
-    if (!editing) return;
-    const entry = entries.find((e) => e.id === editing.entryId);
-    if (!entry) return;
+  /** The per-row Save handler: commits BOTH dimensions of that row's draft. */
+  const applyDraft = async (entry: DashboardEntry) => {
+    const draft = drafts.get(entry.id);
+    if (!draft) return;
     setBusy(true);
     try {
-      const next = editing.title.trim();
-      if (entry.kind === 'current-page' && entry.tabId != null) {
-        // Empty or unchanged title = no change at this level.
+      const titleValue = draft.titleMode.kind === 'set' ? draft.titleMode.value.trim() : null;
+      const iconDataUri = draft.iconConfig?.dataUri
+        ?? (draft.iconConfig ? renderIconToDataUri(draft.iconConfig, 64) : '');
+      const faviconValue = draft.iconMode.kind === 'set'
+        ? (iconDataUri || draft.iconMode.value.trim() || null)
+        : null;
+
+      if (entry.kind === 'override' && entry.tabId != null) {
         await sendMessage('SET_TAB_OVERRIDE', {
           tabId: entry.tabId,
-          title: next === '' || next === (editing.originalTitle ?? '') ? '' : next,
+          title: titleValue ?? '',
+          favicon: faviconValue ? { type: 'upload', value: faviconValue } : null,
         });
       } else if (entry.kind === 'slot' && entry.slotId != null) {
         await sendMessage('UPDATE_SLOT_UI_MARKER', {
           slotId: entry.slotId,
-          uiMarker: { customTitle: next },
+          uiMarker: {
+            customTitle: titleValue ?? '',
+            icon: faviconValue ? { type: 'upload', value: faviconValue } : null,
+          },
         });
       }
-      setToast({ variant: 'success', message: `${entry.label} title updated` });
+      setToast({ variant: 'success', message: `${entry.label} updated` });
+      setDrafts((prev) => { const next = new Map(prev); next.delete(entry.id); return next; });
+      setExpanded((prev) => { const next = new Set(prev); next.delete(entry.id); return next; });
       void load();
     } catch {
-      setToast({ variant: 'error', message: `Failed to update ${entry.label} title` });
+      setToast({ variant: 'error', message: `Failed to update ${entry.label}` });
     } finally {
       setBusy(false);
     }
   };
 
-  const applyEditIcon = async () => {
-    if (!editing) return;
-    const entry = entries.find((e) => e.id === editing.entryId);
-    if (!entry) return;
-    setBusy(true);
-    try {
-      // Compute the favicon value based on the selected mode:
-      // URL → text input; Custom → rendered data URI; Reset → clear icon.
-      let favicon: IconSource | null = null;
-      if (editing.iconMode === 'custom') {
-        const dataUri = renderIconToDataUri(editing.iconConfig, 64);
-        if (dataUri) favicon = { type: 'upload', value: dataUri };
-      } else if (editing.iconMode === 'url' && editing.icon.trim()) {
-        favicon = { type: 'url', value: editing.icon.trim() };
-      }
-      // Reset mode → favicon stays null → field-level clear (falls back through
-      // slot → rule → original; dashboard shows "—").
-
-      if (entry.kind === 'current-page' && entry.tabId != null) {
-        await sendMessage('SET_TAB_OVERRIDE', { tabId: entry.tabId, favicon });
-      } else if (entry.kind === 'slot' && entry.slotId != null) {
-        await sendMessage('UPDATE_SLOT_UI_MARKER', {
-          slotId: entry.slotId,
-          uiMarker: { icon: favicon ?? { type: 'url', value: '' } },
-        });
-      }
-      setToast({ variant: 'success', message: `${entry.label} icon updated` });
-      void load();
-    } catch {
-      setToast({ variant: 'error', message: `Failed to update ${entry.label} icon` });
-    } finally {
-      setBusy(false);
-    }
-  };
+  
 
   return (
     <section aria-label="Data dashboard">
       <h2>Data Dashboard</h2>
       <p className="tbs-settings__hint">
-        All icons and titles you set via the sidebar current page and slot objects. Reset them to restore original values.
+        All icons and titles you set via the sidebar current page and slot objects. Clear them to restore original values.
       </p>
 
+      {/* D-20: destructive resets are confirmed. */}
+      <Confirm
+        open={confirmReset !== null}
+        title="Clear selection?"
+        message="The values this layer owns will be removed. Lower layers will decide again, and the page falls back to the site value."
+        confirmLabel="Clear"
+        variant="danger"
+        onCancel={() => { setConfirmReset(null); }}
+        onConfirm={() => {
+          const which = confirmReset;
+          setConfirmReset(null);
+          if (which?.kind === 'all') void resetAll();
+          else if (which?.kind === 'selected') void resetSelected();
+          else if (which?.kind === 'entry') {
+            const entry = entries.find((e) => e.id === which.id);
+            if (entry) void resetEntry(entry);
+          }
+        }}
+      />
+
+      {/* G1: a summary sentence when rows exist but none can be applied here. */}
+      {summary && (
+        <p className="tbs-settings__summary" role="status">{summary}</p>
+      )}
+
       <div className="tbs-settings__toolbar">
-        <Button size="sm" variant="secondary" onClick={() => void resetSelected()} disabled={selected.size === 0 || busy} aria-label="Reset selected items">
+        <Button size="sm" variant="secondary" onClick={() => { setConfirmReset({ kind: 'selected' }); }} disabled={selected.size === 0 || busy} aria-label="Reset selected items">
           Reset Selected ({selected.size})
         </Button>
-        <Button size="sm" variant="danger" onClick={() => void resetAll()} disabled={entries.length === 0 || busy} aria-label="Reset all items">
+        <Button size="sm" variant="danger" onClick={() => { setConfirmReset({ kind: 'all' }); }} disabled={entries.length === 0 || busy} aria-label="Reset all items">
           Reset All
         </Button>
       </div>
@@ -1478,10 +1556,11 @@ function DashboardSection() {
             <th scope="col" style={{ width: '32px' }}>
               <input
                 type="checkbox"
-                checked={entries.length > 0 && selected.size === entries.length}
+                // N8: the header select-all is derived from the SAME list the rows use.
+                checked={visibleEntries.length > 0 && selected.size === visibleEntries.length}
                 onChange={() => {
-                  if (selected.size === entries.length) setSelected(new Set());
-                  else setSelected(new Set(entries.map((e) => e.id)));
+                  if (selected.size === visibleEntries.length) setSelected(new Set());
+                  else setSelected(new Set(visibleEntries.map((e) => e.id)));
                 }}
                 aria-label="Select all dashboard items"
               />
@@ -1491,7 +1570,7 @@ function DashboardSection() {
                 <button
                   type="button"
                   className="tbs-settings__sortable"
-                  onClick={() => toggleSort('label')}
+                  onClick={() => { toggleSort('label'); }}
                   aria-label="Sort by Source"
                 >
                   Source{sortKey === 'label' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
@@ -1500,7 +1579,7 @@ function DashboardSection() {
                 <button
                   type="button"
                   className={`tbs-inline-field__reset tbs-settings__url-toggle${showUrl ? ' is-active' : ''}`}
-                  onClick={() => setShowUrl((v) => !v)}
+                  onClick={() => { setShowUrl((v) => !v); }}
                   aria-label={showUrl ? 'Hide URLs' : 'Show URLs'}
                   title={showUrl ? 'Hide URLs' : 'Show URLs'}
                 >
@@ -1512,7 +1591,7 @@ function DashboardSection() {
               <button
                 type="button"
                 className="tbs-settings__sortable"
-                onClick={() => toggleSort('title')}
+                onClick={() => { toggleSort('title'); }}
                 aria-label="Sort by Title"
               >
                 Title{sortKey === 'title' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
@@ -1536,148 +1615,166 @@ function DashboardSection() {
           </tr>
         </thead>
         <tbody>
-          {sortedEntries.map((entry) => (
-            <tr key={entry.id}>
-              <td>
-                <input
-                  type="checkbox"
-                  checked={selected.has(entry.id)}
-                  onChange={() => toggleSelect(entry.id)}
-                  aria-label={`Select ${entry.label}`}
-                />
-              </td>
-              <td>
-                {entry.label} ({entry.kind === 'slot' ? 'slot' : 'current page'})
-                {/* URL shown after the source when the hide toggle is inactive (issue 4) */}
-                {!showUrl && entry.url && (
-                  <span className="tbs-settings__dashboard-url" title={entry.url}>{entry.url}</span>
+          {visibleEntries.map((entry) => {
+            const titleWinner = entry.chain.title.winner;
+            const faviconWinner = entry.chain.favicon.winner;
+            const deliveryText = deliveryLabel(entry.delivery);
+            const isOpen = expanded.has(entry.id);
+            const draft = drafts.get(entry.id);
+            return (
+              <Fragment key={entry.id}>
+                <tr
+                  className={entry.delivery === 'protected' ? 'tbs-settings__row--disabled' : ''}
+                  data-dash-row="true"
+                  data-dash-anchor={entry.anchor
+                    ? `${entry.anchor.kind}:${entry.anchor.kind === 'rule' ? entry.anchor.ruleId : entry.anchor.kind === 'slot' ? String(entry.anchor.slotId) : entry.anchor.kind === 'override' ? String(entry.anchor.tabId) : 'site'}`
+                    : undefined}
+                >
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={selected.has(entry.id)}
+                      onChange={() => { toggleSelect(entry.id); }}
+                      aria-label={`Select ${entry.label}`}
+                    />
+                  </td>
+                  <td>
+                    {/* IMP-5: the SOURCE badge is also the jump-to-row entry. */}
+                    <button
+                      type="button"
+                      className="tbs-settings__anchor-badge"
+                      onClick={() => { jumpTo(entry.anchor); }}
+                      aria-label={`Jump to ${entry.label}`}
+                    >
+                      {entry.label}
+                    </button>
+                    {!showUrl && entry.url && (
+                      <span className="tbs-settings__dashboard-url" title={entry.url}>{entry.url}</span>
+                    )}
+                    {deliveryText && (
+                      <span className="tbs-settings__delivery" title={deliveryText}>{deliveryText}</span>
+                    )}
+                  </td>
+                  <td>
+                    {/* IMP-5: the CELL shows only the winning value + its source badge. */}
+                    {titleWinner.value ?? '—'}
+                    {/* CT3-e: a text/icon source marker, never colour alone. */}
+                    <span className="tbs-settings__chain-badge">{titleWinner.source}</span>
+                  </td>
+                  <td>
+                    {faviconWinner.value ? (
+                      <img src={faviconWinner.value} alt="" style={{ width: 16, height: 16, borderRadius: 2, verticalAlign: 'middle' }} />
+                    ) : (
+                      '—'
+                    )}
+                    <span className="tbs-settings__chain-badge">{faviconWinner.source}</span>
+                  </td>
+                  <td>
+                    <div className="tbs-settings__row-actions">
+                      {/* D-9: the label is the readable name, not the internal id. */}
+                      <Button size="sm" variant="secondary" onClick={() => { openEdit(entry); }} disabled={busy} aria-label={`Edit ${entry.label}`}>
+                        Edit
+                      </Button>
+                      <Button size="sm" variant="danger" onClick={() => { setConfirmReset({ kind: 'entry', id: entry.id }); }} disabled={busy} aria-label={`Clear ${entry.label}`}>
+                        Clear
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+                {/* IMP-4: the edit panel is INLINE in the row (no Dialog/drawer). */}
+                {isOpen && draft && (
+                  <tr className="tbs-settings__inline-editor-row">
+                    <td colSpan={5}>
+                      <div className="tbs-settings__rule-form" role="form" aria-label={`Edit ${entry.label}`}>
+                        <h3>Edit {entry.label}</h3>
+                        <FieldEditor
+                          field="title"
+                          idPrefix={`dash-${entry.id}`}
+                          mode={draft.titleMode}
+                          onChange={(mode) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: mode }); return n; }); }}
+                          chain={entry.chain.title}
+                          baseline={{ mode: { kind: 'use-chain' } }}
+                          onResetEdit={() => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: { kind: 'use-chain' } }); return n; }); }}
+                          onClearChain={() => void clearEntryField(entry, 'title')}
+                          clearing={busy}
+                          canClearChain
+                          submitMode={{ kind: 'draft', dirty: draft.titleMode.kind === 'set', onDraftChange: (next) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: next.mode }); return n; }); } }}
+                          onJumpToOwner={jumpTo}
+                          disabled={busy}
+                        />
+                        <FieldEditor
+                          field="icon"
+                          idPrefix={`dash-${entry.id}`}
+                          mode={draft.iconMode}
+                          onChange={(mode) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: mode }); return n; }); }}
+                          iconConfig={draft.iconConfig}
+                          onIconConfigChange={(cfg) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconConfig: cfg }); return n; }); }}
+                          chain={entry.chain.favicon}
+                          baseline={{ mode: { kind: 'use-chain' } }}
+                          onResetEdit={() => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: { kind: 'use-chain' }, iconConfig: undefined }); return n; }); }}
+                          onClearChain={() => void clearEntryField(entry, 'icon')}
+                          clearing={busy}
+                          canClearChain
+                          submitMode={{ kind: 'draft', dirty: draft.iconMode.kind === 'set' || draft.iconConfig !== undefined, onDraftChange: (next) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: next.mode, iconConfig: next.iconConfig }); return n; }); } }}
+                          onJumpToOwner={jumpTo}
+                          disabled={busy}
+                        />
+                        <div className="tbs-settings__rule-form-actions">
+                          <Button size="sm" variant="ghost" onClick={() => { setDrafts((prev) => { const n = new Map(prev); n.delete(entry.id); return n; }); setExpanded((prev) => { const n = new Set(prev); n.delete(entry.id); return n; }); }}>
+                            Cancel
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            onClick={() => void applyDraft(entry)}
+                            // IMP-19/RK-4: the row's Save is enabled ONLY by that row's real dirty state.
+                            disabled={busy || !isDraftDirty(entry, draft)}
+                          >
+                            Save
+                          </Button>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
                 )}
-              </td>
-              <td>{entry.title ?? '—'}</td>
-              <td>
-                {entry.icon ? (
-                  <img src={entry.icon} alt="" style={{ width: 16, height: 16, borderRadius: 2, verticalAlign: 'middle' }} />
-                ) : (
-                  '—'
-                )}
-              </td>
-              <td>
-                <div className="tbs-settings__row-actions">
-                  <Button size="sm" variant="secondary" onClick={() => openEdit(entry)} disabled={busy} aria-label={`Edit ${entry.label}`}>
-                    Edit
-                  </Button>
-                  <Button size="sm" variant="danger" onClick={() => void resetEntry(entry)} disabled={busy} aria-label={`Reset ${entry.label}`}>
-                    Reset
-                  </Button>
-                </div>
-              </td>
-            </tr>
-          ))}
-          {entries.length === 0 && (
+              </Fragment>
+            );
+          })}
+          {visibleEntries.length === 0 && (
             <tr>
-              <td colSpan={5} style={{ textAlign: 'center', color: 'var(--color-text-tertiary)' }}>
-                No custom icons or titles set yet.
+              <td colSpan={5}>
+                {loadError && !hasLoaded ? (
+                  <EmptyState variant="error-first" action={{ label: 'Retry', onClick: () => void load() }} />
+                ) : loadError ? (
+                  <EmptyState variant="error-stale" action={{ label: 'Retry', onClick: () => void load() }} />
+                ) : (
+                  <EmptyState
+                    variant="empty"
+                    message="Nothing customized yet. Set a title or icon from the sidebar to see it here."
+                  />
+                )}
               </td>
             </tr>
           )}
         </tbody>
       </table>
 
-      {/* Dashboard Edit interface (issue 3) — modeled after the Edit Rule form */}
-      {editing && (
-        <div className="tbs-settings__rule-form" role="form" aria-label={`Edit ${editing.entryId}`}>
-          <h3>Edit {editing.entryId}</h3>
-          <div className="tbs-settings__rule-form-grid">
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Title</label>
-              <div className="tbs-inline-field">
-                <input
-                  type="text"
-                  value={editing.title}
-                  onChange={(e) => setEditing({ ...editing, title: e.target.value })}
-                  aria-label="Edit Title"
-                />
-                <button
-                  type="button"
-                  className="tbs-inline-field__reset"
-                  onClick={() => {
-                    const entry = entries.find((e) => e.id === editing.entryId);
-                    if (entry) void resetEntryTitle(entry);
-                  }}
-                  aria-label="Reset Title"
-                  title="Reset Title"
-                >
-                  ↺
-                </button>
-              </div>
-            </div>
-            <div className="tbs-form-field">
-              <label className="tbs-form-field__label">Icon (optional)</label>
-              <div className="tbs-settings__rule-form-radio" role="radiogroup" aria-label="Icon mode">
-                <label>
-                  <input
-                    type="radio"
-                    checked={editing.iconMode === 'url'}
-                    onChange={() => setEditing((prev) => prev ? { ...prev, prevIconMode: prev.iconMode !== 'reset' ? prev.iconMode : prev.prevIconMode, iconMode: 'url' } : prev)}
-                  />
-                  URL
-                </label>
-                <label>
-                  <input
-                    type="radio"
-                    checked={editing.iconMode === 'custom'}
-                    onChange={() => setEditing((prev) => prev ? { ...prev, prevIconMode: prev.iconMode !== 'reset' ? prev.iconMode : prev.prevIconMode, iconMode: 'custom' } : prev)}
-                  />
-                  Custom
-                </label>
-                <label>
-                  <input
-                    type="radio"
-                    checked={editing.iconMode === 'reset'}
-                    onChange={() => setEditing((prev) => prev ? { ...prev, prevIconMode: prev.iconMode !== 'reset' ? prev.iconMode : prev.prevIconMode, iconMode: 'reset' } : prev)}
-                  />
-                  Reset
-                </label>
-              </div>
-              {editing.iconMode === 'url' && (
-                <div className="tbs-inline-field">
-                  <input
-                    type="text"
-                    value={editing.icon}
-                    onChange={(e) => setEditing({ ...editing, icon: e.target.value })}
-                    aria-label="Edit Icon"
-                  />
-                </div>
-              )}
-              {editing.iconMode === 'custom' && (
-                <IconEditor
-                  value={editing.iconConfig}
-                  onChange={(cfg) => setEditing({ ...editing, iconConfig: cfg })}
-                  size={48}
-                />
-              )}
-              {editing.iconMode === 'reset' && (
-                <p className="tbs-settings__hint">Icon will be cleared and shown as "—".</p>
-              )}
-            </div>
-          </div>
-          <div className="tbs-settings__rule-form-actions">
-            <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
-            <Button size="sm" variant="secondary" onClick={() => void applyEditTitle()} disabled={busy} aria-label="Apply title changes">
-              Apply Title
-            </Button>
-            <Button size="sm" variant="secondary" onClick={() => void applyEditIcon()} disabled={busy} aria-label="Apply icon changes">
-              Apply Icon
-            </Button>
-            <Button size="sm" variant="primary" onClick={() => setEditing(null)} disabled={busy} aria-label="Done editing">
-              Done
-            </Button>
-          </div>
-        </div>
+      {/* F2-c: the non-visual jump announcement (role=status, focus untouched). */}
+      {announcement && (
+        <div className="tbs-sr-only" role="status">{announcement.message}</div>
+      )}
+
+      {/* IMP-6/DT9: the generalized undo bar for an immediate Clear. */}
+      {undoState && (
+        <UndoBar
+          state={undoState}
+          onUndo={(snapshot) => void handleUndo(snapshot)}
+          onExpire={() => setUndoState(null)}
+        />
       )}
 
       {toast && (
-        <Toast variant={toast.variant} message={toast.message} onDismiss={() => setToast(null)} />
+        <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />
       )}
     </section>
   );
@@ -1795,18 +1892,18 @@ function ImportExportSection() {
             <div className="tbs-settings__import-mode">
               <p>Conflict resolution:</p>
               <label>
-                <input type="radio" name="import-mode" checked={importMode === 'merge'} onChange={() => setImportMode('merge')} />
+                <input type="radio" name="import-mode" checked={importMode === 'merge'} onChange={() => { setImportMode('merge'); }} />
                 Keep existing (merge)
               </label>
               <label>
-                <input type="radio" name="import-mode" checked={importMode === 'replace'} onChange={() => setImportMode('replace')} />
+                <input type="radio" name="import-mode" checked={importMode === 'replace'} onChange={() => { setImportMode('replace'); }} />
                 Replace with imported
               </label>
             </div>
           )}
 
           <div className="tbs-settings__import-actions">
-            <Button size="sm" variant="ghost" onClick={() => setPreview(null)}>Cancel</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setPreview(null); }}>Cancel</Button>
             <Button size="sm" variant="primary" onClick={() => void handleCommitImport()} loading={importing}>
               Confirm Import
             </Button>
@@ -1823,7 +1920,7 @@ function ImportExportSection() {
       </Button>
 
       {toast && (
-        <Toast variant={toast.variant} message={toast.message} onDismiss={() => setToast(null)} />
+        <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />
       )}
     </section>
   );
@@ -2112,7 +2209,7 @@ export function SettingsApp() {
           <button
             key={item.id}
             className={`tbs-settings__nav-item ${activeSection === item.id ? 'tbs-settings__nav-item--active' : ''}`}
-            onClick={() => setActiveSection(item.id)}
+            onClick={() => { setActiveSection(item.id); }}
             aria-current={activeSection === item.id ? 'page' : undefined}
           >
             {item.label}
@@ -2125,7 +2222,7 @@ export function SettingsApp() {
         {conflictBanner && (
           <div role="alert" className="tbs-settings__conflict-banner">
             Configuration was changed externally. State has been refreshed.
-            <Button size="sm" variant="ghost" onClick={() => setConflictBanner(false)}>Dismiss</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setConflictBanner(false); }}>Dismiss</Button>
           </div>
         )}
 
@@ -2171,7 +2268,7 @@ export function SettingsApp() {
       </main>
 
       {toast && (
-        <Toast variant={toast.variant} message={toast.message} onDismiss={() => setToast(null)} />
+        <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />
       )}
     </div>
   );

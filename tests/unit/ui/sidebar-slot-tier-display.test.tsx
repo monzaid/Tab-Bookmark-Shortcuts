@@ -23,7 +23,6 @@ const BOUND_SLOT = {
 const RULE = {
   id: 'r1',
   urlMatch: { type: 'exact' as const, value: 'https://example.com/page' },
-  mode: 'auto' as const,
   priority: 100,
   title: 'Rule Wins If No Slot',
   createdAt: '2026-01-01T00:00:00Z',

@@ -28,6 +28,8 @@ export interface MockAdapterState {
   nextError?: { code: string; message: string };
   /** If set, scripting.executeScript always throws this error (for fallback tests) */
   executeScriptError?: { code: string; message: string };
+  /** If set, tabs.sendMessage always throws this error (content-script unreachable) */
+  sendMessageError?: { code: string; message: string };
 }
 
 export interface MockAdapter extends BrowserAdapter {
@@ -117,6 +119,7 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
       state.browserType = 'chrome';
       state.nextError = undefined;
       state.executeScriptError = undefined;
+      state.sendMessageError = undefined;
       calls.length = 0;
       // Clear all event listeners to prevent cross-test contamination
       storageListeners.length = 0;
@@ -142,23 +145,23 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
     },
 
     emitStorageChange(changes: Record<string, StorageChange>, area: string) {
-      storageListeners.forEach((l) => l(changes, area));
+      storageListeners.forEach((l) => { l(changes, area); });
     },
 
     emitTabRemoved(tabId: number, windowId: number) {
-      tabRemovedListeners.forEach((l) => l(tabId, { windowId, isWindowClosing: false }));
+      tabRemovedListeners.forEach((l) => { l(tabId, { windowId, isWindowClosing: false }); });
     },
 
     emitCommand(command: string) {
-      commandListeners.forEach((l) => l(command));
+      commandListeners.forEach((l) => { l(command); });
     },
 
     emitTabActivated(tabId: number, windowId: number) {
-      tabActivatedListeners.forEach((l) => l({ tabId, windowId }));
+      tabActivatedListeners.forEach((l) => { l({ tabId, windowId }); });
     },
 
     emitTabUpdated(tabId: number, changeInfo: { url?: string; status?: string }, tab: NormalizedTab) {
-      tabUpdatedListeners.forEach((l) => l(tabId, changeInfo, tab));
+      tabUpdatedListeners.forEach((l) => { l(tabId, changeInfo, tab); });
     },
 
     emitRuntimeMessage(message, sender, sendResponse) {
@@ -247,6 +250,9 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
       },
       async sendMessage(tabId: number, message: unknown): Promise<unknown> {
         logCall('tabs.sendMessage', tabId, message);
+        if (state.sendMessageError) {
+          throw new AdapterError(state.sendMessageError.code as AdapterError['code'], state.sendMessageError.message);
+        }
         checkError();
         return undefined;
       },
@@ -351,7 +357,7 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
           changes[key] = { oldValue: store[key], newValue: value };
           store[key] = value;
         }
-        storageListeners.forEach((l) => l(changes, area));
+        storageListeners.forEach((l) => { l(changes, area); });
       },
       async remove(area: StorageArea, keys: string | string[]): Promise<void> {
         logCall('storage.remove', area, keys);

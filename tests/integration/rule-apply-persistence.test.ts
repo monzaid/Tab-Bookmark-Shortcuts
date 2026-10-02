@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { WorkerOrchestrator } from '@background/worker-orchestrator';
 import type { NormalizedTab, NormalizedWindow } from '@adapters/contract';
+import type { FieldDirective } from '@shared/messages';
 
 /**
  * T25: Rule application to ALL matching tabs + refresh persistence + slot priority chain.
@@ -24,16 +25,24 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
   const tabC: NormalizedTab = { id: 12, windowId: 1, index: 2, url: 'https://example.com/page', title: 'Original C', favIconUrl: '', active: false, incognito: false, status: 'complete' };
   const tabDiff: NormalizedTab = { id: 13, windowId: 1, index: 3, url: 'https://other.com/x', title: 'Other', favIconUrl: '', active: false, incognito: false, status: 'complete' };
 
-  /** Collect { title, favicon } payloads delivered via scripting.executeScript. */
-  interface ApplyPayloadInCall { title?: string; favicon?: string; force?: boolean; }
+  /**
+ * Collect the resolved `set` values delivered to a tab.
+ *
+ * C2/T8: delivery is a `FIELD_APPLY` message on the content-script channel, so
+ * the helper reads that channel and flattens each directive to its `set` value
+ * (the assertions below are about WHICH value wins the chain, not about the
+ * transport).
+ */
+  interface ApplyPayloadInCall { title?: string; favicon?: string; }
   function sendCallsFor(tabId: number): ApplyPayloadInCall[] {
     return adapter.calls
-      .filter((c) => c.method === 'scripting.executeScript'
-        && (c.args[0] as { target: { tabId: number } }).target.tabId === tabId)
-      .map((c) => {
-        const args = (c.args[0] as { args: unknown[] }).args;
-        return (args[0] as ApplyPayloadInCall) ?? {};
-      });
+      .filter((c) => c.method === 'tabs.sendMessage' && c.args[0] === tabId)
+      .map((c) => c.args[1] as { type?: string; title?: FieldDirective; favicon?: FieldDirective })
+      .filter((m) => m?.type === 'FIELD_APPLY')
+      .map((m) => ({
+        title: m.title?.kind === 'set' ? m.title.value : undefined,
+        favicon: m.favicon?.kind === 'set' ? m.favicon.value : undefined,
+      }));
   }
 
   beforeEach(async () => {
@@ -44,12 +53,11 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
   });
 
   describe('Rule applies to ALL matching tabs', () => {
-    it('should send APPLY_REWRITE to every matching tab when an auto rule matches N tabs', async () => {
+    it('should deliver to every matching tab when a rule matches N tabs', async () => {
       adapter.setTabs([tabA, tabB, tabC, tabDiff]);
 
       const result = await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Rewritten Title',
       }, 0);
@@ -73,7 +81,6 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
 
       const create = await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Before',
       }, 0);
@@ -90,12 +97,11 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
   });
 
   describe('Refresh persistence via tabs.onUpdated', () => {
-    it('should re-send APPLY_REWRITE on status==="complete"', async () => {
+    it('should re-deliver on status==="complete"', async () => {
       adapter.setTabs([tabA]);
 
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Persisted Title',
       }, 0);
@@ -116,7 +122,6 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
 
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         favicon: { type: 'url', value: 'https://example.com/favicon.ico' },
       }, 0);
@@ -135,7 +140,6 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
 
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'URL Change Title',
       }, 0);
@@ -171,7 +175,6 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
       await seedSlotBinding(10);
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 100,
         title: 'Rule Low Priority',
       }, 0);
@@ -196,7 +199,6 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
       await seedSlotBinding(10, 1, 'Bound Tab Slot Title', 'https://slot.com/icon.png');
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Shared Rule Title',
       }, 0);
@@ -220,7 +222,6 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
       await seedSlotBinding(10, 1, 'Slot Title', 'https://slot.com/icon.png');
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         favicon: { type: 'url', value: 'https://rule.com/icon.png' },
       }, 0);
@@ -305,7 +306,6 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
 
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Rule Fallback Title',
       }, 0);

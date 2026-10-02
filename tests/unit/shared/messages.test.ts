@@ -41,7 +41,6 @@ function handleUiAction(request: UiRequest): string {
     case 'CREATE_RULE': return 'create-rule';
     case 'UPDATE_RULE': return 'update-rule';
     case 'DELETE_RULE': return 'delete-rule';
-    case 'APPLY_RULE_TO_TAB': return 'apply-rule';
     case 'SET_TAB_OVERRIDE': return 'set-override';
     case 'REMOVE_TAB_OVERRIDE': return 'remove-override';
     case 'SET_GLOBAL_STRATEGY': return 'set-strategy';
@@ -65,7 +64,6 @@ function handleUiAction(request: UiRequest): string {
     case 'GET_STATE': return 'get-state';
     case 'GET_DASHBOARD': return 'get-dashboard';
     case 'GET_COMMANDS': return 'get-commands';
-    case 'GET_CANDIDATES': return 'get-candidates';
     case 'DOWNLOAD_ICON': return 'download-icon';
     case 'UPLOAD_ICON': return 'upload-icon';
     case 'OPEN_PAGE': return 'open-page';
@@ -83,6 +81,7 @@ function handleContentAction(request: ContentRequest): string {
   switch (request.action) {
     case 'CONTENT_NAVIGATION': return 'navigation';
     case 'CONTENT_READY': return 'ready';
+    case 'SITE_SNAPSHOT_REPORT': return 'snapshot';
     default: return assertNever(request);
   }
 }
@@ -172,14 +171,13 @@ describe('T2: Domain model and message contract', () => {
       const rule: PageRule = {
         id: 'rule-1',
         urlMatch: { type: 'exact', value: 'https://example.com' },
-        mode: 'auto',
         priority: 100,
         title: 'Custom Title',
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',
       };
       expect(rule.priority).toBe(100);
-      expect(rule.mode).toBe('auto');
+      expect(rule.title).toBe('Custom Title');
     });
 
     it('should construct valid RecoverySession with TTL', () => {
@@ -268,15 +266,15 @@ describe('T2: Domain model and message contract', () => {
       const rawMessage = { requestId: 'req-x', action: 'UNKNOWN_ACTION_XYZ' };
       const knownActions: string[] = [
         'SAVE_SLOT', 'SWITCH_SLOT', 'NEXT_MATCH', 'UNBIND_SLOT', 'UNDO_SAVE',
-        'CREATE_RULE', 'UPDATE_RULE', 'DELETE_RULE', 'APPLY_RULE_TO_TAB',
+        'CREATE_RULE', 'UPDATE_RULE', 'DELETE_RULE',
         'SET_TAB_OVERRIDE', 'REMOVE_TAB_OVERRIDE', 'SET_GLOBAL_STRATEGY',
         'SET_SLOT_STRATEGY', 'UPDATE_SLOT_UI_MARKER',
         'RECOVERY_OPEN_URL', 'RECOVERY_NEXT_MATCH', 'RECOVERY_DISMISS',
         'EXPORT_CONFIG', 'IMPORT_PREVIEW', 'IMPORT_COMMIT',
         'GET_DIAGNOSTICS', 'CLEAR_DIAGNOSTICS', 'EXPORT_DIAGNOSTICS',
-        'GET_STATE', 'GET_DASHBOARD', 'GET_COMMANDS', 'GET_CANDIDATES',
+        'GET_STATE', 'GET_DASHBOARD', 'GET_COMMANDS',
         'DOWNLOAD_ICON', 'UPLOAD_ICON',
-        'CONTENT_NAVIGATION', 'CONTENT_READY',
+        'CONTENT_NAVIGATION', 'CONTENT_READY', 'SITE_SNAPSHOT_REPORT',
       ];
 
       const parseResult = knownActions.includes(rawMessage.action)

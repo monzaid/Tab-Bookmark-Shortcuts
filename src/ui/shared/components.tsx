@@ -17,17 +17,18 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
   loading?: boolean;
 }
 
-export function Button({
-  variant = 'secondary',
-  size = 'md',
-  loading = false,
-  children,
-  disabled,
-  className,
-  ...props
-}: ButtonProps) {
+/**
+ * `forwardRef` so callers that must move focus to a button (the generalized
+ * `UndoBar`, which takes focus on open and returns it on dismissal) can hold a
+ * ref to the real DOM node.
+ */
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant = 'secondary', size = 'md', loading = false, children, disabled, className, ...props },
+  ref,
+) {
   return (
     <button
+      ref={ref}
       className={`tbs-btn tbs-btn--${variant} tbs-btn--${size} ${className ?? ''}`}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
@@ -37,7 +38,7 @@ export function Button({
       {children}
     </button>
   );
-}
+});
 
 // ─── Icon Button ─────────────────────────────────────────────────────────────
 
@@ -214,7 +215,7 @@ export function Dialog({
         aria-modal="true"
         aria-label={title}
         className="tbs-dialog"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); }}
         onKeyDown={handleKeyDown}
       >
         <div className="tbs-dialog__header">
@@ -248,7 +249,7 @@ export function Toast({ variant, message, action, onDismiss, duration = 5000 }: 
   useEffect(() => {
     if (duration > 0 && onDismiss) {
       const timer = setTimeout(onDismiss, duration);
-      return () => clearTimeout(timer);
+      return () => { clearTimeout(timer); };
     }
   }, [duration, onDismiss]);
 
@@ -315,6 +316,24 @@ export function Confirm({
   returnFocusRef,
   focusFallbackRef,
 }: ConfirmProps) {
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const openedAt = useRef(0);
+
+  useEffect(() => {
+    if (open) {
+      // CT3-b4: a short protection window so the keypress that OPENED the dialog
+      // cannot immediately activate the confirm button.
+      openedAt.current = Date.now();
+      confirmRef.current?.focus();
+    }
+  }, [open]);
+
+  const guard = useCallback((run: () => void) => {
+    // CT3-b4: ignore activation inside the ~120ms protection window.
+    if (Date.now() - openedAt.current < 120) return;
+    run();
+  }, []);
+
   return (
     <Dialog
       open={open}
@@ -323,11 +342,18 @@ export function Confirm({
       returnFocusRef={returnFocusRef}
       focusFallbackRef={focusFallbackRef}
       footer={
+        // CT3-b: DOM order is confirmation → cancellation, so the dialog's
+        // default "focus the first focusable element" lands on the confirm
+        // button rather than on Cancel.
         <>
-          <Button variant="ghost" onClick={onCancel}>{cancelLabel}</Button>
-          <Button variant={variant === 'danger' ? 'danger' : 'primary'} onClick={onConfirm}>
+          <Button
+            ref={confirmRef}
+            variant={variant === 'danger' ? 'danger' : 'primary'}
+            onClick={() => { guard(onConfirm); }}
+          >
             {confirmLabel}
           </Button>
+          <Button variant="ghost" onClick={onCancel}>{cancelLabel}</Button>
         </>
       }
     >
@@ -338,6 +364,14 @@ export function Confirm({
 
 // ─── Form Field ──────────────────────────────────────────────────────────────
 
+/**
+ * IMP-12 / CT3-d: `FormField` is the PUBLIC API for the described-by wiring.
+ *
+ * `errorId` / `hintId` are exported so a caller can point its own input at the
+ * error node (with `role="alert"`) and the hint node, rather than each call site
+ * inventing the ids. (The un-bound list is registered as a follow-up rather than
+ * fixed in this iteration.)
+ */
 export interface FormFieldProps {
   label: string;
   htmlFor: string;
@@ -347,9 +381,13 @@ export interface FormFieldProps {
   children: React.ReactNode;
 }
 
+/** The ids `FormField` renders for a given input id (IMP-12 public API). */
+export function formFieldIds(htmlFor: string): { errorId: string; hintId: string } {
+  return { errorId: `${htmlFor}-error`, hintId: `${htmlFor}-hint` };
+}
+
 export function FormField({ label, htmlFor, error, hint, required, children }: FormFieldProps) {
-  const errorId = `${htmlFor}-error`;
-  const hintId = `${htmlFor}-hint`;
+  const { errorId, hintId } = formFieldIds(htmlFor);
 
   return (
     <div className="tbs-form-field">

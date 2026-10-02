@@ -63,4 +63,21 @@ describe('GAP-D: newly added actions pass the KNOWN_ACTIONS gate', () => {
     expect(claimed).toBe(false);
     expect(response).toEqual(expect.objectContaining({ success: false, errorCode: 'UNKNOWN_ACTION' }));
   });
+
+  it('SITE_SNAPSHOT_REPORT is registered (A7 content → worker report)', () => {
+    expect(gate('SITE_SNAPSHOT_REPORT', { tabId: 1, title: 'X', faviconHref: null }).claimed).toBe(true);
+  });
+
+  // ── T4: REMOVED actions must be gated out (Q11 / A9) ──────────────────────
+  it('APPLY_RULE_TO_TAB is no longer recognized (Q11 manual path deleted)', () => {
+    const { claimed, response } = gate('APPLY_RULE_TO_TAB', { ruleId: 'r1', tabId: 1 });
+    expect(claimed).toBe(false);
+    expect(response).toEqual(expect.objectContaining({ success: false, errorCode: 'UNKNOWN_ACTION' }));
+  });
+
+  it('GET_CANDIDATES is no longer recognized (Q11 candidates path deleted)', () => {
+    const { claimed, response } = gate('GET_CANDIDATES', { ruleId: 'r1' });
+    expect(claimed).toBe(false);
+    expect(response).toEqual(expect.objectContaining({ success: false, errorCode: 'UNKNOWN_ACTION' }));
+  });
 });

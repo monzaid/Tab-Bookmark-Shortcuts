@@ -86,7 +86,6 @@ describe('T21: Service Worker lifecycle, message routing, command dispatch, clea
       // Create an auto rule first
       await worker.ruleService.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 5,
         title: 'Custom Title',
       }, 0);
@@ -99,9 +98,13 @@ describe('T21: Service Worker lifecycle, message routing, command dispatch, clea
 
       expect(result).toEqual(expect.objectContaining({ success: true }));
 
-      // Verify rewrite was delivered via scripting.executeScript
-      const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-      expect(execCalls.length).toBeGreaterThan(0);
+      // C2/T8: delivery goes out as FIELD_APPLY on the content-script channel.
+      const applyMsgs = adapter.calls
+        .filter((c) => c.method === 'tabs.sendMessage' && c.args[0] === 10)
+        .map((c) => c.args[1] as { type?: string; title?: { kind: string; value?: string } })
+        .filter((m) => m?.type === 'FIELD_APPLY');
+      expect(applyMsgs.length).toBeGreaterThan(0);
+      expect(applyMsgs.some((m) => m.title?.kind === 'set' && m.title.value === 'Custom Title')).toBe(true);
     });
   });
 
@@ -431,7 +434,7 @@ describe('T21: Service Worker lifecycle, message routing, command dispatch, clea
       result = (await sendRoute({
         requestId: 'b10-create',
         action: 'CREATE_RULE',
-        payload: { urlMatch: { type: 'exact', value: 'https://x.example' }, mode: 'auto', priority: 0 },
+        payload: { urlMatch: { type: 'exact', value: 'https://x.example' }, priority: 0 },
       })) as { success: boolean; errorCode?: string };
     } finally {
       worker.ruleService.createRule = originalCreate;

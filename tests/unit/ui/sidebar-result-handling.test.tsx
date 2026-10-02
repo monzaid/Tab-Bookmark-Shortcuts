@@ -9,6 +9,15 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SidebarApp } from '@ui/sidebar/App';
 
+/**
+ * T19 anchor migration: the Confirm primitive now enforces a ~120ms protection
+ * window (CT3-b4) so the keypress/click that OPENED the dialog cannot activate
+ * it. Tests that fire the confirmation programmatically must wait it out.
+ */
+async function flushConfirmGuard(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 150));
+}
+
 const mockSendMessage = vi.fn();
 
 const BASE_STATE = {
@@ -89,7 +98,8 @@ async function clickReset(): Promise<void> {
   await waitFor(() => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
-  fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+  await flushConfirmGuard();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 }
 
 describe('T26 (N3) — sidebar consumes the response `success` flag', () => {
@@ -132,11 +142,12 @@ describe('T26 (N3) — sidebar consumes the response `success` flag', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save current tab to slot 1' }));
 
-    // An occupied slot produces the 5s undo bar.
+    // An occupied slot produces the 5s undo bar (shared generalized UndoBar,
+    // whose label is simply "Undo"; the slot id is in the status message).
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Undo overwrite of slot 1' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Undo overwrite of slot 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
 
     await waitFor(() => {
       const texts = screen.getAllByRole('alert').map((a) => a.textContent ?? '');

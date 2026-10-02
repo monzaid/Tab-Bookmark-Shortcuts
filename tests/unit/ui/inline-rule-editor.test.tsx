@@ -13,7 +13,6 @@ const RULES = [
   {
     id: 'r1',
     urlMatch: { type: 'exact', value: 'https://example.com/a' },
-    mode: 'auto',
     priority: 0,
     title: 'Rule A',
     enabled: true,
@@ -23,7 +22,6 @@ const RULES = [
   {
     id: 'r2',
     urlMatch: { type: 'regex', value: 'https://example\\.com/b.*' },
-    mode: 'manual',
     priority: 5,
     title: 'Rule B',
     enabled: true,
@@ -126,12 +124,13 @@ describe('Module 2 (UI): Inline rule editing in settings', () => {
     const form2 = screen.getByRole('form', { name: 'Edit rule r2' });
 
     // Independent initial values
-    expect(within(form1).getByLabelText('Match URL')).toHaveValue('https://example.com/a');
-    expect(within(form2).getByLabelText('Match URL')).toHaveValue('https://example\\.com/b.*');
+    expect(within(form1).getByRole('textbox', { name: /Match URL/ })).toHaveValue('https://example.com/a');
+    expect(within(form2).getByRole('textbox', { name: /Match URL/ })).toHaveValue('https://example\\.com/b.*');
 
-    // Editing one does not affect the other
-    fireEvent.change(within(form1).getByLabelText('Custom Title'), { target: { value: 'Changed A' } });
-    expect(within(form2).getByLabelText('Custom Title')).toHaveValue('Rule B');
+    // Editing one does not affect the other (the shared FieldEditor's set-input
+    // is labelled "Custom title text", distinct from the "Custom Title" radio).
+    fireEvent.change(within(form1).getByLabelText('Custom title text'), { target: { value: 'Changed A' } });
+    expect(within(form2).getByLabelText('Custom title text')).toHaveValue('Rule B');
   });
 
   it('should send UPDATE_RULE with expectedUpdatedAt on save', async () => {
@@ -140,7 +139,7 @@ describe('Module 2 (UI): Inline rule editing in settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit rule r1' }));
     const form = await screen.findByRole('form', { name: 'Edit rule r1' });
 
-    fireEvent.change(within(form).getByLabelText('Custom Title'), { target: { value: 'New Title' } });
+    fireEvent.change(within(form).getByLabelText('Custom title text'), { target: { value: 'New Title' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Update Rule' }));
 
     await waitFor(() => {

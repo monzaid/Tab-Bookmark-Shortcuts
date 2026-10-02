@@ -15,7 +15,7 @@
  * - DualCards: tab override + page rule quick edit
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { SlotDefinition, SlotBinding, SyncState, LocalState } from '@shared/types';
 import { Button, IconButton, Toast, Tooltip, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { getMessageClient } from '@ui/shared/message-client';
@@ -177,7 +177,7 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
       }
     };
     document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    return () => { document.removeEventListener('mousedown', handler); };
   }, [menuOpen]);
 
   /**
@@ -282,13 +282,13 @@ const startTitleEdit = () => {
       {/* Content */}
       <div className="tbs-slot-row__content">
         {editingTitle ? (
-          <div className="tbs-inline-field" onClick={(e) => e.stopPropagation()}>
+          <div className="tbs-inline-field" onClick={(e) => { e.stopPropagation(); }}>
             <input
               ref={titleInputRef}
               className="tbs-slot-row__title-input"
               type="text"
               value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
+              onChange={(e) => { setTitleDraft(e.target.value); }}
               onBlur={handleTitleSave}
               onKeyDown={handleTitleKeyDown}
               aria-label={`Rename slot ${slotNumber}`}
@@ -324,23 +324,23 @@ const startTitleEdit = () => {
           </span>
         )}
         {isBound && editingUrl && (
-          <div className="tbs-slot-row__url-edit" onClick={(e) => e.stopPropagation()}>
+          <div className="tbs-slot-row__url-edit" onClick={(e) => { e.stopPropagation(); }}>
             <input
               ref={urlInputRef}
               className="tbs-slot-row__url-input"
               type="text"
               value={urlDraft}
-              onChange={(e) => setUrlDraft(e.target.value)}
+              onChange={(e) => { setUrlDraft(e.target.value); }}
               onKeyDown={handleUrlKeyDown}
               aria-label={`Edit URL for slot ${slotNumber}`}
             />
             <div className="tbs-slot-row__url-match-type" role="radiogroup" aria-label="Match type">
               <label>
-                <input type="radio" name={`url-match-${slotNumber}`} checked={urlMatchType === 'exact'} onChange={() => setUrlMatchType('exact')} />
+                <input type="radio" name={`url-match-${slotNumber}`} checked={urlMatchType === 'exact'} onChange={() => { setUrlMatchType('exact'); }} />
                 Exact
               </label>
               <label>
-                <input type="radio" name={`url-match-${slotNumber}`} checked={urlMatchType === 'regex'} onChange={() => setUrlMatchType('regex')} />
+                <input type="radio" name={`url-match-${slotNumber}`} checked={urlMatchType === 'regex'} onChange={() => { setUrlMatchType('regex'); }} />
                 Regex
               </label>
             </div>
@@ -459,36 +459,37 @@ const startTitleEdit = () => {
   );
 }
 
-// ─── Undo Bar Component ──────────────────────────────────────────────────────
+// ─── Undo Bar (IMP-6: the SHARED generalized implementation) ────────────────
+//
+// The former local component carried the `role="alert" aria-live="polite"`
+// contradiction (CT3-g4) and could not be reused by the settings page. The
+// sidebar now renders the shared `UndoBar`, which owns `role="status"`, takes
+// focus on open, and returns it on dismissal.
 
-interface UndoBarProps {
+interface SidebarUndoAdapters {
   undo: UndoState;
   onUndo: () => void;
   onExpire: () => void;
 }
 
-function UndoBar({ undo, onUndo, onExpire }: UndoBarProps) {
-  const [remaining, setRemaining] = useState(5);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const left = Math.max(0, Math.ceil((undo.expiresAt - Date.now()) / 1000));
-      setRemaining(left);
-      if (left <= 0) {
-        clearInterval(interval);
-        onExpire();
-      }
-    }, 200);
-    return () => clearInterval(interval);
-  }, [undo.expiresAt, onExpire]);
+function SidebarUndoBar({ undo, onUndo, onExpire }: SidebarUndoAdapters) {
+  const sharedState = useMemo<SharedUndoState>(
+    () => ({
+      message: `Slot ${undo.slotId} overwritten`,
+      // The sidebar's slot-overwrite undo is a batch of exactly one write; the
+      // shared snapshot model keeps the atomic-replay contract identical.
+      snapshot: { writes: [{ kind: 'slot-marker', slotId: undo.slotId }], affectedTabIds: [] },
+      expiresAt: undo.expiresAt,
+    }),
+    [undo.slotId, undo.expiresAt],
+  );
 
   return (
-    <div className="tbs-undo-bar" role="alert" aria-live="polite">
-      <span>Slot {undo.slotId} overwritten</span>
-      <Button size="sm" variant="ghost" onClick={onUndo} aria-label={`Undo overwrite of slot ${undo.slotId}`}>
-        Undo ({remaining}s)
-      </Button>
-    </div>
+    <SharedUndoBar
+      state={sharedState}
+      onUndo={() => { onUndo(); }}
+      onExpire={onExpire}
+    />
   );
 }
 
@@ -496,7 +497,15 @@ function UndoBar({ undo, onUndo, onExpire }: UndoBarProps) {
 
 import { IconEditor, renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
-import { wildcardToRegex, matchesUrl } from '@shared/url-utils';
+import { wildcardToRegex } from '@shared/url-utils';
+import { RuleFormFields } from '@ui/shared/rule-form-fields';
+import type { FieldMode } from '@ui/shared/field-editor';
+import { resolveFieldChain } from '@shared/field-chain';
+import type { ChainResult } from '@shared/field-chain';
+import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
+import { normalizedRegexPattern, validateRuleForm } from '@shared/form-validation';
+import { UndoBar as SharedUndoBar } from '@ui/shared/undo-bar';
+import type { UndoState as SharedUndoState } from '@ui/shared/undo-bar';
 
 interface IconEditorModalProps {
   open: boolean;
@@ -557,6 +566,16 @@ function IconEditorModal({ open, onApply, onCancel, onReset, initialIcon, return
   );
 }
 
+/** A chain for a surface with no live page context (see settings/App.tsx). */
+function emptyChain(): ChainResult {
+  return resolveFieldChain('title', {
+    sync: { configVersion: 0, matchSettings: DEFAULT_MATCH_SETTINGS, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
+    local: { bindings: [], cycleCursors: [], lastSuccessSlotId: null, recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [] },
+    tabId: -1,
+    tabUrl: '',
+  });
+}
+
 // ─── Create Rule Modal (Problem 3: icon editor + priority) ──────────────────
 
 interface CreateRuleModalProps {
@@ -565,24 +584,25 @@ interface CreateRuleModalProps {
   defaultTitle?: string;
   defaultIcon?: string;
   defaultMatchType?: 'exact' | 'regex';
-  onSave: (data: { url: string; matchType: 'exact' | 'regex'; title?: string; icon?: string; mode: 'auto' | 'manual'; priority: number }) => Promise<{ success: boolean; message?: string }>;
+  onSave: (data: { url: string; matchType: 'exact' | 'regex'; title?: string; icon?: string; priority: number }) => Promise<{ success: boolean; message?: string }>;
   onCancel: () => void;
 }
 
 function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = '', defaultMatchType, onSave, onCancel }: CreateRuleModalProps) {
+  // DT4: the four prefills are snapshotted ONCE on open, from the chain-derived
+  // values the caller supplies (no per-keystroke re-seed, no implicit fallback).
   const [url, setUrl] = useState(defaultUrl);
   const [matchType, setMatchType] = useState<'exact' | 'regex'>(defaultMatchType ?? 'exact');
-  const [title, setTitle] = useState(defaultTitle);
-  const [mode, setMode] = useState<'auto' | 'manual'>('auto');
-  const [priority, setPriority] = useState(0);
-  const [iconConfig, setIconConfig] = useState<IconConfig>(
-    defaultIcon ? { dataUri: defaultIcon } : { bgColor: '#2563EB', text: '', textColor: '#FFFFFF' }
+  const [titleMode, setTitleMode] = useState<FieldMode>(
+    defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' },
   );
-  // Problem 4: Icon URL / Custom / Reset mutual exclusion
-  const [iconMode, setIconMode] = useState<'url' | 'custom' | 'reset'>(defaultIcon ? 'custom' : 'url');
-  // Cache the previous non-reset mode so switching back restores prior input.
-  const [prevIconMode, setPrevIconMode] = useState<'url' | 'custom' | null>(null);
-  const [iconUrl, setIconUrl] = useState(defaultIcon && !defaultIcon.startsWith('data:') ? defaultIcon : '');
+  const [iconMode, setIconMode] = useState<FieldMode>(
+    defaultIcon ? { kind: 'set', value: defaultIcon.startsWith('data:') ? '' : defaultIcon } : { kind: 'use-chain' },
+  );
+  const [iconConfig, setIconConfig] = useState<IconConfig | undefined>(
+    defaultIcon.startsWith('data:') ? { dataUri: defaultIcon } : undefined,
+  );
+  const [priority, setPriority] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -592,46 +612,49 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
     if (!open) return;
     setUrl(defaultUrl);
     setMatchType(defaultMatchType ?? 'exact');
-    setTitle(defaultTitle);
-    setMode('auto');
+    setTitleMode(defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' });
+    setIconMode(defaultIcon ? { kind: 'set', value: defaultIcon.startsWith('data:') ? '' : defaultIcon } : { kind: 'use-chain' });
+    setIconConfig(defaultIcon.startsWith('data:') ? { dataUri: defaultIcon } : undefined);
     setPriority(0);
-    setIconConfig(defaultIcon ? { dataUri: defaultIcon } : { bgColor: '#2563EB', text: '', textColor: '#FFFFFF' });
-    setIconMode(defaultIcon ? 'custom' : 'url');
-    setPrevIconMode(null);
-    setIconUrl(defaultIcon && !defaultIcon.startsWith('data:') ? defaultIcon : '');
     setSaving(false);
     setSaveError(null);
   }, [open, defaultUrl, defaultTitle, defaultIcon, defaultMatchType]);
 
   const handleSave = useCallback(async () => {
-    if (!url.trim() || saving) return;
-    // Problem 2: Auto-convert wildcard patterns to valid regex
-    let urlValue = url.trim();
-    if (matchType === 'regex') {
-      const conversion = wildcardToRegex(urlValue);
-      if (conversion.converted) {
-        urlValue = conversion.pattern;
-      }
-      // Final validation
-      try {
-        new RegExp(urlValue);
-      } catch {
-        return; // Invalid regex — don't save
-      }
+    if (saving) return;
+    const validation = validateRuleForm({
+      matchType,
+      url,
+      titleMode: titleMode.kind === 'set' ? 'set' : 'use-chain',
+      titleValue: titleMode.kind === 'set' ? titleMode.value : '',
+      iconMode: iconMode.kind === 'set' ? 'url' : 'use-chain',
+      iconValue: iconMode.kind === 'set' ? iconMode.value : '',
+      iconConfig: iconConfig ? { dataUri: iconConfig.dataUri ?? '' } : undefined,
+    });
+    if (!validation.valid) {
+      setSaveError(validation.errors[0]?.message ?? 'Invalid form');
+      return;
     }
-    // Problem 4: Compute icon based on iconMode (mutually exclusive):
-    // URL → text input; Custom → rendered data URI; Reset → clear the icon.
+
+    const urlValue = matchType === 'regex' ? normalizedRegexPattern(url) : url.trim();
+
     let icon: string | undefined;
-    if (iconMode === 'custom') {
-      icon = renderIconToDataUri(iconConfig, 64) || undefined;
-    } else if (iconMode === 'url' && iconUrl.trim()) {
-      icon = iconUrl.trim();
+    if (iconMode.kind === 'set') {
+      const dataUri = iconConfig?.dataUri ?? (iconConfig ? renderIconToDataUri(iconConfig, 64) : '');
+      if (dataUri) icon = dataUri;
+      else if (iconMode.value.trim()) icon = iconMode.value.trim();
     }
-    // Reset mode → icon stays undefined → cleared (falls back to rule chain).
+
     setSaving(true);
     setSaveError(null);
     try {
-      const result = await onSave({ url: urlValue, matchType, title: title.trim() || undefined, icon, mode, priority: Math.max(-100, Math.min(100, priority)) });
+      const result = await onSave({
+        url: urlValue,
+        matchType,
+        title: titleMode.kind === 'set' ? (titleMode.value.trim() || undefined) : undefined,
+        icon,
+        priority: Math.max(-100, Math.min(100, priority)),
+      });
       if (!result.success) {
         setSaveError(result.message || 'Failed to create rule');
         setSaving(false);
@@ -641,11 +664,13 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
       setSaveError('Failed to create rule');
       setSaving(false);
     }
-  }, [url, matchType, title, iconConfig, iconMode, iconUrl, mode, priority, onSave, saving]);
+  }, [url, matchType, titleMode, iconConfig, iconMode, priority, onSave, saving]);
+
+  const chain = useMemo(() => emptyChain(), []);
 
   return (
     // P4: same Dialog primitive as the icon modal (Escape / Tab trap / focus
-    // restoration). Form fields, ids, labels and handlers are unchanged.
+    // restoration). IMP-1: this is the only modal kept in the product.
     <Dialog
       open={open}
       onClose={onCancel}
@@ -659,136 +684,41 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         </>
       }
     >
-        <div className="tbs-modal__section">
-          <label className="tbs-modal__label" htmlFor="rule-url">Match URL</label>
-          <div className="tbs-inline-field">
-            <input
-              id="rule-url"
-              type="text"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              className="tbs-modal__input"
-              aria-label="Match URL"
-            />
-            <button
-              type="button"
-              className="tbs-inline-field__reset"
-              onClick={() => setUrl(defaultUrl)}
-              aria-label="Reset Match URL"
-              title="Reset Match URL"
-            >
-              ↺
-            </button>
-          </div>
-        </div>
+      {/* DT5: an unsaved creation is explicitly labelled as such. */}
+      <p className="tbs-modal__hint">This rule is not saved yet.</p>
 
-        <div className="tbs-modal__section">
-          <p className="tbs-modal__label">Match Type</p>
-          <div className="tbs-modal__radio-group" role="radiogroup" aria-label="Match type">
-            <label>
-              <input type="radio" name="matchType" checked={matchType === 'exact'} onChange={() => setMatchType('exact')} />
-              Exact URL
-            </label>
-            <label>
-              <input type="radio" name="matchType" checked={matchType === 'regex'} onChange={() => setMatchType('regex')} />
-              Regex
-            </label>
-          </div>
-          {/* Problem 2: Real-time regex validation + auto-conversion hint */}
-          {matchType === 'regex' && url.trim() && (() => {
-            const conversion = wildcardToRegex(url.trim());
-            if (conversion.converted) {
-              return <span className="tbs-modal__regex-valid" role="status">✓ Auto-converted to regex: {conversion.pattern}</span>;
-            }
-            try {
-              new RegExp(url.trim());
-              return <span className="tbs-modal__regex-valid" role="status">✓ Valid regex</span>;
-            } catch (e) {
-              return <span className="tbs-modal__regex-invalid" role="alert">✗ {e instanceof Error ? e.message : 'Invalid regex'}</span>;
-            }
-          })()}
-        </div>
-
-        <div className="tbs-modal__section">
-          <label className="tbs-modal__label" htmlFor="rule-title">Custom Title (optional)</label>
-          <div className="tbs-inline-field">
-            <input
-              id="rule-title"
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="tbs-modal__input"
-              placeholder="Leave empty to keep original"
-              aria-label="Custom title"
-            />
-            <button
-              type="button"
-              className="tbs-inline-field__reset"
-              onClick={() => setTitle(defaultTitle)}
-              aria-label="Reset Custom Title"
-              title="Reset Custom Title"
-            >
-              ↺
-            </button>
-          </div>
-        </div>
-
-        {/* Problem 4: Icon URL / Custom / Reset mutual exclusion */}
-        <div className="tbs-modal__section">
-          <p className="tbs-modal__label">Icon (optional)</p>
-          <div className="tbs-modal__radio-group" role="radiogroup" aria-label="Icon mode">
-            <label>
-              <input type="radio" name="iconMode" checked={iconMode === 'url'} onChange={() => { setPrevIconMode(iconMode !== 'reset' ? iconMode : prevIconMode); setIconMode('url'); }} />
-              Icon URL
-            </label>
-            <label>
-              <input type="radio" name="iconMode" checked={iconMode === 'custom'} onChange={() => { setPrevIconMode(iconMode !== 'reset' ? iconMode : prevIconMode); setIconMode('custom'); }} />
-              Custom Icon
-            </label>
-            <label>
-              <input type="radio" name="iconMode" checked={iconMode === 'reset'} onChange={() => { setPrevIconMode(iconMode !== 'reset' ? iconMode : prevIconMode); setIconMode('reset'); }} />
-              Reset
-            </label>
-          </div>
-          {iconMode === 'url' && (
-            <input
-              type="text"
-              value={iconUrl}
-              onChange={(e) => setIconUrl(e.target.value)}
-              className="tbs-modal__input"
-              placeholder="https:// or data: URI"
-              aria-label="Icon URL"
-            />
-          )}
-          {iconMode === 'custom' && (
-            <IconEditor value={iconConfig} onChange={setIconConfig} size={48} />
-          )}
-          {iconMode === 'reset' && (
-            <p className="tbs-modal__hint">Icon will be cleared and shown as "—".</p>
-          )}
-        </div>
-
-        {/* Priority (Problem 3) */}
-        <div className="tbs-modal__section">
-          <label className="tbs-modal__label" htmlFor="rule-priority">Priority (-100 to 100)</label>
-          <input
-            id="rule-priority"
-            type="number"
-            min={-100}
-            max={100}
-            value={priority}
-            onChange={(e) => setPriority(parseInt(e.target.value) || 0)}
-            className="tbs-modal__input"
-            aria-label="Rule priority"
-          />
-        </div>
-
-        <div className="tbs-modal__section">
-          <label className="tbs-modal__checkbox">
-            <input type="checkbox" checked={mode === 'auto'} onChange={(e) => setMode(e.target.checked ? 'auto' : 'manual')} />
-            Auto-apply on match
-          </label>
-        </div>
+      {/* SC8: the SAME field set the settings surfaces use. */}
+      <RuleFormFields
+        variant="create"
+        value={{
+          url,
+          matchType,
+          titleMode,
+          iconMode,
+          iconConfig,
+          priority,
+        }}
+        onChange={(patch) => {
+          if (patch.url !== undefined) setUrl(patch.url);
+          if (patch.matchType !== undefined) setMatchType(patch.matchType);
+          if (patch.titleMode !== undefined) setTitleMode(patch.titleMode);
+          if (patch.iconMode !== undefined) setIconMode(patch.iconMode);
+          if (patch.iconConfig !== undefined) setIconConfig(patch.iconConfig);
+          if (patch.priority !== undefined) setPriority(patch.priority);
+        }}
+        prefill={{ url: defaultUrl }}
+        chain={chain}
+        titleChain={chain}
+        iconChain={chain}
+        baselineTitle={{ mode: { kind: 'use-chain' } }}
+        baselineIcon={{ mode: { kind: 'use-chain' } }}
+        onResetTitleEdit={() => { setTitleMode(defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' }); }}
+        onResetIconEdit={() => { setIconMode(defaultIcon ? { kind: 'set', value: defaultIcon.startsWith('data:') ? '' : defaultIcon } : { kind: 'use-chain' }); }}
+        onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
+        onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
+        submitMode={{ kind: 'immediate' }}
+        idPrefix="modal-rule"
+      />
 
         {saveError && (
           <p className="tbs-modal__error" role="alert" style={{ color: '#DC2626', fontSize: '12px', margin: '4px 0' }}>{saveError}</p>
@@ -860,7 +790,7 @@ export function SidebarApp() {
       // Support both { result: { success, sync, local } } and { success, sync, local }
       const result = response?.result ?? response;
       if (result?.success && result.sync && result.local) {
-        let local = result.local!;
+        let local = result.local;
         // Problem 1: Also read tabOverride directly from storage.local for freshness
         if (typeof chrome !== 'undefined' && chrome.storage?.local) {
           try {
@@ -1235,23 +1165,6 @@ export function SidebarApp() {
     setTimeout(() => titleInputRef.current?.focus(), 0);
   }, [state.currentTabTitle]);
 
-  const handleTitleSave = useCallback(async () => {
-    setEditingTitle(false);
-    if (!state.currentTabId) return;
-    const next = titleDraft.trim();
-    // Empty, or unchanged from the pre-edit value => user made no modification
-    // => do not record into the Data Dashboard.
-    if (!next || next === currentTitleInitial) return;
-    try {
-      await sendMessage('SET_TAB_OVERRIDE', { tabId: state.currentTabId, title: next });
-      // Problem 5: Don't modify original title — refresh state to pick up override from storage
-      setToast({ variant: 'success', message: 'Title updated' });
-      void loadState();
-    } catch {
-      setToast({ variant: 'error', message: 'Failed to update title' });
-    }
-  }, [state.currentTabId, titleDraft, currentTitleInitial, loadState]);
-
   // Reset the current page's title: clears the tab's title override so it falls
   // back to the slot/rule/original tiers (bidirectional sync).
   const handleCurrentTitleReset = useCallback(async () => {
@@ -1267,6 +1180,30 @@ export function SidebarApp() {
       setToast({ variant: 'error', message: 'Failed to reset title' });
     }
   }, [state.currentTabId, loadState]);
+
+  const handleTitleSave = useCallback(async () => {
+    setEditingTitle(false);
+    if (!state.currentTabId) return;
+    const next = titleDraft.trim();
+
+    // CT1 impact #3 / CT4: an empty value is an EXPLICIT "use chain" decision
+    // (clear this layer), not a silent short-circuit. An unchanged value is a
+    // genuine no-op.
+    if (!next) {
+      if (currentTitleInitial.trim() === '') return; // already unset — nothing changed
+      await handleCurrentTitleReset();
+      return;
+    }
+    if (next === currentTitleInitial) return;
+
+    try {
+      await sendMessage('SET_TAB_OVERRIDE', { tabId: state.currentTabId, title: next });
+      setToast({ variant: 'success', message: 'Title updated' });
+      void loadState();
+    } catch {
+      setToast({ variant: 'error', message: 'Failed to update title' });
+    }
+  }, [state.currentTabId, titleDraft, currentTitleInitial, loadState, handleCurrentTitleReset]);
 
   const handleTitleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') { void handleTitleSave(); }
@@ -1304,29 +1241,28 @@ export function SidebarApp() {
     }
   }, [state.currentTabId, loadState]);
 
-  const handleCreateGlobalRule = useCallback(async (ruleData: { url: string; matchType: 'exact' | 'regex'; title?: string; icon?: string; mode: 'auto' | 'manual'; priority: number }): Promise<{ success: boolean; message?: string }> => {
+  const handleCreateGlobalRule = useCallback(async (ruleData: { url: string; matchType: 'exact' | 'regex'; title?: string; icon?: string; priority: number }): Promise<{ success: boolean; message?: string; conflictingRuleId?: string }> => {
     try {
       const response = await sendMessage('CREATE_RULE', {
         urlMatch: { type: ruleData.matchType, value: ruleData.url },
-        mode: ruleData.mode,
         priority: ruleData.priority,
         title: ruleData.title || undefined,
         favicon: ruleData.icon ? { type: 'upload', value: ruleData.icon } : undefined,
-      }) as { result?: { success: boolean; message?: string }; success?: boolean; message?: string };
+      }) as { result?: { success: boolean; message?: string; conflict?: { conflictingRuleId?: string } }; success?: boolean; message?: string };
       const result = response?.result ?? response;
       if (result?.success) {
         setShowRuleModal(false);
         setRulePrefill(null);
-        setToast({ variant: 'success', message: 'Global rule created' });
+        setToast({ variant: 'success', message: 'Rule created' });
         await loadState();
         return { success: true };
-      } else {
-        const msg = (result as { message?: string })?.message || 'Failed to create rule';
-        setToast({ variant: 'error', message: msg });
-        return { success: false, message: msg };
       }
+      // E3/E3b: a create failure is a FIELD/form-level error, reported inline by
+      // the modal — NOT a second global error toast (that was defect N6).
+      // E2-c: the message is the single shared conflict copy.
+      const msg = (result as { message?: string })?.message || 'Failed to create rule';
+      return { success: false, message: msg, conflictingRuleId: (result as { conflict?: { conflictingRuleId?: string } })?.conflict?.conflictingRuleId };
     } catch {
-      setToast({ variant: 'error', message: 'Failed to create rule' });
       return { success: false, message: 'Failed to create rule' };
     }
   }, [loadState]);
@@ -1380,11 +1316,13 @@ export function SidebarApp() {
     const slotId = slotIconEditorId;
     if (!slotId) return;
     try {
+      // DT11 unification: the slot icon clear writes `null`, never the legacy
+      // `{type:'upload', value:''}` shape (the read side still tolerates both).
       await sendMessage('UPDATE_SLOT_UI_MARKER', {
         slotId,
-        uiMarker: { icon: { type: 'upload', value: '' } },
+        uiMarker: { icon: null },
       });
-      setToast({ variant: 'success', message: `Slot ${slotId} icon reset` });
+      setToast({ variant: 'success', message: `Slot ${slotId} icon cleared` });
       await loadState();
     } catch {
       setToast({ variant: 'error', message: `Failed to reset slot ${slotId} icon` });
@@ -1475,6 +1413,24 @@ export function SidebarApp() {
   // user is already looking at — it degrades to a dismissible notice instead.
   const hasLoadedState = state.sync !== null;
 
+  // SC1/A1: the Current Page display is derived from the SINGLE shared chain
+  // implementation — the hand-copied chain that used to live here was the defect
+  // this iteration removes (it could silently disagree with delivery). These
+  // hooks MUST stay above the early returns to preserve hook order.
+  const currentChainInput = useMemo(() => {
+    if (!state.sync || !state.local || state.currentTabId === null) return null;
+    return { sync: state.sync, local: state.local, tabId: state.currentTabId, tabUrl: state.currentTabUrl };
+  }, [state.sync, state.local, state.currentTabId, state.currentTabUrl]);
+
+  const titleChain = useMemo(
+    () => (currentChainInput ? resolveFieldChain('title', currentChainInput) : null),
+    [currentChainInput],
+  );
+  const faviconChain = useMemo(
+    () => (currentChainInput ? resolveFieldChain('favicon', currentChainInput) : null),
+    [currentChainInput],
+  );
+
   // ─── Render ────────────────────────────────────────────────────────────
 
   if (state.loading) {
@@ -1489,43 +1445,14 @@ export function SidebarApp() {
   const bindings = state.local?.bindings ?? [];
   const isLocked = state.lockedTabId !== null;
 
-  // Problem 4 & 7: Priority chain for current page display — aligned with the
-  // worker's computeFields/resolveSlotField chain (Bug 2 fix):
-  //   slot (bound to this tabId) → tabId override → matching page rule → site value
-  // The slot tier is tabId-scoped: it only applies when a SlotBinding's tabId
-  // equals the current tabId, so it never bleeds onto other matching tabs.
-  const tabOverride = state.currentTabId
-    ? state.local?.tabOverrides.find((o) => o.tabId === state.currentTabId)
-    : undefined;
-
-  // Slot tier (highest): resolve the slot bound to this exact tabId, mirroring
-  // RuleService.resolveSlotField (slot.titleSnapshot/uiMarker.icon → favicon).
-  const boundSlot = state.currentTabId
-    ? state.local?.bindings.find((b) => b.tabId === state.currentTabId)
-    : undefined;
-  const boundSlotDef = boundSlot
-    ? state.sync?.slots.find((s) => s.id === boundSlot.slotId)
-    : undefined;
-  // User-modified uiMarker wins over the stale snapshot (mirrors RuleService.resolveSlotField).
-  const slotTitle = boundSlotDef?.uiMarker.customTitle?.trim()
-    ? boundSlotDef.uiMarker.customTitle
-    : (boundSlotDef?.titleSnapshot.trim() ? boundSlotDef.titleSnapshot : null);
-  const slotFavicon = boundSlotDef?.uiMarker.icon?.value.trim()
-    ? boundSlotDef.uiMarker.icon.value
-    : (boundSlotDef?.faviconSnapshot.trim() ? boundSlotDef.faviconSnapshot : null);
-
-  // Find matching auto rule for current page URL (highest priority wins)
-  const matchingRule = state.currentTabUrl && state.sync?.rules
-    ? state.sync.rules
-        .filter((r) => r.mode === 'auto' && r.enabled !== false && state.currentTabUrl && matchesUrl(state.currentTabUrl, r.urlMatch))
-        .sort((a, b) => b.priority - a.priority || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]
-    : undefined;
-
-  // Priority chain: current page (tab override) > slot > rule > original.
-  // The active tab's own override (what the user directly edited) is the highest
-  // tier; the slot-bound snapshot next; then the matching page rule; else site.
-  const displayCurrentTitle = tabOverride?.title || slotTitle || matchingRule?.title || state.currentTabTitle;
-  const displayCurrentFavicon = tabOverride?.favicon?.value || slotFavicon || matchingRule?.favicon?.value || state.currentTabFavicon;
+  // The chain's `site` tier is not captured from the sidebar, so the site value
+  // falls back to the reported tab title/favicon (`—` when neither is known).
+  const displayCurrentTitle = titleChain
+    ? (titleChain.winner.value ?? titleChain.tiers.site.value ?? state.currentTabTitle)
+    : state.currentTabTitle;
+  const displayCurrentFavicon = faviconChain
+    ? (faviconChain.winner.value ?? faviconChain.tiers.site.value ?? state.currentTabFavicon)
+    : state.currentTabFavicon;
 
   return (
     <div role="application" aria-label="Tab Bookmarks Sidebar" className="tbs-sidebar">
@@ -1533,7 +1460,7 @@ export function SidebarApp() {
       <header className="tbs-sidebar__header">
         <button
           className="tbs-sidebar__collapse-toggle"
-          onClick={() => setCollapsed(!collapsed)}
+          onClick={() => { setCollapsed(!collapsed); }}
           aria-expanded={!collapsed}
           aria-label={collapsed ? 'Expand current page section' : 'Collapse current page section'}
         >
@@ -1577,7 +1504,7 @@ export function SidebarApp() {
                   className="tbs-sidebar__title-input"
                   type="text"
                   value={titleDraft}
-                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onChange={(e) => { setTitleDraft(e.target.value); }}
                   onBlur={handleTitleSave}
                   onKeyDown={handleTitleKeyDown}
                   aria-label="Rename current tab"
@@ -1688,7 +1615,7 @@ export function SidebarApp() {
       <IconEditorModal
         open={showIconEditor}
         onApply={handleIconApply}
-        onCancel={() => setShowIconEditor(false)}
+        onCancel={() => { setShowIconEditor(false); }}
         onReset={handleCurrentIconReset}
         initialIcon={displayCurrentFavicon || undefined}
       />
@@ -1697,7 +1624,7 @@ export function SidebarApp() {
       <IconEditorModal
         open={slotIconEditorId !== null}
         onApply={handleSlotIconApply}
-        onCancel={() => setSlotIconEditorId(null)}
+        onCancel={() => { setSlotIconEditorId(null); }}
         onReset={handleSlotIconReset}
         returnFocusRef={slotIconTriggerRef}
         initialIcon={(() => {
@@ -1752,31 +1679,34 @@ export function SidebarApp() {
             const binding = bindings.find((b) => b.slotId === slotNumber);
             const shortcut = getSlotShortcut(slotNumber, 'switch');
 
-            // Priority chain for bound slots: tabOverride → uiMarker → matching rule → snapshot
+            // SC1/A1: the bound slot's resolved values come from the SAME shared chain as
+// the Current Page and the dashboard. The slot tier only applies when a binding
+// matches the tabId (strictly tabId-scoped), so a bound slot resolves
+// override > slot > rule > site with one implementation.
             let resolvedTitle: string | undefined;
             let resolvedIcon: string | undefined;
             if (slot) {
-              // 1. tabOverride (if slot's bound tab has an override)
-              const slotTabOverride = binding
-                ? state.local?.tabOverrides.find((o) => o.tabId === binding.tabId)
-                : undefined;
-              // 2. Find matching page rule for the slot's URL
-              const slotMatchingRule = slot.urlMatch.value && state.sync?.rules
-                ? state.sync.rules
-                    .filter((r) => r.mode === 'auto' && r.enabled !== false && slot.urlMatch.value && matchesUrl(slot.urlMatch.value, r.urlMatch))
-                    .sort((a, b) => b.priority - a.priority || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]
-                : undefined;
-
-              resolvedTitle = slotTabOverride?.title
-                || slot.uiMarker.customTitle
-                || slotMatchingRule?.title
-                || slot.titleSnapshot
-                || undefined;
-              resolvedIcon = slotTabOverride?.favicon?.value
-                || slot.uiMarker.icon?.value
-                || slotMatchingRule?.favicon?.value
-                || slot.faviconSnapshot
-                || undefined;
+              if (binding && state.sync && state.local) {
+                const chainInput = {
+                  sync: state.sync,
+                  local: state.local,
+                  tabId: binding.tabId,
+                  tabUrl: slot.urlMatch.value,
+                };
+                resolvedTitle = resolveFieldChain('title', chainInput).winner.value
+                  ?? slot.uiMarker.customTitle
+                  ?? slot.titleSnapshot
+                  ?? undefined;
+                resolvedIcon = resolveFieldChain('favicon', chainInput).winner.value
+                  ?? slot.uiMarker.icon?.value
+                  ?? slot.faviconSnapshot
+                  ?? undefined;
+              } else {
+                // Unbound slot: there is no page to chain for, so the slot's own
+                // configured marker/snapshot is the value shown.
+                resolvedTitle = slot.uiMarker.customTitle ?? slot.titleSnapshot ?? undefined;
+                resolvedIcon = slot.uiMarker.icon?.value ?? slot.faviconSnapshot ?? undefined;
+              }
             }
 
             return (
@@ -1807,7 +1737,7 @@ export function SidebarApp() {
 
       {/* Undo bar */}
       {undo && (
-        <UndoBar undo={undo} onUndo={handleUndo} onExpire={() => setUndo(null)} />
+        <SidebarUndoBar undo={undo} onUndo={handleUndo} onExpire={() => { setUndo(null); }} />
       )}
 
       {/* Toast */}
@@ -1815,7 +1745,7 @@ export function SidebarApp() {
         <Toast
           variant={toast.variant}
           message={toast.message}
-          onDismiss={() => setToast(null)}
+          onDismiss={() => { setToast(null); }}
         />
       )}
 

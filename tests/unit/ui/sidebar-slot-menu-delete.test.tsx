@@ -15,6 +15,15 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SidebarApp } from '@ui/sidebar/App';
 
+/**
+ * T19 anchor migration: the Confirm primitive now enforces a ~120ms protection
+ * window (CT3-b4) so the keypress/click that OPENED the dialog cannot activate
+ * it. Tests that fire the confirmation programmatically must wait it out.
+ */
+async function flushConfirmGuard(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 150));
+}
+
 const mockSendMessage = vi.fn();
 
 const BASE_STATE = {
@@ -146,6 +155,7 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
       expect(screen.getByRole('dialog')).toBeInTheDocument();
     });
 
+    await flushConfirmGuard();
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
@@ -162,6 +172,7 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
     await waitFor(() => {
       expect(screen.getByRole('dialog')).toBeInTheDocument();
     });
+    await flushConfirmGuard();
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {

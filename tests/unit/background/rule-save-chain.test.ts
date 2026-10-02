@@ -30,7 +30,6 @@ describe('Module 1+3: Rule save chain & application', () => {
     it('should reject a duplicate exact URL rule with DUPLICATE_RULE', async () => {
       const first = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 0,
         title: 'First',
       });
@@ -38,7 +37,6 @@ describe('Module 1+3: Rule save chain & application', () => {
 
       const dup = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'manual',
         priority: 5,
         title: 'Second',
       });
@@ -55,13 +53,11 @@ describe('Module 1+3: Rule save chain & application', () => {
     it('should reject a duplicate regex rule with DUPLICATE_RULE', async () => {
       await service.createRule({
         urlMatch: { type: 'regex', value: 'https://example\\.com/.*' },
-        mode: 'auto',
         priority: 0,
       });
 
       const dup = await service.createRule({
         urlMatch: { type: 'regex', value: 'https://example\\.com/.*' },
-        mode: 'auto',
         priority: 10,
       });
       expect(dup.success).toBe(false);
@@ -73,14 +69,12 @@ describe('Module 1+3: Rule save chain & application', () => {
     it('should detect duplicates via normalized exact URLs (hash/port ignored)', async () => {
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page#section' },
-        mode: 'auto',
         priority: 0,
       });
 
       // Same URL without hash — should be considered duplicate after normalization
       const dup = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 0,
       });
       expect(dup.success).toBe(false);
@@ -92,12 +86,10 @@ describe('Module 1+3: Rule save chain & application', () => {
     it('should allow different exact URLs', async () => {
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/a' },
-        mode: 'auto',
         priority: 0,
       });
       const second = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/b' },
-        mode: 'auto',
         priority: 0,
       });
       expect(second.success).toBe(true);
@@ -108,12 +100,10 @@ describe('Module 1+3: Rule save chain & application', () => {
     it('should reject updateRule that changes urlMatch to another rule\'s pattern with DUPLICATE_RULE', async () => {
       const r1 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/one' },
-        mode: 'auto',
         priority: 0,
       });
       const r2 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/two' },
-        mode: 'auto',
         priority: 0,
       });
       expect(r1.success).toBe(true);
@@ -138,12 +128,10 @@ describe('Module 1+3: Rule save chain & application', () => {
     it('should reject duplicate regex pattern on update (exclude self)', async () => {
       const r1 = await service.createRule({
         urlMatch: { type: 'regex', value: 'https://a\\.com/.*' },
-        mode: 'auto',
         priority: 0,
       });
       const r2 = await service.createRule({
         urlMatch: { type: 'regex', value: 'https://b\\.com/.*' },
-        mode: 'auto',
         priority: 0,
       });
       if (!r1.success || !r2.success) return;
@@ -160,7 +148,6 @@ describe('Module 1+3: Rule save chain & application', () => {
     it('should allow updateRule that keeps its own urlMatch unchanged', async () => {
       const r1 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/keep' },
-        mode: 'auto',
         priority: 0,
         title: 'Old',
       });
@@ -180,7 +167,6 @@ describe('Module 1+3: Rule save chain & application', () => {
     it('should allow updateRule that moves to a fresh unique pattern', async () => {
       const r1 = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/src' },
-        mode: 'auto',
         priority: 0,
       });
       if (!r1.success) return;
@@ -203,7 +189,6 @@ describe('Module 1+3: Rule save chain & application', () => {
         action: 'CREATE_RULE',
         payload: {
           urlMatch: { type: 'exact', value: 'https://cross-channel.com/page' },
-          mode: 'auto',
           priority: 0,
         },
       }, {});
@@ -215,7 +200,6 @@ describe('Module 1+3: Rule save chain & application', () => {
         action: 'CREATE_RULE',
         payload: {
           urlMatch: { type: 'exact', value: 'https://cross-channel.com/page' },
-          mode: 'auto',
           priority: 0,
         },
       }, {});
@@ -240,65 +224,61 @@ describe('Module 1+3: Rule save chain & application', () => {
       title: 'Ext', favIconUrl: '', active: false, incognito: false, status: 'complete',
     };
 
-    it('should send APPLY_REWRITE with force:true to matching tabs on auto rule create', async () => {
+    it('hands only the matching tab to the delivery entry (not other, not protected)', async () => {
       adapter.setTabs([matchingTab, otherTab, protectedTab]);
+
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
 
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 0,
         title: 'Rewritten Title',
         favicon: { type: 'url', value: 'https://example.com/icon.png' },
       });
 
-      const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-      // Only the matching tab (not other, not protected)
-      const matchingExecs = execCalls.filter((c) => (c.args[0] as { target: { tabId: number } }).target.tabId === matchingTab.id);
-      expect(matchingExecs.length).toBeGreaterThan(0);
-
-      const payload = (matchingExecs[0].args[0] as { args: unknown[] }).args[0] as { title?: string; favicon?: string; force?: boolean };
-      expect(payload.title).toBe('Rewritten Title');
-      expect(payload.favicon).toBe('https://example.com/icon.png');
-
-      // No exec to protected tab
-      const protectedExecs = execCalls.filter((c) => (c.args[0] as { target: { tabId: number } }).target.tabId === protectedTab.id);
-      expect(protectedExecs).toHaveLength(0);
+      const affected = new Set(delivered.flat());
+      expect(affected.has(matchingTab.id)).toBe(true);
+      expect(affected.has(otherTab.id)).toBe(false);
+      // Protected tabs are excluded from the AFFECTED SET here too; the delivery
+      // entry independently re-checks protection (A8, asserted elsewhere).
+      expect(affected.has(protectedTab.id)).toBe(false);
     });
 
-    it('should not send messages for manual rules', async () => {
+    // ── T19 anchor migration: SEMANTIC-LOST (Q11) ──────────────────────
+    // "manual rules send no messages" no longer exists: every rule participates.
+    it('always hands matching tabs to delivery regardless of any manual split', async () => {
       adapter.setTabs([matchingTab]);
+
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
+
       await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'manual',
         priority: 0,
-        title: 'Manual',
+        title: 'Every Rule',
       });
-      const sendCalls = adapter.calls.filter((c) => c.method === 'tabs.sendMessage');
-      expect(sendCalls).toHaveLength(0);
+      expect(delivered.flat()).toContain(matchingTab.id);
     });
 
-    it('should re-apply computed fields to matching tabs after updateRule', async () => {
+    it('re-asserts matching tabs to the delivery entry after updateRule', async () => {
       adapter.setTabs([matchingTab]);
 
       const created = await service.createRule({
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
-        mode: 'auto',
         priority: 0,
         title: 'Before',
       });
       expect(created.success).toBe(true);
       if (!created.success) return;
 
-      adapter.calls.length = 0;
+      const delivered: number[][] = [];
+      service.setDelivery(async (tabIds) => { delivered.push(tabIds); });
 
       const updated = await service.updateRule(created.rule.id, { title: 'After' });
       expect(updated.success).toBe(true);
 
-      const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-      expect(execCalls.length).toBeGreaterThan(0);
-      const payload = (execCalls[0].args[0] as { args: unknown[] }).args[0] as { title?: string; force?: boolean };
-      expect(payload.title).toBe('After');
-      expect(payload.force).toBe(true);
+      expect(delivered.flat()).toContain(matchingTab.id);
     });
   });
 });

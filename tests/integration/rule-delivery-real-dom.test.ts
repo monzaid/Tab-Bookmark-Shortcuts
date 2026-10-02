@@ -3,44 +3,46 @@ import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { RuleService } from '@background/rule-service';
 import { WorkerOrchestrator } from '@background/worker-orchestrator';
+import { FieldDeliveryService } from '@background/field-delivery-service';
 import { ICON_OFFLOAD_THRESHOLD } from '@background/storage-repository';
 import { wildcardToRegex } from '@shared/url-utils';
 import type { MockAdapter } from '@adapters/mock-adapter';
 import type { NormalizedTab, NormalizedWindow } from '@adapters/contract';
+import type { FieldApplyMessage } from '@shared/messages';
 
 /**
- * Real-browser delivery gap tests.
+ * Real-browser delivery gap tests (T8 representation migration).
  *
- * The mock-based tests only assert `scripting.executeScript` was CALLED. They
- * never run the injected function against a real DOM, so `document.head` timing
- * bugs and genuine multi-tab / persistence delivery failures go undetected.
+ * The mock-based suites only assert a channel WAS CALLED. These tests run the
+ * ACTUAL delivery logic against a real jsdom document, so the title/favicon are
+ * verified to genuinely land in the page.
  *
- * These tests run the ACTUAL injected function against a real jsdom document
- * and verify the title/favicon genuinely land in the tab — the exact thing the
- * manual browser acceptance checks.
+ * C2 migration: the content script is now the PRIMARY implementation, so the
+ * capture adapter routes `tabs.sendMessage({type:'FIELD_APPLY'})` into the real
+ * `src/content/index.ts` handlers instead of capturing an `executeScript`
+ * function. The behavioural intents (real DOM rewrite, ALL matching tabs,
+ * refresh persistence, regex matching) are unchanged.
  */
 
-// ─── Helper: mock adapter whose executeScript CAPTURES the injected func ─────
-// Emulates chrome.scripting.executeScript (which invokes func in the page doc).
+type CapturedApply = { tabId: number; message: FieldApplyMessage };
 
-type InjectedCall = { func: (...args: unknown[]) => unknown; args: unknown[] };
-
-function makeCaptureAdapter(capture: (call: InjectedCall) => void): MockAdapter {
+// ─── Helper: mock adapter that routes FIELD_APPLY into the content script ────
+function makeContentAdapter(capture: (call: CapturedApply) => void): MockAdapter {
   const base = createMockAdapter();
   const wrapped: MockAdapter = {
     ...base,
-    scripting: {
-      executeScript(options) {
-        base.calls.push({ method: 'scripting.executeScript', args: [options] });
-        capture({ func: options.func, args: options.args ?? [] });
-        return Promise.resolve([undefined]);
+    tabs: {
+      ...base.tabs,
+      sendMessage(tabId: number, message: unknown) {
+        base.calls.push({ method: 'tabs.sendMessage', args: [tabId, message] });
+        const msg = message as FieldApplyMessage;
+        if (msg?.type === 'FIELD_APPLY') capture({ tabId, message: msg });
+        return Promise.resolve(undefined);
       },
     },
   };
   return wrapped;
 }
-
-// ─── Shared fixture ───────────────────────────────────────────────────────────
 
 const window: NormalizedWindow = { id: 1, focused: true, incognito: false, type: 'normal' };
 
@@ -54,100 +56,91 @@ function resetDocument(): void {
   document.title = '';
 }
 
-describe('Real-DOM delivery: the injected function genuinely rewrites the tab', () => {
+describe('Real-DOM delivery: the content script genuinely rewrites the tab', () => {
   let adapter: MockAdapter;
   let repo: StorageRepository;
   let service: RuleService;
-  let calls: InjectedCall[];
+  let applies: CapturedApply[];
+  const contentMod = { applyFieldMessage: null as unknown as (m: FieldApplyMessage) => void, resetCapturedSite: null as unknown as () => void };
 
   const tab = baseTab(1, 'https://example.com/page');
 
   beforeEach(async () => {
     resetDocument();
-    calls = [];
-    adapter = makeCaptureAdapter((c) => calls.push(c));
+    applies = [];
+    adapter = makeContentAdapter((c) => applies.push(c));
     adapter.setWindows([window]);
     adapter.setTabs([tab]);
     repo = new StorageRepository(adapter);
     await repo.initialize();
     service = new RuleService(adapter, repo);
+    // Production wiring (A2): inject the delivery coordinator.
+    const delivery = new FieldDeliveryService(adapter, repo);
+    service.setDelivery((tabIds) => delivery.recomputeAndRedeliver(tabIds));
+
+    const mod = await import('@content/index');
+    contentMod.applyFieldMessage = mod.applyFieldMessage;
+    contentMod.resetCapturedSite = mod.resetCapturedSite;
+    contentMod.resetCapturedSite();
   });
 
-  it('sets document.title and swaps the favicon link in a real DOM', async () => {
+  it('sets document.title and inserts our favicon link in a real DOM', async () => {
     const result = await service.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
       priority: 5,
       title: 'Delivered Title',
       favicon: { type: 'url', value: 'https://new.example/icon.png' },
     }, 0);
     expect(result.success).toBe(true);
 
-    expect(calls.length).toBeGreaterThan(0);
-    const c = calls[0];
-    c.func(c.args[0]);
+    expect(applies.length).toBeGreaterThan(0);
+    contentMod.applyFieldMessage(applies[0].message);
 
     expect(document.title).toBe('Delivered Title');
     const iconLinks = Array.from(document.querySelectorAll('link[rel*="icon"]'));
-    expect(iconLinks.length).toBe(1);
-    expect(iconLinks[0].getAttribute('href')).toBe('https://new.example/icon.png');
+    // The site's original link survives; ours is inserted alongside it.
+    expect(iconLinks.length).toBe(2);
+    expect(iconLinks.some((l) => l.getAttribute('href') === 'https://new.example/icon.png')).toBe(true);
+    expect(iconLinks.some((l) => l.getAttribute('href') === 'https://old.example/favicon.ico')).toBe(true);
   });
 
   it('B9: refuses to inject a javascript: favicon into the DOM', async () => {
-    // Create a rule to obtain the injected function reference (captured above).
-    await service.createRule({
-      urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
-      priority: 5,
-      title: 'Safe Title',
-      favicon: { type: 'url', value: 'https://new.example/icon.png' },
-    }, 0);
-
-    const c = calls[0];
-    c.func({ favicon: 'javascript:alert(1)' });
+    contentMod.applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'set', value: 'javascript:alert(1)' } });
 
     const hrefs = Array.from(document.querySelectorAll('link[rel*="icon"]')).map((l) => l.getAttribute('href'));
     expect(hrefs).not.toContain('javascript:alert(1)');
-    // The previous (site) icon is removed and NOT replaced with anything unsafe
     expect(hrefs.filter((h) => h !== null && h.startsWith('javascript:'))).toHaveLength(0);
   });
 
   it('B9: still injects an https favicon (legitimate path unaffected)', async () => {
-    await service.createRule({
-      urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
-      priority: 5,
-      title: 'Safe Title',
-      favicon: { type: 'url', value: 'https://unused.example/icon.png' },
-    }, 0);
-
-    const c = calls[0];
-    c.func({ favicon: 'https://new.example/icon.png' });
+    contentMod.applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'set', value: 'https://new.example/icon.png' } });
 
     const hrefs = Array.from(document.querySelectorAll('link[rel*="icon"]')).map((l) => l.getAttribute('href'));
     expect(hrefs).toContain('https://new.example/icon.png');
   });
 
-  it('applies the favicon even when document.head is initially null (document_start timing)', async () => {
+  it('restores the ORIGINAL favicon link after a restore directive', async () => {
+    contentMod.applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'set', value: 'https://new.example/icon.png' } });
+    contentMod.applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'restore' } });
+
+    const hrefs = Array.from(document.querySelectorAll('link[rel*="icon"]')).map((l) => l.getAttribute('href'));
+    expect(hrefs).toEqual(['https://old.example/favicon.ico']);
+  });
+
+  it('defers the favicon when document.head is initially null (document_start timing)', async () => {
     const headEl = document.head;
     Object.defineProperty(document, 'head', { configurable: true, value: null });
 
-    const result = await service.createRule({
-      urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
-      priority: 5,
-      title: 'Early Title',
-      favicon: { type: 'url', value: 'https://new.example/icon.png' },
-    }, 0);
-    expect(result.success).toBe(true);
-
-    const c = calls[0];
-    c.func(c.args[0]);
+    contentMod.applyFieldMessage({ type: 'FIELD_APPLY', title: { kind: 'set', value: 'Early Title' } });
     expect(document.title).toBe('Early Title');
+    // Favicon deferred (no head yet).
+    contentMod.applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'set', value: 'https://new.example/icon.png' } });
 
-    // Simulate DOM becoming ready later.
+    // Simulate DOM becoming ready later and flushing the pending favicon.
+    const mod = await import('@content/index');
     Object.defineProperty(document, 'head', { configurable: true, value: headEl });
-    await new Promise((r) => setTimeout(r, 80));
+    mod.flushPendingFavicon();
+    await new Promise((r) => setTimeout(r, 20));
 
     const iconLinks = Array.from(document.querySelectorAll('link[rel*="icon"]'));
     expect(iconLinks.some((l) => l.getAttribute('href') === 'https://new.example/icon.png')).toBe(true);
@@ -159,7 +152,6 @@ describe('Real-DOM delivery: the injected function genuinely rewrites the tab', 
 describe('Exact rule delivers to EVERY matching tab (real DOM)', () => {
   let adapter: MockAdapter;
   let worker: WorkerOrchestrator;
-  let calls: InjectedCall[];
 
   const tabA = baseTab(10, 'https://example.com/page', 'A');
   const tabB = baseTab(11, 'https://example.com/page', 'B');
@@ -168,32 +160,29 @@ describe('Exact rule delivers to EVERY matching tab (real DOM)', () => {
 
   beforeEach(async () => {
     resetDocument();
-    calls = [];
-    adapter = makeCaptureAdapter((c) => calls.push(c));
+    adapter = makeContentAdapter(() => undefined);
     adapter.setWindows([window]);
     adapter.setTabs([tabA, tabB, tabC, tabDiff]);
     worker = new WorkerOrchestrator(adapter);
     await worker.initialize();
   });
 
-  it('invokes the injected rewrite for every matching tab (not just one)', async () => {
+  it('delivers the rewrite for every matching tab (not just one)', async () => {
     const result = await worker.ruleService.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
       priority: 5,
       title: 'Rewritten',
     }, 0);
     expect(result.success).toBe(true);
 
-    // The capture adapter captured one executeScript per matching tab.
-    const executedTabs = adapter.calls
-      .filter((c) => c.method === 'scripting.executeScript')
-      .map((c) => (c.args[0] as { target: { tabId: number } }).target.tabId);
+    const deliveredTabs = adapter.calls
+      .filter((c) => c.method === 'tabs.sendMessage')
+      .map((c) => c.args[0] as number);
 
-    expect(executedTabs).toContain(10);
-    expect(executedTabs).toContain(11);
-    expect(executedTabs).toContain(12);
-    expect(executedTabs).not.toContain(13);
+    expect(deliveredTabs).toContain(10);
+    expect(deliveredTabs).toContain(11);
+    expect(deliveredTabs).toContain(12);
+    expect(deliveredTabs).not.toContain(13);
   });
 });
 
@@ -202,14 +191,12 @@ describe('Exact rule delivers to EVERY matching tab (real DOM)', () => {
 describe('tabs.onUpdated re-delivers the rewrite (refresh persistence)', () => {
   let adapter: MockAdapter;
   let worker: WorkerOrchestrator;
-  let calls: InjectedCall[];
 
   const tab = baseTab(10, 'https://example.com/page');
 
   beforeEach(async () => {
     resetDocument();
-    calls = [];
-    adapter = makeCaptureAdapter((c) => calls.push(c));
+    adapter = makeContentAdapter(() => undefined);
     adapter.setWindows([window]);
     adapter.setTabs([tab]);
     worker = new WorkerOrchestrator(adapter);
@@ -217,7 +204,6 @@ describe('tabs.onUpdated re-delivers the rewrite (refresh persistence)', () => {
 
     await worker.ruleService.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
       priority: 5,
       title: 'Persisted',
       favicon: { type: 'url', value: 'https://new.example/icon.png' },
@@ -226,20 +212,22 @@ describe('tabs.onUpdated re-delivers the rewrite (refresh persistence)', () => {
     // Simulate the page being refreshed: the DOM resets to original, then the
     // worker re-applies on tabs.onUpdated status==='complete'.
     resetDocument();
-    calls.length = 0;
     adapter.calls.length = 0;
   });
 
-  it('re-applies title+favicon to the real DOM after a refresh', async () => {
+  it('re-delivers title+favicon after a refresh and they land in the real DOM', async () => {
     adapter.emitTabUpdated(10, { status: 'complete' }, tab);
     await new Promise((r) => setTimeout(r, 80));
 
-    // The injected function must have been invoked again after the refresh.
-    expect(calls.length).toBeGreaterThan(0);
+    const sends = adapter.calls
+      .filter((c) => c.method === 'tabs.sendMessage' && c.args[0] === 10)
+      .map((c) => c.args[1] as FieldApplyMessage)
+      .filter((m) => m?.type === 'FIELD_APPLY');
+    expect(sends.length).toBeGreaterThan(0);
 
-    // Run the LAST injected call against the (now original) DOM.
-    const c = calls[calls.length - 1];
-    c.func(c.args[0]);
+    const mod = await import('@content/index');
+    mod.resetCapturedSite();
+    mod.applyFieldMessage(sends[sends.length - 1]);
 
     expect(document.title).toBe('Persisted');
     const iconLinks = Array.from(document.querySelectorAll('link[rel*="icon"]'));
@@ -252,7 +240,6 @@ describe('tabs.onUpdated re-delivers the rewrite (refresh persistence)', () => {
 describe('Regex rule (wildcard-converted) matches and delivers to real DOM', () => {
   let adapter: MockAdapter;
   let worker: WorkerOrchestrator;
-  let calls: InjectedCall[];
 
   const conversion = wildcardToRegex('https://example.com/*');
   const storedRegex = conversion.pattern;
@@ -263,8 +250,7 @@ describe('Regex rule (wildcard-converted) matches and delivers to real DOM', () 
 
   beforeEach(async () => {
     resetDocument();
-    calls = [];
-    adapter = makeCaptureAdapter((c) => calls.push(c));
+    adapter = makeContentAdapter(() => undefined);
     adapter.setWindows([window]);
     adapter.setTabs([tabA, tabB, tabDiff]);
     worker = new WorkerOrchestrator(adapter);
@@ -277,23 +263,24 @@ describe('Regex rule (wildcard-converted) matches and delivers to real DOM', () 
 
     const result = await worker.ruleService.createRule({
       urlMatch: { type: 'regex', value: storedRegex },
-      mode: 'auto',
       priority: 5,
       title: 'Regex Delivered',
     }, 0);
     expect(result.success).toBe(true);
 
-    const executedTabs = adapter.calls
-      .filter((c) => c.method === 'scripting.executeScript')
-      .map((c) => (c.args[0] as { target: { tabId: number } }).target.tabId);
+    const deliveredTabs = adapter.calls
+      .filter((c) => c.method === 'tabs.sendMessage')
+      .map((c) => c.args[0] as number);
 
-    expect(executedTabs).toContain(10);
-    expect(executedTabs).toContain(11);
-    expect(executedTabs).not.toContain(12);
+    expect(deliveredTabs).toContain(10);
+    expect(deliveredTabs).toContain(11);
+    expect(deliveredTabs).not.toContain(12);
 
-    // The injected function must genuinely set the title in a real DOM.
-    const c = calls[0];
-    c.func(c.args[0]);
+    // The delivered directive genuinely sets the title in a real DOM.
+    const first = adapter.calls.find((c) => c.method === 'tabs.sendMessage')!;
+    const mod = await import('@content/index');
+    mod.resetCapturedSite();
+    mod.applyFieldMessage(first.args[1] as FieldApplyMessage);
     expect(document.title).toBe('Regex Delivered');
   });
 });
@@ -319,7 +306,6 @@ describe('computeFields resolves offloaded local-icon favicon to a real data URI
 
     const result = await service.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      mode: 'auto',
       priority: 5,
       favicon: { type: 'upload', value: bigDataUri },
     }, 0);

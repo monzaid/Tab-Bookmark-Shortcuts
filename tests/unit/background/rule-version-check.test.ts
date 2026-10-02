@@ -28,7 +28,6 @@ describe('Module 2: updateRule version check (updatedAt)', () => {
   it('should update successfully when expectedUpdatedAt matches', async () => {
     const created = await service.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/v' },
-      mode: 'auto',
       priority: 0,
       title: 'Original',
     });
@@ -51,7 +50,6 @@ describe('Module 2: updateRule version check (updatedAt)', () => {
   it('should return VERSION_CONFLICT when expectedUpdatedAt is stale', async () => {
     const created = await service.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/v2' },
-      mode: 'auto',
       priority: 0,
       title: 'Original',
     });
@@ -77,7 +75,6 @@ describe('Module 2: updateRule version check (updatedAt)', () => {
   it('should still allow update without expectedUpdatedAt (backwards compatible)', async () => {
     const created = await service.createRule({
       urlMatch: { type: 'exact', value: 'https://example.com/v3' },
-      mode: 'auto',
       priority: 0,
     });
     expect(created.success).toBe(true);
@@ -96,7 +93,6 @@ describe('Module 2: updateRule version check (updatedAt)', () => {
       action: 'CREATE_RULE',
       payload: {
         urlMatch: { type: 'exact', value: 'https://example.com/worker-version' },
-        mode: 'auto',
         priority: 0,
       },
     }, {});

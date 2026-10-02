@@ -78,7 +78,6 @@ describe('T24: Integration suite — cross-module compatibility', () => {
       // Create auto rule
       const createResult = await route('CREATE_RULE', {
         urlMatch: { type: 'regex', value: 'https://github\\.com/.*' },
-        mode: 'auto',
         priority: 10,
         title: 'Custom GitHub',
       }, 0) as Record<string, unknown>;
@@ -91,15 +90,18 @@ describe('T24: Integration suite — cross-module compatibility', () => {
       ) as Record<string, unknown>;
       expect(navResult.success).toBe(true);
 
-      // Verify rewrite was delivered via scripting.executeScript
-      const execCalls = adapter.calls.filter((c) => c.method === 'scripting.executeScript');
-      expect(execCalls.length).toBeGreaterThan(0);
+      // C2/T8: delivery goes out as FIELD_APPLY on the content-script channel.
+      const applyMsgs = adapter.calls
+        .filter((c) => c.method === 'tabs.sendMessage' && c.args[0] === 10)
+        .map((c) => c.args[1] as { type?: string; title?: { kind: string; value?: string } })
+        .filter((m) => m?.type === 'FIELD_APPLY');
+      expect(applyMsgs.length).toBeGreaterThan(0);
+      expect(applyMsgs.some((m) => m.title?.kind === 'set' && m.title.value === 'Custom GitHub')).toBe(true);
     });
 
     it('should reject rule for protected URL', async () => {
       const result = await route('CREATE_RULE', {
         urlMatch: { type: 'exact', value: 'chrome://settings' },
-        mode: 'auto',
         priority: 0,
       }, 0) as Record<string, unknown>;
       expect(result.success).toBe(false);

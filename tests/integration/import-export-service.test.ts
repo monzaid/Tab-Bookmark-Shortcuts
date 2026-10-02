@@ -43,7 +43,6 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           {
             id: 'evil',
             urlMatch: { type: 'regex', value: '^(a+){10}$' },
-            mode: 'auto',
             priority: 0,
             createdAt: '2026-01-01T00:00:00Z',
             updatedAt: '2026-01-01T00:00:00Z',
@@ -92,7 +91,6 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           {
             id: 'safe',
             urlMatch: { type: 'regex', value: '^https://example\\.com/.*$' },
-            mode: 'auto',
             priority: 0,
             createdAt: '2026-01-01T00:00:00Z',
             updatedAt: '2026-01-01T00:00:00Z',
@@ -179,7 +177,7 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           makeSlot(1, 'https://imported.com'),
           makeSlot(2, 'https://new-slot.com'),
         ],
-        rules: [{ id: 'r1', urlMatch: { type: 'exact', value: 'https://rule.com' }, mode: 'auto', priority: 5, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }],
+        rules: [{ id: 'r1', urlMatch: { type: 'exact', value: 'https://rule.com' }, priority: 5, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }],
         matchSettings: SETTINGS_C,
         switchDirection: 'next',
         autoBindGlobal: true,
@@ -313,7 +311,6 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           {
             id: 'evil-rule',
             urlMatch: { type: 'regex', value: '(a+)+$' },
-            mode: 'auto',
             priority: 0,
             createdAt: '2026-01-01T00:00:00Z',
             updatedAt: '2026-01-01T00:00:00Z',
@@ -367,7 +364,6 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           {
             id: 'safe-rule',
             urlMatch: { type: 'regex', value: '^https://example\\.com/.*$' },
-            mode: 'auto',
             priority: 0,
             createdAt: '2026-01-01T00:00:00Z',
             updatedAt: '2026-01-01T00:00:00Z',
@@ -395,7 +391,6 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
           {
             id: 'broad-rule',
             urlMatch: { type: 'regex', value: '.*' },
-            mode: 'auto',
             priority: 0,
             createdAt: '2026-01-01T00:00:00Z',
             updatedAt: '2026-01-01T00:00:00Z',

@@ -23,6 +23,7 @@ import type {
   TabOverride,
   DiagnosticEntry,
   DomainErrorCode,
+  SiteSnapshotEntry,
 } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 import { urlsMatch } from '@shared/url-utils';
@@ -289,7 +290,7 @@ export class StorageRepository {
       }
     });
     // Queue stays alive regardless of this operation's outcome
-    this.syncWriteQueue = operation.catch(() => ({ success: false, errorCode: 'INTERNAL_ERROR', message: 'write failed' } as WriteResult));
+    this.syncWriteQueue = operation.catch(() => ({ success: false, errorCode: 'INTERNAL_ERROR', message: 'write failed' }));
     return operation;
   }
 
@@ -761,6 +762,32 @@ export class StorageRepository {
     }));
   }
 
+  // ─── Site Snapshot (A7 — strictly local, never exported) ────────────────
+
+  /**
+   * Persist the site's captured original value for a tab. Strictly sealed to
+   * `local`: this data never enters `sync`, export, import or diagnostics.
+   */
+  async setSiteSnapshot(entry: SiteSnapshotEntry): Promise<void> {
+    await this.writeLocal((state) => {
+      const existing = state.siteSnapshot ?? [];
+      const idx = existing.findIndex((s) => s.tabId === entry.tabId);
+      const siteSnapshot =
+        idx >= 0
+          ? existing.map((s, i) => (i === idx ? entry : s))
+          : [...existing, entry];
+      return { ...state, siteSnapshot };
+    });
+  }
+
+  /** Drop a tab's captured original value (chain no longer rewrites / tab closed). */
+  async removeSiteSnapshot(tabId: number): Promise<void> {
+    await this.writeLocal((state) => ({
+      ...state,
+      siteSnapshot: (state.siteSnapshot ?? []).filter((s) => s.tabId !== tabId),
+    }));
+  }
+
   async setIconCache(cacheKey: string, dataUri: string): Promise<void> {
     await this.writeLocal((state) => ({
       ...state,
@@ -900,11 +927,20 @@ export class StorageRepository {
       liveTabIds.has(override.tabId)
     );
 
-    if (removedBindings > 0 || removedSessions > 0 || validOverrides.length !== local.tabOverrides.length) {
+    // A7: a site snapshot for a tab that no longer exists is stale by definition.
+    const validSnapshots = (local.siteSnapshot ?? []).filter((s) => liveTabIds.has(s.tabId));
+
+    if (
+      removedBindings > 0 ||
+      removedSessions > 0 ||
+      validOverrides.length !== local.tabOverrides.length ||
+      validSnapshots.length !== (local.siteSnapshot ?? []).length
+    ) {
       await this.writeLocal((state) => {
         state.bindings = validBindings;
         state.recoverySessions = validSessions;
         state.tabOverrides = validOverrides;
+        state.siteSnapshot = validSnapshots;
         return state;
       });
     }
@@ -914,9 +950,13 @@ export class StorageRepository {
 
   /**
    * Atomic cleanup for tabs.onRemoved event.
+   *
+   * The site snapshot is dropped here too (A7): a closed tab's captured value
+   * must never survive, or a reused tabId would restore an unrelated page.
    */
   async cleanupForRemovedTab(tabId: number): Promise<void> {
     await this.removeBindingByTabId(tabId);
+    await this.removeSiteSnapshot(tabId);
   }
 
   // ─── External Change Detection ───────────────────────────────────────────

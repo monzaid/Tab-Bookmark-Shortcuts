@@ -3,6 +3,10 @@
  * Covers: slots, strategies, rules, icons, overrides, recovery, diagnostics, import.
  */
 
+// Type-only import (erased at runtime — no module cycle with `field-chain.ts`,
+// which imports these same models back from here).
+import type { ChainResult, TierOwner } from './field-chain';
+
 // ─── Matching Strategy (tri-knob model) ──────────────────────────────────────
 //
 // The legacy single-letter strategy type and its default constant were removed
@@ -63,8 +67,10 @@ export interface IconSource {
 // ─── UI Marker (slot display customization) ──────────────────────────────────
 
 export interface SlotUiMarker {
-  customTitle?: string;
-  icon?: IconSource;
+  /** `null` = explicitly cleared (DT11: writes unify on null, never `''`). */
+  customTitle?: string | null;
+  /** `null` = explicitly cleared (DT11 unified write shape). */
+  icon?: IconSource | null;
   backgroundColor?: string;
 }
 
@@ -96,12 +102,9 @@ export interface SlotBinding {
 
 // ─── Page Rewrite Rule (sync) ────────────────────────────────────────────────
 
-export type RuleMode = 'auto' | 'manual';
-
 export interface PageRule {
   id: string;
   urlMatch: UrlMatchDefinition;
-  mode: RuleMode;
   /** -100 to 100, default 0. Higher wins. */
   priority: number;
   title?: string;
@@ -121,18 +124,30 @@ export interface TabOverride {
   createdAt: string; // ISO 8601
 }
 
-// ─── Data Dashboard Item ─────────────────────────────────────────────────────
+// ─── Data Dashboard Row (A10) ────────────────────────────────────────────────
 
-/** A single row in the settings Data Dashboard (a current-page or slot source). */
-export interface DashboardItem {
+/**
+ * A single row in the settings Data Dashboard.
+ *
+ * `kind` mirrors the three managed sets: an explicit tab override, a slot whose
+ * title/icon was explicitly set, and a page whose value comes from a rule hit.
+ *
+ * `chain` carries the FULL A1 `ChainResult` for both fields (computed once in the
+ * background, so the UI never assembles a second copy of the chain), and
+ * `delivery` reports whether the background could actually apply the value.
+ */
+export interface DashboardRow {
   id: string;
-  kind: 'current-page' | 'slot';
+  kind: 'override' | 'slot' | 'rule-hit';
   label: string;
-  title: string | null;
-  icon: string | null;
   url: string | null;
+  /** Jump-to-row address (null when there is nothing to jump to). */
+  anchor: TierOwner | null;
   tabId?: number;
   slotId?: number;
+  ruleId?: string;
+  chain: { title: ChainResult; favicon: ChainResult };
+  delivery: 'ok' | 'degraded' | 'protected' | 'unknown';
 }
 
 // ─── Recovery Session (local) ────────────────────────────────────────────────
@@ -237,6 +252,23 @@ export interface SyncState {
   rules: PageRule[];
 }
 
+// ─── Site Snapshot (local, strictly sealed — A7/C6) ──────────────────────────
+
+/**
+ * The ORIGINAL page value captured before the first rewrite, so the `restore`
+ * directive can put it back (Q19/Q20/Q28).
+ *
+ * Strictly sealed to `local`: it never enters `sync`, export, import or
+ * diagnostics. Only `{ title, faviconHref }` is stored — never the URL or any
+ * page content.
+ */
+export interface SiteSnapshotEntry {
+  tabId: number;
+  title: string | null;
+  faviconHref: string | null;
+  capturedAt: string; // ISO 8601
+}
+
 // ─── Local Root State ────────────────────────────────────────────────────────
 
 export interface LocalState {
@@ -248,6 +280,8 @@ export interface LocalState {
   tabOverrides: TabOverride[];
   iconCache: Record<string, string>; // url -> data URI
   diagnostics: DiagnosticEntry[];
+  /** Optional for backwards compatibility with pre-A7 local data. */
+  siteSnapshot?: SiteSnapshotEntry[];
 }
 
 // ─── Domain Error Codes ──────────────────────────────────────────────────────

@@ -604,3 +604,21 @@
     width: 100%;
   }
 }
+
+/* ─── Jump-to-row highlight (F2-a: tokens only, no hard-coded colours) ────── */
+
+.tbs-settings__row--jump {
+  background: var(--color-info-bg);
+  outline: 2px solid var(--color-info);
+  outline-offset: -2px;
+  transition: background var(--duration-normal) var(--easing),
+    outline-color var(--duration-normal) var(--easing);
+}
+
+/* F2-b: the reduced-motion guard removes the TRANSITION only — the highlight
+   itself must remain, otherwise a jump would produce no feedback at all. */
+@media (prefers-reduced-motion: reduce) {
+  .tbs-settings__row--jump {
+    transition: none;
+  }
+}

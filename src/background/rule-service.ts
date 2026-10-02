@@ -1,27 +1,24 @@
 /**
- * Rule Service — page rewrite rules, field-level override computation, manual apply.
+ * Rule Service — page rewrite rules and field-level chain computation.
  *
- * - Auto/manual rule matching with priority/createdAt selection
- * - Field-level computation chain: tabId temp override → rule → original site
+ * - Rule matching with priority/createdAt selection (via the shared chain)
+ * - Field-level computation delegated to `@shared/field-chain` (single source)
  * - Protected URL rejection for rules
- * - Immediate apply on save for current tab
- * - Cross-window manual candidate query
+ * - Immediate re-delivery on save for matching tabs
  * - Does NOT save/restore DOM snapshots
  * - Does NOT continuously monitor page titles
  */
 
 import type { BrowserAdapter } from '@adapters/contract';
 import type { StorageRepository } from './storage-repository';
-import { applyFieldsToTab } from './apply-fields';
 import type {
   PageRule,
-  RuleMode,
   UrlMatchDefinition,
   IconSource,
-  TabCandidate,
   LocalState,
   SyncState,
 } from '@shared/types';
+import { resolveFieldChain } from '@shared/field-chain';
 import {
   matchesUrl,
   detectRuleConflict,
@@ -31,9 +28,6 @@ import {
   urlsMatch,
 } from '@shared/url-utils';
 import type { ConflictResult } from '@shared/url-utils';
-
-/** B12: max concurrent `applyFieldsToTab` deliveries per shard. */
-const REAPPLY_SHARD_SIZE = 8;
 
 // ─── Field Computation Result ────────────────────────────────────────────────
 
@@ -69,7 +63,6 @@ export class RuleService {
   async createRule(
     params: {
       urlMatch: UrlMatchDefinition;
-      mode: RuleMode;
       priority: number;
       title?: string;
       favicon?: IconSource;
@@ -148,7 +141,6 @@ export class RuleService {
     const rule: PageRule = {
       id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       urlMatch: params.urlMatch,
-      mode: params.mode,
       priority,
       title: params.title,
       favicon: params.favicon,
@@ -170,10 +162,8 @@ export class RuleService {
       };
     }
 
-    // If auto rule, apply to current matching tab immediately
-    if (rule.mode === 'auto') {
-      await this.applyToMatchingTabs(rule);
-    }
+    // Q11: every rule participates in the chain — apply to matching tabs now.
+    await this.applyToMatchingTabs(rule);
 
     return { success: true, rule };
   }
@@ -188,7 +178,7 @@ export class RuleService {
    */
   async updateRule(
     ruleId: string,
-    updates: Partial<Pick<PageRule, 'urlMatch' | 'mode' | 'priority' | 'title' | 'favicon' | 'enabled'>>,
+    updates: Partial<Pick<PageRule, 'urlMatch' | 'priority' | 'title' | 'favicon' | 'enabled'>>,
     expectedUpdatedAt?: string,
   ): Promise<
     { success: true; rule: PageRule } |
@@ -279,7 +269,7 @@ export class RuleService {
     }
 
     // Re-apply to all matching tabs immediately
-    await this.reapplyToMatchingTabs(updated);
+    await this.applyToMatchingTabs(updated);
 
     return { success: true, rule: updated };
   }
@@ -302,12 +292,12 @@ export class RuleService {
       return { success: false, errorCode: 'RULE_NOT_FOUND', message: `Rule ${ruleId} not found` };
     }
 
-    // Re-apply to all tabs that matched the deleted rule's URL pattern so the
-    // removed rule's icon/title is undone (falls back to original/slot/other rules).
-    // Uses a variant that CLEARS the previously-applied rewrite on tabs whose
-    // computed fields now fall back to the site's original value (nothing to set).
+    // Re-trigger all tabs that matched the deleted rule's URL pattern so the
+    // removed rule's icon/title is undone (falls back to original/slot/other
+    // rules). The clear is implicit now: the chain no longer yields the rule's
+    // value, so the delivery layer emits `set` to the next tier or `restore`.
     if (target) {
-      await this.reapplyToMatchingTabs(target, true);
+      await this.applyToMatchingTabs(target);
     }
 
     return { success: true };
@@ -348,186 +338,33 @@ export class RuleService {
     tabId: number,
     tabUrl: string,
   ): FieldComputation {
-    // Slot tier: applies ONLY to the slot's bound tabId.
-    const slotField = this.resolveSlotField(tabId, local.bindings, sync.slots);
+    // The priority chain is delegated to the single shared implementation so
+    // this service can never disagree with the three views (SC1 / A1). The
+    // `site` tier of the chain result is intentionally not consulted here: the
+    // delivery layer decides `set` / `restore` from the site snapshot it holds.
+    const title = resolveFieldChain('title', { sync, local, tabId, tabUrl });
+    const favicon = resolveFieldChain('favicon', { sync, local, tabId, tabUrl });
 
-    // Current page tier (highest): tab's own temporary override.
-    const override = local.tabOverrides.find((o) => o.tabId === tabId);
-
-    // Find matching auto rules (only enabled ones)
-    const matchingRules = sync.rules
-      .filter((r) => r.mode === 'auto' && r.enabled !== false && matchesUrl(tabUrl, r.urlMatch))
-      .sort((a, b) => {
-        if (b.priority !== a.priority) return b.priority - a.priority;
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-      });
-
-    const winningRule = matchingRules.length > 0 ? matchingRules[0] : null;
-
-    // Compute title — current page (override) tier wins, then slot, then rule.
-    let title: string | null = null;
-    let titleSource: FieldComputation['titleSource'] = 'site';
-
-    if (override?.title) {
-      title = override.title;
-      titleSource = 'override';
-    } else if (slotField?.title) {
-      title = slotField.title;
-      titleSource = 'slot';
-    } else if (winningRule?.title) {
-      title = winningRule.title;
-      titleSource = 'rule';
-    }
-
-    // Compute favicon — current page (override) tier wins, then slot, then rule.
-    let favicon: string | null = null;
-    let faviconSource: FieldComputation['faviconSource'] = 'site';
-
-    // T33 (B9-8): EVERY tier must clear the protocol allowlist, not just the
-    // slot tier. A rule or a tab override can carry `javascript:` / `file:` /
-    // `data:text/html`, and this value ends up in `link.href` in the page. An
-    // unsafe value is skipped and the chain keeps falling through, exactly like
-    // the slot tier above.
-    const overrideFavicon = override?.favicon?.value;
-    const ruleFavicon = winningRule?.favicon?.value;
-
-    if (overrideFavicon && isSafeFaviconProtocol(overrideFavicon)) {
-      favicon = overrideFavicon;
-      faviconSource = 'override';
-    } else if (slotField?.favicon) {
-      favicon = slotField.favicon;
-      faviconSource = 'slot';
-    } else if (ruleFavicon && isSafeFaviconProtocol(ruleFavicon)) {
-      favicon = ruleFavicon;
-      faviconSource = 'rule';
-    }
-
-    return { title, favicon, titleSource, faviconSource };
+    return {
+      title: title.winner.value,
+      favicon: favicon.winner.value,
+      titleSource: title.winner.source,
+      faviconSource: favicon.winner.source,
+    };
   }
 
-  /**
-   * Resolve the slot field for a specific tabId.
-   *
-   * Returns a field value ONLY when a SlotBinding's `tabId` matches the given tabId.
-   * The slot's title comes from `titleSnapshot`; the favicon's rewrite value is taken
-   * from `faviconSnapshot` when present, falling back to `uiMarker.icon.value` when it
-   * is a usable value. This tier is strictly tabId-scoped — it never bleeds onto other
-   * tabs that merely match the same URL.
-   */
-  private resolveSlotField(
-    tabId: number,
-    bindings: import('@shared/types').SlotBinding[],
-    slots: import('@shared/types').SlotDefinition[],
-  ): { title: string | null; favicon: string | null } | null {
-    const binding = bindings.find((b) => b.tabId === tabId);
-    if (!binding) return null;
-
-    const slot = slots.find((s) => s.id === binding.slotId);
-    if (!slot) return null;
-
-    // User-modified uiMarker wins over the stale snapshot (current page > snapshot).
-    const title = slot.uiMarker.customTitle?.trim() || slot.titleSnapshot.trim() || null;
-
-    // B9: the favicon value flows straight into `link.href` in the page, so it
-    // must pass the protocol allowlist. A rejected value is treated as "no
-    // favicon" (null) and the chain keeps falling through — it is never
-    // silently downgraded to a different value.
-    let favicon: string | null = null;
-    const iconValue = slot.uiMarker.icon?.value.trim();
-    if (iconValue && isSafeFaviconProtocol(iconValue)) {
-      favicon = iconValue;
-    } else {
-      const snapshot = slot.faviconSnapshot.trim();
-      if (snapshot && isSafeFaviconProtocol(snapshot)) {
-        favicon = snapshot;
-      }
-    }
-
-    if (!title && !favicon) return null;
-    return { title, favicon };
-  }
-
-  // ─── Manual Apply ──────────────────────────────────────────────────────
+  // ─── Delivery hook (A2 single entry) ───────────────────────────────────
 
   /**
-   * Apply a rule to a specific tab (manual mode).
+   * The delivery entry point, injected by the worker (A2: the coordinator is
+   * constructed with the services, not the other way round). Every write that
+   * can change a field routes here AFTER storage has been updated, so
+   * "changed but not applied" cannot happen per-writer.
    */
-  async applyToTab(ruleId: string, tabId: number): Promise<
-    { success: true } | { success: false; errorCode: string; message: string }
-  > {
-    const sync = await this.repo.getSyncState();
-    const rule = sync.rules.find((r) => r.id === ruleId);
-    if (!rule) {
-      return { success: false, errorCode: 'RULE_NOT_FOUND', message: `Rule ${ruleId} not found` };
-    }
+  private deliver: (tabIds: number[]) => Promise<unknown> = async () => undefined;
 
-    // Verify tab exists and URL matches
-    try {
-      const tab = await this.adapter.tabs.get(tabId);
-
-      // Check protected URL
-      if (isProtectedUrl(tab.url)) {
-        return { success: false, errorCode: 'PROTECTED_PAGE', message: 'Cannot apply rules to protected pages' };
-      }
-
-      if (!matchesUrl(tab.url, rule.urlMatch)) {
-        return { success: false, errorCode: 'NO_MATCH', message: 'Tab URL does not match rule pattern' };
-      }
-
-      // Apply title/favicon via robust delivery (executeScript primary + sendMessage fallback)
-      await applyFieldsToTab(this.adapter, tabId, {
-        title: rule.title,
-        favicon: rule.favicon?.value,
-      });
-
-      return { success: true };
-    } catch (e) {
-      return { success: false, errorCode: 'TAB_NOT_FOUND', message: `Tab ${tabId} not found` };
-    }
-  }
-
-  /**
-   * Get cross-window candidates for manual rule application.
-   */
-  async getManualCandidates(ruleId: string): Promise<
-    { success: true; candidates: TabCandidate[] } | { success: false; errorCode: string; message: string }
-  > {
-    const sync = await this.repo.getSyncState();
-    const rule = sync.rules.find((r) => r.id === ruleId);
-    if (!rule) {
-      return { success: false, errorCode: 'RULE_NOT_FOUND', message: `Rule ${ruleId} not found` };
-    }
-
-    const incognitoAllowed = await this.adapter.incognito.isAllowed();
-    const allTabs = await this.adapter.tabs.query({});
-    const currentWindow = await this.adapter.windows.getCurrent();
-
-    const candidates: TabCandidate[] = allTabs
-      .filter((tab) => {
-        if (tab.incognito && !incognitoAllowed) return false;
-        if (isProtectedUrl(tab.url)) return false;
-        return matchesUrl(tab.url, rule.urlMatch);
-      })
-      .map((tab) => ({
-        tabId: tab.id,
-        windowId: tab.windowId,
-        index: tab.index,
-        url: tab.url,
-        title: tab.title,
-        favIconUrl: tab.favIconUrl,
-        isCurrentWindow: tab.windowId === currentWindow.id,
-        isIncognito: tab.incognito,
-      }));
-
-    // Sort: current window first, then by index
-    candidates.sort((a, b) => {
-      if (a.isCurrentWindow && !b.isCurrentWindow) return -1;
-      if (!a.isCurrentWindow && b.isCurrentWindow) return 1;
-      if (a.windowId === b.windowId) return a.index - b.index;
-      return a.windowId - b.windowId;
-    });
-
-    return { success: true, candidates };
+  setDelivery(fn: (tabIds: number[]) => Promise<unknown>): void {
+    this.deliver = fn;
   }
 
   // ─── Tab Override ──────────────────────────────────────────────────────
@@ -536,8 +373,8 @@ export class RuleService {
    * Set a temporary tabId override (field-level partial MERGE).
    * Only updates provided fields — does NOT wipe unprovided fields.
    *
-   * Problem 5 fix: storage write success = operation success.
-   * APPLY_REWRITE send failure is non-fatal (logged, retried once after 100ms).
+   * Storage write is the critical operation; the redelivery that follows is the
+   * same single entry used by every other write path.
    */
   async setTabOverride(tabId: number, title?: string | null, favicon?: IconSource | null): Promise<void> {
     // Merge with existing override — only update provided fields. A `null` value
@@ -553,26 +390,19 @@ export class RuleService {
       createdAt: existing?.createdAt ?? new Date().toISOString(),
     };
 
-    // Storage write is the critical operation — if this succeeds, the operation succeeds
     await this.repo.setTabOverride(merged);
 
-    // Apply immediately to the tab with the FULL merged state (force bypasses once-per-URL guard)
-    // Failure here is NON-FATAL — the override is already persisted and will be applied
-    // on next CONTENT_READY or navigation event.
-    // When favicon was cleared, push an explicit clear so the tab DOM reverts.
-    await applyFieldsToTab(this.adapter, tabId, {
-      title: merged.title,
-      favicon: favicon === null ? null : merged.favicon?.value,
-      force: true,
-    });
+    // A3: an override affects exactly this tabId.
+    await this.deliver([tabId]);
   }
 
   /**
-   * Remove a temporary tabId override.
-   * Does NOT restore DOM — site recovers on refresh/navigation.
+   * Remove a temporary tabId override and redeliver so the cleared field falls
+   * back to the next tier (spy #6: removal previously did NOT redeliver).
    */
   async removeTabOverride(tabId: number): Promise<void> {
     await this.repo.removeTabOverride(tabId);
+    await this.deliver([tabId]);
   }
 
   // ─── Conflict Check (for UI) ───────────────────────────────────────────
@@ -587,56 +417,14 @@ export class RuleService {
 
   // ─── Private ───────────────────────────────────────────────────────────
 
-  /**
-   * Apply an auto rule to all currently matching tabs.
-   * Computes the full field chain (tabId override → rule → site) via computeFields
-   * so priority/override resolution stays correct, and pushes with force:true so the
-   * content script bypasses the once-per-URL guard.
-   */
+  /** A rule write affects every tab it matches (A3: multi-hit dimension). */
   private async applyToMatchingTabs(rule: PageRule): Promise<void> {
-    await this.reapplyToMatchingTabs(rule);
-  }
-
-  /**
-   * Re-apply computed fields to all tabs matching a rule's URL pattern.
-   * Used after rule update/enable/disable so tabs reflect changes immediately.
-   * Computes the full field chain (override → rule → site) for each matching tab.
-   *
-   * When `clearOnEmpty` is true (used on rule delete), tabs whose computed fields
-   * now fall back to the site's original value receive an explicit CLEAR (null
-   * title/favicon) so the previously-applied rewrite is undone in the page DOM.
-   */
-  private async reapplyToMatchingTabs(rule: PageRule, clearOnEmpty = false): Promise<void> {
     const allTabs = await this.adapter.tabs.query({});
-
-    // B7b: read the state ONCE for the whole batch instead of once per tab.
-    const local = await this.repo.getLocalState();
-    const sync = await this.repo.getSyncState();
-
-    const targets = allTabs.filter(
-      (tab) => !isProtectedUrl(tab.url) && matchesUrl(tab.url, rule.urlMatch)
-    );
-
-    // B12: deliver in bounded shards. A plain `Promise.all` over every tab would
-    // fire unbounded `scripting.executeScript` calls at once; staying serial
-    // would keep the N+1 latency. Shards of 8 keep both bounded.
-    for (let i = 0; i < targets.length; i += REAPPLY_SHARD_SIZE) {
-      const shard = targets.slice(i, i + REAPPLY_SHARD_SIZE);
-      await Promise.all(
-        shard.map(async (tab) => {
-          // Compute the full field chain for this tab (considers override + all rules)
-          const computed = this.computeFieldsFrom(local, sync, tab.id, tab.url);
-
-          // On delete, if there is nothing computed to set, send an explicit CLEAR so
-          // the removed rule's rewrite is undone (title/favicon revert to the site).
-          const clear = clearOnEmpty && !computed.title && !computed.favicon;
-          await applyFieldsToTab(this.adapter, tab.id, {
-            title: clear ? null : (computed.title ?? undefined),
-            favicon: clear ? null : (computed.favicon ?? undefined),
-            force: true,
-          });
-        })
-      );
-    }
+    // A8: protection is NOT decided here — the delivery entry owns that single
+    // decision. This only computes the URL-match affected set.
+    const tabIds = allTabs
+      .filter((tab) => matchesUrl(tab.url, rule.urlMatch))
+      .map((tab) => tab.id);
+    await this.deliver(tabIds);
   }
 }

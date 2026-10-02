@@ -165,11 +165,28 @@ body {
   padding: var(--space-xl);
 }
 
+/*
+ * IMP-2: `.tbs-dialog` is itself the scroll container (max-height + overflow),
+ * so once a form grows the header and the Save/Cancel footer scroll out of view.
+ * Both are pinned with `position: sticky` and an OPAQUE background (a
+ * transparent one would let the body show through as it scrolls underneath).
+ * The negative margins cancel the container's own padding so the sticky band
+ * spans the full width without a seam at the edges.
+ */
 .tbs-dialog__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: var(--space-lg);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-bg);
+  margin-inline: calc(-1 * var(--space-xl));
+  padding-inline: var(--space-xl);
+  padding-top: var(--space-xl);
+  padding-bottom: var(--space-md);
+  margin-top: calc(-1 * var(--space-xl));
 }
 
 .tbs-dialog__title {
@@ -181,7 +198,15 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-sm);
-  margin-top: var(--space-xl);
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--color-bg);
+  margin-inline: calc(-1 * var(--space-xl));
+  padding-inline: var(--space-xl);
+  padding-bottom: var(--space-xl);
+  padding-top: var(--space-md);
+  margin-bottom: calc(-1 * var(--space-xl));
 }
 
 /* ─── Toast ───────────────────────────────────────────────────────────────── */

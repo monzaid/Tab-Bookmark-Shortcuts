@@ -13,7 +13,9 @@ import { PROTECTED_URL_PREFIXES } from './protected-prefixes.generated';
  * - Ignore hash/fragment
  * - Lowercase hostname
  * - Remove default ports (80 for http, 443 for https)
- * - Path and query remain strict (case-sensitive)
+ * - Treat a single trailing slash on a NON-root path as equivalent to no
+ *   trailing slash (`/page/` === `/page`), excluding the root path `'/'`
+ * - Path and query otherwise remain strict (case-sensitive, query order kept)
  */
 export function normalizeUrl(raw: string): string {
   try {
@@ -21,7 +23,7 @@ export function normalizeUrl(raw: string): string {
 
     // Lowercase protocol and host
     const protocol = url.protocol.toLowerCase();
-    let host = url.hostname.toLowerCase();
+    const host = url.hostname.toLowerCase();
 
     // Remove default ports
     const port = url.port;
@@ -32,8 +34,14 @@ export function normalizeUrl(raw: string): string {
       url.port = '';
     }
 
-    // Reconstruct without hash
-    const path = url.pathname;
+    // E5-a: one trailing slash on a non-root path is dropped (never the root
+    // `'/'`, which would leave an empty pathname). Only ONE slash is removed —
+    // `/page//` collapses to `/page/`, not `/page`.
+    let path = url.pathname;
+    if (path.length > 1 && path.endsWith('/')) {
+      path = path.slice(0, -1);
+    }
+
     const query = url.search; // includes '?' if present
     const portStr = url.port ? `:${url.port}` : '';
 

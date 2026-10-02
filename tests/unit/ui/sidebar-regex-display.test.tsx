@@ -19,7 +19,6 @@ function makeState(ruleValue: string, ruleTitle: string) {
           {
             id: 'r1',
             urlMatch: { type: 'regex', value: ruleValue },
-            mode: 'auto',
             priority: 5,
             title: ruleTitle,
             createdAt: '2026-01-01T00:00:00Z',
@@ -94,12 +93,17 @@ describe('Sidebar regex display uses shared matchesUrl', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add to global rules' }));
 
-    const urlInput = await screen.findByLabelText('Match URL');
+    // T19 anchor migration: the modal now renders the shared RuleFormFields.
+    const urlInput = await screen.findByRole('textbox', { name: /Match URL/ });
     fireEvent.change(urlInput, { target: { value: '*.example.com/*' } });
-    fireEvent.click(screen.getByRole('radio', { name: 'Regex' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Regex pattern' }));
 
-    const hint = await screen.findByRole('status');
-    expect(hint.textContent).toContain('Auto-converted to regex');
+    const hint = await waitFor(() => {
+      const el = document.getElementById('modal-rule-url-hint');
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(hint.textContent).toContain('Will be saved as:');
     expect(/[\u4e00-\u9fff]/.test(hint.textContent)).toBe(false);
   });
 

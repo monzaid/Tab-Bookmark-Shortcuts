@@ -271,9 +271,9 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
   describe('Rule priority sorting', () => {
     it('should sort by priority descending, then createdAt descending', () => {
       const rules: PageRule[] = [
-        { id: 'r1', urlMatch: { type: 'exact', value: 'https://a.com' }, mode: 'auto', priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-        { id: 'r2', urlMatch: { type: 'exact', value: 'https://b.com' }, mode: 'auto', priority: 10, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-        { id: 'r3', urlMatch: { type: 'exact', value: 'https://c.com' }, mode: 'auto', priority: 10, createdAt: '2026-06-01T00:00:00Z', updatedAt: '2026-06-01T00:00:00Z' },
+        { id: 'r1', urlMatch: { type: 'exact', value: 'https://a.com' }, priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r2', urlMatch: { type: 'exact', value: 'https://b.com' }, priority: 10, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r3', urlMatch: { type: 'exact', value: 'https://c.com' }, priority: 10, createdAt: '2026-06-01T00:00:00Z', updatedAt: '2026-06-01T00:00:00Z' },
       ];
 
       const sorted = sortRulesByPriority(rules);
@@ -287,8 +287,8 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
 
     it('should select winning rule', () => {
       const rules: PageRule[] = [
-        { id: 'r1', urlMatch: { type: 'exact', value: 'https://a.com' }, mode: 'auto', priority: 5, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-        { id: 'r2', urlMatch: { type: 'exact', value: 'https://a.com' }, mode: 'auto', priority: 10, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r1', urlMatch: { type: 'exact', value: 'https://a.com' }, priority: 5, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r2', urlMatch: { type: 'exact', value: 'https://a.com' }, priority: 10, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
       ];
       const winner = selectWinningRule(rules);
       expect(winner?.id).toBe('r2');
@@ -302,7 +302,7 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
   describe('Rule conflict detection — Edge cases', () => {
     it('should block identical exact URLs', () => {
       const existing: PageRule[] = [
-        { id: 'r1', urlMatch: { type: 'exact', value: 'https://example.com/page' }, mode: 'auto', priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r1', urlMatch: { type: 'exact', value: 'https://example.com/page' }, priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
       ];
       const newMatch: UrlMatchDefinition = { type: 'exact', value: 'HTTPS://EXAMPLE.COM/page#hash' };
       const result = detectRuleConflict(newMatch, existing);
@@ -312,7 +312,7 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
 
     it('should block identical regex patterns', () => {
       const existing: PageRule[] = [
-        { id: 'r1', urlMatch: { type: 'regex', value: 'https://github\\.com/.*' }, mode: 'auto', priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r1', urlMatch: { type: 'regex', value: 'https://github\\.com/.*' }, priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
       ];
       const newMatch: UrlMatchDefinition = { type: 'regex', value: 'https://github\\.com/.*' };
       const result = detectRuleConflict(newMatch, existing);
@@ -321,7 +321,7 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
 
     it('should warn on uncertain regex overlap', () => {
       const existing: PageRule[] = [
-        { id: 'r1', urlMatch: { type: 'regex', value: 'https://.*\\.com/.*' }, mode: 'auto', priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r1', urlMatch: { type: 'regex', value: 'https://.*\\.com/.*' }, priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
       ];
       const newMatch: UrlMatchDefinition = { type: 'regex', value: 'https://example\\.com/.*' };
       const result = detectRuleConflict(newMatch, existing);
@@ -330,7 +330,7 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
 
     it('should not block different exact URLs', () => {
       const existing: PageRule[] = [
-        { id: 'r1', urlMatch: { type: 'exact', value: 'https://example.com/a' }, mode: 'auto', priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r1', urlMatch: { type: 'exact', value: 'https://example.com/a' }, priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
       ];
       const newMatch: UrlMatchDefinition = { type: 'exact', value: 'https://example.com/b' };
       const result = detectRuleConflict(newMatch, existing);
@@ -339,7 +339,7 @@ describe('T3: URL, regex, sorting, and conflict pure functions', () => {
 
     it('should exclude specified rule from conflict check', () => {
       const existing: PageRule[] = [
-        { id: 'r1', urlMatch: { type: 'exact', value: 'https://example.com/page' }, mode: 'auto', priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+        { id: 'r1', urlMatch: { type: 'exact', value: 'https://example.com/page' }, priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
       ];
       const newMatch: UrlMatchDefinition = { type: 'exact', value: 'https://example.com/page' };
       const result = detectRuleConflict(newMatch, existing, 'r1');

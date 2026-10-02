@@ -16,7 +16,6 @@ const RULES = [
   {
     id: 'r1',
     urlMatch: { type: 'exact', value: 'https://example.com/a' },
-    mode: 'auto',
     priority: 0,
     title: 'Rule A',
     enabled: true,
@@ -26,7 +25,6 @@ const RULES = [
   {
     id: 'r2',
     urlMatch: { type: 'exact', value: 'https://example.com/b' },
-    mode: 'auto',
     priority: 0,
     title: 'Rule B',
     enabled: true,
@@ -87,13 +85,13 @@ describe('Bug 2 (settings): create success auto-hides the form with a success To
     createBehavior = 'success';
   });
 
-  it('auto-hides the New Rule form and shows a "rule created" success Toast', async () => {
+  it('auto-hides the New Rule form and shows a "Rule created" success Toast', async () => {
     await openRulesSection();
 
     fireEvent.click(screen.getByRole('button', { name: 'Create new rule' }));
     const form = await screen.findByRole('form', { name: 'Create new rule' });
 
-    fireEvent.change(document.getElementById('rf-url')!, { target: { value: 'https://new.example.com' } });
+    fireEvent.change(document.getElementById('new-rule-url')!, { target: { value: 'https://new.example.com' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Save Rule' }));
 
     await waitFor(() => {
@@ -107,7 +105,7 @@ describe('Bug 2 (settings): create success auto-hides the form with a success To
 
     // Success Toast appears (same style as the Data Dashboard Edit success)
     const toast = await screen.findByRole('alert');
-    expect(toast).toHaveTextContent('rule created');
+    expect(toast).toHaveTextContent('Rule created');
     expect(toast.className).toContain('tbs-toast');
   });
 
@@ -117,29 +115,29 @@ describe('Bug 2 (settings): create success auto-hides the form with a success To
     fireEvent.click(screen.getByRole('button', { name: 'Create new rule' }));
     const form = await screen.findByRole('form', { name: 'Create new rule' });
 
-    fireEvent.change(document.getElementById('rf-url')!, { target: { value: 'https://kept.example.com' } });
+    fireEvent.change(document.getElementById('new-rule-url')!, { target: { value: 'https://kept.example.com' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Save Rule' }));
 
     // Success Toast is shown and the form auto-hides
     await waitFor(() => {
-      expect(screen.findByRole('alert')).resolves.toHaveTextContent('rule created');
+      expect(screen.findByRole('alert')).resolves.toHaveTextContent('Rule created');
     });
     expect(screen.queryByRole('form', { name: 'Create new rule' })).not.toBeInTheDocument();
   });
 
-  it('shows a "rule created" success Toast for wildcard patterns (conversion still applied)', async () => {
+  it('shows a "Rule created" success Toast for wildcard patterns (conversion still applied)', async () => {
     await openRulesSection();
 
     fireEvent.click(screen.getByRole('button', { name: 'Create new rule' }));
     const form = await screen.findByRole('form', { name: 'Create new rule' });
 
     // Switch to regex and enter a wildcard pattern (auto-converted)
-    fireEvent.click(within(form).getByLabelText('Regex'));
-    fireEvent.change(document.getElementById('rf-url')!, { target: { value: 'https://example.com/*' } });
+    fireEvent.click(within(form).getByLabelText('Regex pattern'));
+    fireEvent.change(document.getElementById('new-rule-url')!, { target: { value: 'https://example.com/*' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Save Rule' }));
 
     const toast = await screen.findByRole('alert');
-    expect(toast).toHaveTextContent('rule created');
+    expect(toast).toHaveTextContent('Rule created');
     expect(toast.className).toContain('tbs-toast');
   });
 
@@ -150,7 +148,7 @@ describe('Bug 2 (settings): create success auto-hides the form with a success To
     fireEvent.click(screen.getByRole('button', { name: 'Create new rule' }));
     const form = await screen.findByRole('form', { name: 'Create new rule' });
 
-    fireEvent.change(document.getElementById('rf-url')!, { target: { value: 'https://dup.example.com' } });
+    fireEvent.change(document.getElementById('new-rule-url')!, { target: { value: 'https://dup.example.com' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Save Rule' }));
 
     await waitFor(() => {
