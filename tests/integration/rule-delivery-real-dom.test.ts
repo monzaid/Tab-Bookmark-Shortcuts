@@ -98,10 +98,10 @@ describe('Real-DOM delivery: the content script genuinely rewrites the tab', () 
 
     expect(document.title).toBe('Delivered Title');
     const iconLinks = Array.from(document.querySelectorAll('link[rel*="icon"]'));
-    // The site's original link survives; ours is inserted alongside it.
-    expect(iconLinks.length).toBe(2);
-    expect(iconLinks.some((l) => l.getAttribute('href') === 'https://new.example/icon.png')).toBe(true);
-    expect(iconLinks.some((l) => l.getAttribute('href') === 'https://old.example/favicon.ico')).toBe(true);
+    // Review round 2 (issue 2): ours REPLACES the site link. Keeping both left
+    // the site icon winning, so the tab appeared not to update its icon.
+    expect(iconLinks.length).toBe(1);
+    expect(iconLinks[0].getAttribute('href')).toBe('https://new.example/icon.png');
   });
 
   it('B9: refuses to inject a javascript: favicon into the DOM', async () => {

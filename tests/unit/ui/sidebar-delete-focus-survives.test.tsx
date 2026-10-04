@@ -125,10 +125,11 @@ describe('N7 — focus is not lost on the destructive delete path', () => {
     const moreButton = await screen.findByRole('button', { name: 'More options for slot 1' });
     await user.click(moreButton);
 
-    const menuItem = await screen.findByRole('menuitem', { name: 'Delete Slot' });
+    const menuItem = await screen.findByRole('menuitem', { name: 'Clear Slot Data' });
+    // The confirm button label follows the renamed destructive action.
     await user.click(menuItem);
 
-    const deleteButton = await screen.findByRole('button', { name: 'Delete' });
+    const deleteButton = await screen.findByRole('button', { name: 'Clear' });
     await flushConfirmGuard();
     await user.click(deleteButton);
 

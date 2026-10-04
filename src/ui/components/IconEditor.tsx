@@ -25,6 +25,23 @@ export interface IconEditorProps {
   value?: IconConfig;
   onChange: (config: IconConfig) => void;
   size?: number;
+  /**
+   * Hide the collapsible file-upload affordance.
+   *
+   * Upload is its OWN tab in `IconFieldEditor` (the five-tab icon editor), so the
+   * composite editor is rendered with this flag to avoid offering two different
+   * "upload" entry points that would produce the same `dataUri`.
+   */
+  hideUpload?: boolean;
+  /**
+   * Hide the composite editor's own lightweight preview.
+   *
+   * The five-tab icon picker already renders ONE full-width preview above its
+   * tabs, so a second preview inside the Custom Icon panel is redundant noise
+   * (review item 1.1). Only the preview is suppressed — the editor's own canvas
+   * is still what the colour/text controls write to internally.
+   */
+  hidePreview?: boolean;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -89,7 +106,7 @@ export function renderIconToDataUri(config: IconConfig, size: number): string {
 
 // ─── IconEditor Component ────────────────────────────────────────────────────
 
-export function IconEditor({ value, onChange, size = 64 }: IconEditorProps) {
+export function IconEditor({ value, onChange, size = 64, hideUpload = false, hidePreview = false }: IconEditorProps) {
   const [bgColor, setBgColor] = useState(value?.bgColor ?? '#2563EB');
   const [useBgColor, setUseBgColor] = useState(!!value?.bgColor || value === undefined);
   const [text, setText] = useState(value?.text ?? '');
@@ -240,8 +257,10 @@ const isSameConfig = (a: IconConfig, b: IconConfig | null): boolean =>
 
   return (
     <div className="tbs-icon-editor">
-      {/* Live preview */}
-      <div className="tbs-icon-editor__preview">
+      {/* Live preview — suppressed when the host already shows one (item 1.1).
+          The canvas stays MOUNTED either way: it is the draw target the colour
+          and text controls rely on. */}
+      <div className="tbs-icon-editor__preview" hidden={hidePreview}>
         {uploadPreview ? (
           <img src={uploadPreview} alt="Icon preview" style={{ width: size, height: size, borderRadius: 4 }} />
         ) : (
@@ -325,7 +344,8 @@ const isSameConfig = (a: IconConfig, b: IconConfig | null): boolean =>
         </div>
       </div>
 
-      {/* Upload (collapsible) */}
+      {/* Upload (collapsible) — suppressed when Upload is its own tab host. */}
+      {!hideUpload && (
       <div className="tbs-icon-editor__section">
         <button
           className="tbs-icon-editor__collapse-toggle"
@@ -353,6 +373,7 @@ const isSameConfig = (a: IconConfig, b: IconConfig | null): boolean =>
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

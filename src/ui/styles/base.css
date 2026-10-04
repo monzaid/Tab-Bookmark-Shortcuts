@@ -154,39 +154,51 @@ body {
   background: rgba(0, 0, 0, 0.4);
 }
 
+/*
+ * Review items 1.1 / 2.6: the dialog is a COLUMN — header, scrolling body,
+ * footer. Previously the whole dialog was the scroll container and both bands
+ * were `position: sticky` inside that same scroll box; with the icon picker's
+ * tab strip, the sticky bands ended up painted OVER the content instead of
+ * beside it (and a non-sticky ancestor left the body's own margin-box the only
+ * backing the footer had).
+ *
+ * With the body owning the scroll, the two bands are ordinary flex children:
+ * they cannot overlap the content because they are not inside its scroll box at
+ * all. The dialog keeps a quiet fallback (`overflow: hidden`) so a rogue child
+ * can never spill outside the rounded corners.
+ */
 .tbs-dialog {
   background: var(--color-bg);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   max-width: 480px;
   width: 90%;
-  max-height: 80vh;
-  overflow-y: auto;
-  padding: var(--space-xl);
+  max-height: 85vh;
+  overflow: hidden;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-/*
- * IMP-2: `.tbs-dialog` is itself the scroll container (max-height + overflow),
- * so once a form grows the header and the Save/Cancel footer scroll out of view.
- * Both are pinned with `position: sticky` and an OPAQUE background (a
- * transparent one would let the body show through as it scrolls underneath).
- * The negative margins cancel the container's own padding so the sticky band
- * spans the full width without a seam at the edges.
- */
+/* The single scroll region. `min-height: 0` is what allows a flex child to
+   shrink below its content and actually scroll. */
+.tbs-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-lg) var(--space-xl);
+}
+
 .tbs-dialog__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--space-lg);
-  position: sticky;
-  top: 0;
-  z-index: 1;
+  gap: var(--space-sm);
+  flex: 0 0 auto;
+  margin-bottom: 0;
+  padding: var(--space-lg) var(--space-xl) var(--space-md);
+  border-bottom: 1px solid var(--color-border);
   background: var(--color-bg);
-  margin-inline: calc(-1 * var(--space-xl));
-  padding-inline: var(--space-xl);
-  padding-top: var(--space-xl);
-  padding-bottom: var(--space-md);
-  margin-top: calc(-1 * var(--space-xl));
 }
 
 .tbs-dialog__title {
@@ -194,19 +206,16 @@ body {
   font-weight: 600;
 }
 
+/* A plain flex child again: it sits BELOW the scrolling body, so it cannot
+   cover it. The top border replaces the (now unnecessary) sticky shadow seam. */
 .tbs-dialog__footer {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-sm);
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
+  flex: 0 0 auto;
+  padding: var(--space-md) var(--space-xl) var(--space-lg);
+  border-top: 1px solid var(--color-border);
   background: var(--color-bg);
-  margin-inline: calc(-1 * var(--space-xl));
-  padding-inline: var(--space-xl);
-  padding-bottom: var(--space-xl);
-  padding-top: var(--space-md);
-  margin-bottom: calc(-1 * var(--space-xl));
 }
 
 /* ─── Toast ───────────────────────────────────────────────────────────────── */
@@ -356,6 +365,823 @@ body {
   gap: var(--space-sm);
 }
 
+/* ─── Tabs (shared primitive) ─────────────────────────────────────────────── */
+
+.tbs-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.tbs-tabs__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xxs);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tbs-tabs__tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: var(--space-xs) var(--space-sm);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xxs);
+  white-space: nowrap;
+}
+
+.tbs-tabs__tab:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+.tbs-tabs__tab--active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+  font-weight: 600;
+}
+
+.tbs-tabs__tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tbs-tabs__badge {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-full);
+  padding: 0 6px;
+}
+
+.tbs-tabs__panel {
+  min-width: 0;
+}
+
+.tbs-tabs__panel:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* ─── Icon field editor (five tabs + chain list + preview) ────────────────── */
+
+.tbs-icon-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+/* Item 1.1: the preview spans the dialog's full width, so the icon is judged at
+   a realistic size instead of inside a 64px box. */
+.tbs-icon-field__preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 96px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+  overflow: hidden;
+}
+
+/* Review item 1: the preview column holds the icon plus a caption naming the
+   record it came from, so the icon does not change under the cursor silently. */
+.tbs-icon-field__preview-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.tbs-icon-field__preview-caption {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-primary);
+  text-align: center;
+}
+
+/* Review item 3: `Reset` restores the value the editor opened with. */
+.tbs-icon-field__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+/* The selected record's explanation under the chain list (review item 1). */
+.tbs-icon-field__note[data-selected-note] {
+  color: var(--color-text);
+}
+
+.tbs-icon-field__img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+.tbs-icon-field__placeholder {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-lg);
+}
+
+.tbs-icon-field__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.tbs-icon-field__label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.tbs-icon-field__field input[type='text'] {
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+.tbs-icon-field__hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.tbs-icon-field__chain {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.tbs-icon-field__tiers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.tbs-icon-field__tier {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--font-size-xs);
+  min-width: 0;
+}
+
+.tbs-icon-field__tier[data-winner='true'] .tbs-icon-field__tier-badge {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+.tbs-icon-field__tier-badge {
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  padding: 1px 8px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tbs-icon-field__tier-badge:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.tbs-icon-field__tier-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  min-width: 0;
+}
+
+.tbs-icon-field__tier-value[data-empty='true'] {
+  color: var(--color-text-tertiary);
+}
+
+.tbs-icon-field__note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+.tbs-icon-field__masked {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+/* ─── Focus ring helper (exported by components.tsx) ─────────────────────── */
+
+.tbs-focus-ring:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.tbs-focus-ring--inset:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+/* ─── Radio Group (shared, CT3-a) ─────────────────────────────────────────── */
+
+.tbs-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+/* Item 2.1: Match Type reads as one row of choices, not a stacked list. The
+   options wrap only when the panel is genuinely too narrow for both. */
+.tbs-radio-group--inline .tbs-radio-group__options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.tbs-radio-group--inline .tbs-radio-group__option {
+  gap: var(--space-xxs);
+}
+
+/* The Match Type legend sits on its own line above the options row. */
+.tbs-radio-group--inline {
+  gap: var(--space-xxs);
+}
+
+.tbs-radio-group__legend {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text);
+  padding: 0;
+  margin-bottom: var(--space-xxs);
+}
+
+.tbs-radio-group__option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+}
+
+.tbs-radio-group__option input[type='radio'] {
+  margin: 0;
+  accent-color: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.tbs-radio-group__option label {
+  cursor: pointer;
+}
+
+.tbs-radio-group__description {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+/* ─── Field Editor (shared, S4a) ──────────────────────────────────────────── */
+
+.tbs-field-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+}
+
+.tbs-field-editor[data-dirty='true'] {
+  border-color: var(--color-primary);
+}
+
+.tbs-field-editor__note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+.tbs-field-editor__current {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tbs-field-editor__value {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+
+.tbs-field-editor__badge {
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  padding: 1px 8px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tbs-field-editor__badge:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.tbs-field-editor__masked {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+.tbs-field-editor__impact {
+  border-left: 2px solid var(--color-info);
+  background: var(--color-info-bg);
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-sm);
+}
+
+.tbs-field-editor__impact p {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.tbs-field-editor__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.tbs-field-editor__immediate {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+/* ─── Rule Form Fields (shared, S4b) ──────────────────────────────────────── */
+
+.tbs-rule-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+/* Item 1: the two dimension editors pair up when there is room and stack in a
+   narrow panel (the 288px sidebar modal) instead of being squeezed. */
+.tbs-rule-form-fields__pair {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+@media (min-width: 560px) {
+  .tbs-rule-form-fields__pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+}
+
+.tbs-rule-form-fields__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+/* ─── Undo Bar message (the bar itself lives in sidebar.css) ──────────────── */
+
+.tbs-undo-bar__message {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ─── Field Editor head (tabs + the optional "use matched" action) ────────── */
+
+.tbs-field-editor__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.tbs-field-editor__fetch {
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  padding: 2px 8px;
+  font-size: var(--font-size-xs);
+  font-family: inherit;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tbs-field-editor__fetch:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.tbs-field-editor__fetch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── Field editor heading (item 2.2) ─────────────────────────────────────── */
+
+.tbs-field-editor__title-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.tbs-field-editor__heading {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.tbs-field-editor__fetch {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: var(--font-size-xs);
+  color: var(--color-primary);
+  cursor: pointer;
+}
+
+.tbs-field-editor__fetch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── Masked summary (items 1.2 / 4.1 / 5.2) ──────────────────────────────── */
+
+.tbs-masked {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+}
+
+.tbs-masked__summary {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text);
+}
+
+.tbs-masked__subject {
+  color: var(--color-text-secondary);
+}
+
+.tbs-masked__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tbs-masked__item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  font-size: var(--font-size-xs);
+  min-width: 0;
+}
+
+.tbs-masked__badge {
+  flex-shrink: 0;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  padding: 0 8px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.tbs-masked__badge:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* Review item 5: the plain-language note that explains what each record is —
+   `Slot 8` on its own was the unreadable part of the old summary. */
+.tbs-masked__note {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The value each record would contribute, kept short so it never pushes the
+   explanation out of the row. */
+.tbs-masked__value {
+  flex: 0 1 auto;
+  max-width: 40%;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tbs-masked__expand {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-primary);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* ─── Chain tier list (shared: title + icon pickers) ──────────────────────── */
+
+.tbs-chain-tiers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.tbs-chain-tiers__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  font-size: var(--font-size-xs);
+}
+
+.tbs-chain-tiers__item[data-empty='true'] {
+  opacity: 0.65;
+}
+
+/* Review item 1: the record whose value the preview is showing. Marked with a
+   bar AND a background, not colour alone (CT3-e). */
+.tbs-chain-tiers__item[data-selected='true'] {
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+  box-shadow: inset 2px 0 0 var(--color-primary);
+}
+
+/* A layer that has no record at all: still listed, but not interactive. */
+.tbs-chain-tiers__badge--static {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.tbs-chain-tiers__badge {
+  flex-shrink: 0;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  padding: 0 6px;
+  font-size: var(--font-size-xs);
+  font-family: inherit;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  min-width: 44px;
+  text-align: center;
+}
+
+.tbs-chain-tiers__item[data-winner='true'] .tbs-chain-tiers__badge {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.tbs-chain-tiers__badge:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.tbs-chain-tiers__value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+}
+
+.tbs-chain-tiers__item[data-empty='true'] .tbs-chain-tiers__value {
+  color: var(--color-text-tertiary);
+}
+
+.tbs-chain-tiers__action {
+  flex-shrink: 0;
+}
+
+/* Items 2 / 6 / 8: the per-tier apply / clear pair. */
+.tbs-chain-tiers__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.tbs-chain-tiers__btn {
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--color-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tbs-chain-tiers__btn:hover {
+  background: var(--color-bg-hover);
+}
+
+.tbs-chain-tiers__btn--danger {
+  color: var(--color-error);
+}
+
+/* ─── Impact preview (matches / masked, shared) ───────────────────────────── */
+
+.tbs-impact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  border-left: 2px solid var(--color-info);
+  background: var(--color-info-bg);
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-sm);
+  min-width: 0;
+}
+
+.tbs-impact__summary {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text);
+}
+
+.tbs-impact__note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.tbs-impact__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tbs-impact__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  font-size: var(--font-size-xs);
+}
+
+.tbs-impact__badge {
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  padding: 0 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+}
+
+.tbs-impact__item[data-masked='true'] .tbs-impact__badge {
+  background: var(--color-warning-bg, var(--color-bg-tertiary));
+  color: var(--color-warning);
+}
+
+.tbs-impact__label {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.tbs-impact__url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-tertiary);
+}
+
+.tbs-impact__more {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: var(--font-size-xs);
+  font-family: inherit;
+  color: var(--color-primary);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* ─── Empty State (shared, IMP-10) ────────────────────────────────────────── */
+
+.tbs-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-sm);
+  text-align: center;
+  padding: var(--space-xl) var(--space-md);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+}
+
+.tbs-empty-state__message {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.tbs-empty-state--error-first,
+.tbs-empty-state--error-stale {
+  border-style: solid;
+  border-color: var(--color-error);
+  background: var(--color-error-bg);
+  color: var(--color-text);
+}
+
+.tbs-empty-state--no-match {
+  color: var(--color-text-tertiary);
+}
+
 /* ─── Dual Cards ──────────────────────────────────────────────────────────── */
 
 .tbs-dual-cards {
@@ -386,6 +1212,12 @@ body {
   background: var(--color-bg-secondary);
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
+}
+
+/* Item 5: the `display: flex` above overrides the `hidden` attribute's UA rule
+   (`display: none`), so a host-suppressed preview still rendered. Restore it. */
+.tbs-icon-editor__preview[hidden] {
+  display: none;
 }
 
 .tbs-icon-editor__section {

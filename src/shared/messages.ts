@@ -244,6 +244,68 @@ export interface GetDashboardRequest extends RequestBase {
   action: 'GET_DASHBOARD';
 }
 
+/**
+ * Impact preview for a rule pattern (review item 5.2 / 6.3).
+ *
+ * Answers "which open tabs would this value affect, and how many are currently
+ * masked by a higher tier" so the editor can show
+ * `Matches 12 tabs · 3 masked` + the first three entries. Computed in the
+ * background against the live tab set (user chose the exact variant), so the UI
+ * never guesses from a partial local view.
+ */
+export interface GetImpactPreviewRequest extends RequestBase {
+  action: 'GET_IMPACT_PREVIEW';
+  payload: {
+    /** Rule pattern to test against the open tabs. */
+    urlMatch: UrlMatchDefinition;
+    /** Exclude this rule when computing the winner (edit mode). */
+    excludeRuleId?: string;
+    /** How many entries the caller wants back (UI folds the rest). */
+    limit?: number;
+  };
+}
+
+export interface ImpactPreviewEntry {
+  tabId: number;
+  label: string;
+  url: string;
+  /** True when a higher tier (override / slot) currently owns this tab. */
+  masked: boolean;
+}
+
+export interface ImpactPreview {
+  total: number;
+  masked: number;
+  entries: ImpactPreviewEntry[];
+}
+
+/**
+ * Resolve the title / icon a Match URL pattern resolves to (review item 6.1).
+ *
+ * A rule being created has no chain of its own, so the only meaningful value to
+ * offer is "what would a tab at this URL show right now?" — answered by the open
+ * tabs plus the existing chain (`override > slot > rule > site`). This lets the
+ * create form offer `Use matched title` / `Use matched icon` instead of the
+ * `Use chain` tab, which would have nothing to fall back to.
+ */
+export interface ResolveMatchUrlRequest extends RequestBase {
+  action: 'RESOLVE_MATCH_URL';
+  payload: {
+    /** Rule pattern to test against the open tabs. */
+    urlMatch: UrlMatchDefinition;
+  };
+}
+
+export interface ResolveMatchUrlResult {
+  /** How many open tabs the pattern matches (0 → no value to offer). */
+  matchedTabs: number;
+  /** The without-a-doubt winner of the chain among the matched tabs. */
+  title: string | null;
+  icon: string | null;
+  /** Where the offered value came from, for an honest label. */
+  source: 'override' | 'slot' | 'rule' | 'site' | null;
+}
+
 export interface GetCommandsRequest extends RequestBase {
   action: 'GET_COMMANDS';
 }
@@ -357,6 +419,8 @@ export type UiRequest =
   | ExportDiagnosticsRequest
   | GetStateRequest
   | GetDashboardRequest
+  | GetImpactPreviewRequest
+  | ResolveMatchUrlRequest
   | GetCommandsRequest
   | DownloadIconRequest
   | UploadIconRequest
@@ -402,9 +466,19 @@ export interface GetDashboardResponse {
   result: { success: true; rows: DashboardRow[] } | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
+export interface GetImpactPreviewResponse {
+  action: 'GET_IMPACT_PREVIEW';
+  result: { success: true; preview: ImpactPreview } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
 export interface GetCommandsResponse {
   action: 'GET_COMMANDS';
   result: { success: true; commands: Array<{ name: string; shortcut: string | null; description: string }> } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+export interface ResolveMatchUrlResponse {
+  action: 'RESOLVE_MATCH_URL';
+  result: { success: true; resolved: ResolveMatchUrlResult } | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
 

@@ -63,6 +63,8 @@ function handleUiAction(request: UiRequest): string {
     case 'EXPORT_DIAGNOSTICS': return 'export-diag';
     case 'GET_STATE': return 'get-state';
     case 'GET_DASHBOARD': return 'get-dashboard';
+    case 'GET_IMPACT_PREVIEW': return 'get-impact-preview';
+    case 'RESOLVE_MATCH_URL': return 'resolve-match-url';
     case 'GET_COMMANDS': return 'get-commands';
     case 'DOWNLOAD_ICON': return 'download-icon';
     case 'UPLOAD_ICON': return 'upload-icon';

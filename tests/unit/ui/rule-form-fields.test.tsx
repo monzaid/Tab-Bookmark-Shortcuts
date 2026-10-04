@@ -54,8 +54,8 @@ describe('T10: RuleFormFields', () => {
     const fieldSet = () => [
     screen.getByRole('textbox', { name: /Match URL/ }),
     screen.getByRole('group', { name: 'Match Type' }),
-    screen.getByRole('group', { name: 'Title source' }),
-    screen.getByRole('group', { name: 'Icon source' }),
+    screen.getByRole('tablist', { name: 'Title source' }),
+    screen.getByRole('tablist', { name: 'Icon source' }),
     screen.getByRole('spinbutton', { name: /Priority/ }),
   ];
 

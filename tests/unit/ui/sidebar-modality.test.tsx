@@ -88,8 +88,8 @@ describe('T14: sidebar create-rule modal', () => {
 
     expect(within(dialog).getByRole('textbox', { name: /Match URL/ })).toBeInTheDocument();
     expect(within(dialog).getByRole('group', { name: 'Match Type' })).toBeInTheDocument();
-    expect(within(dialog).getByRole('group', { name: 'Title source' })).toBeInTheDocument();
-    expect(within(dialog).getByRole('group', { name: 'Icon source' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('tablist', { name: 'Title source' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('tablist', { name: 'Icon source' })).toBeInTheDocument();
     expect(within(dialog).getByRole('spinbutton', { name: /Priority/ })).toBeInTheDocument();
 
     // IMP-18 item 6: the "Auto-apply on match" checkbox is gone.

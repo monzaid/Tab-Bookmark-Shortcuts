@@ -23,7 +23,7 @@ import { DiagnosticsService, NotificationService, IncognitoService } from './dia
 import { SidebarAdapter } from './sidebar-adapter';
 import type { AnyRequest, ResponseBase } from '@shared/messages';
 import { openOrReusePage } from '@shared/open-page';
-import { isProtectedUrl, isSafeFaviconProtocol, validateRegex } from '@shared/url-utils';
+import { isProtectedUrl, isSafeFaviconProtocol, matchesUrl, validateRegex } from '@shared/url-utils';
 import { resolveFieldChain } from '@shared/field-chain';
 import { FieldDeliveryService } from './field-delivery-service';
 import { SiteSnapshotStore } from './site-snapshot-store';
@@ -78,6 +78,8 @@ const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
   'EXPORT_DIAGNOSTICS',
   'GET_STATE',
   'GET_DASHBOARD',
+  'GET_IMPACT_PREVIEW',
+  'RESOLVE_MATCH_URL',
   'GET_COMMANDS',
   'DOWNLOAD_ICON',
   'UPLOAD_ICON',
@@ -659,8 +661,26 @@ export class WorkerOrchestrator {
           };
         }
 
+        // Merge per DIMENSION, never replace the whole marker.
+        //
+        // The two dimensions (customTitle / icon) are independent chains and each
+        // caller sends only the field it edited (`{icon}` or `{customTitle}`).
+        // Whole-object replacement therefore silently wiped the OTHER dimension —
+        // editing the icon reset the title and vice-versa. Semantics are:
+        //   undefined -> leave as-is (dimension not part of this edit)
+        //   null      -> explicit clear (DT11)
+        //   value     -> write
+        const incoming = request.payload.uiMarker;
+        const current = slot.uiMarker;
+        const mergedMarker = {
+          ...current,
+          ...(incoming.customTitle !== undefined ? { customTitle: incoming.customTitle } : {}),
+          ...(incoming.icon !== undefined ? { icon: incoming.icon } : {}),
+          ...(incoming.backgroundColor !== undefined ? { backgroundColor: incoming.backgroundColor } : {}),
+        };
+
         const saved = await this.repo.saveSlot(
-          { ...slot, uiMarker: request.payload.uiMarker, updatedAt: new Date().toISOString() },
+          { ...slot, uiMarker: mergedMarker, updatedAt: new Date().toISOString() },
           version,
         );
         if (!saved.success) return saved;
@@ -761,6 +781,75 @@ export class WorkerOrchestrator {
 
       case 'GET_DASHBOARD': {
         return this.buildDashboard();
+      }
+
+      case 'GET_IMPACT_PREVIEW': {
+        // Review item 5.2 / 6.3: exact impact of a rule pattern over the OPEN
+        // tabs, so the editor can show "Matches N tabs · M masked".
+        const sync = await this.repo.getSyncState();
+        const local = await this.repo.getLocalState();
+        const tabs = await this.adapter.tabs.query({});
+        const { urlMatch, excludeRuleId, limit } = request.payload;
+
+        const matchedTabs = tabs.filter((t) => matchesUrl(t.url, urlMatch));
+
+        const entries: import('@shared/messages').ImpactPreviewEntry[] = [];
+        let masked = 0;
+        for (const tab of matchedTabs) {
+          const tabId = tab.id;
+          const url = tab.url;
+          // "Masked" == a higher tier (explicit override or slot binding) owns
+          // this tab, so the rule value is not what the user actually sees.
+          const ownedByOverride = local.tabOverrides.some((o) => o.tabId === tabId);
+          const ownedBySlot = local.bindings.some((b) => b.tabId === tabId);
+          const isMasked = ownedByOverride || ownedBySlot;
+          if (isMasked) masked += 1;
+          if (entries.length < (limit ?? 3)) {
+            entries.push({ tabId, label: `Tab ${String(tabId)}`, url, masked: isMasked });
+          }
+        }
+        void sync;
+        void excludeRuleId;
+        return {
+          success: true,
+          preview: { total: matchedTabs.length, masked, entries },
+        } satisfies import('@shared/messages').GetImpactPreviewResponse['result'];
+      }
+
+      case 'RESOLVE_MATCH_URL': {
+        // Review item 6.1: a rule being created has no chain of its own, so the
+        // create form needs "what would a tab at this URL show right now?".
+        // Answered from the OPEN tabs: pick the first matching tab and resolve
+        // its chain through the single shared implementation, so the offered
+        // value is exactly what the sidebar would display for that tab.
+        const sync = await this.repo.getSyncState();
+        const local = await this.repo.getLocalState();
+        const tabs = await this.adapter.tabs.query({});
+        const matched = tabs.filter((t) => matchesUrl(t.url, request.payload.urlMatch));
+
+        if (matched.length === 0) {
+          return {
+            success: true,
+            resolved: { matchedTabs: 0, title: null, icon: null, source: null },
+          } satisfies import('@shared/messages').ResolveMatchUrlResponse['result'];
+        }
+
+        const first = matched[0];
+        const input = { sync, local, tabId: first.id, tabUrl: first.url };
+        const titleChain = resolveFieldChain('title', input);
+        const faviconChain = resolveFieldChain('favicon', input);
+
+        // The TierKey values are exactly the four chain sources, so the winner's
+        // source can be reported verbatim without a second mapping to drift.
+        return {
+          success: true,
+          resolved: {
+            matchedTabs: matched.length,
+            title: titleChain.winner.value,
+            icon: faviconChain.winner.value,
+            source: titleChain.winner.value !== null ? titleChain.winner.source : faviconChain.winner.source,
+          },
+        } satisfies import('@shared/messages').ResolveMatchUrlResponse['result'];
       }
 
       case 'SITE_SNAPSHOT_REPORT': {
@@ -929,6 +1018,12 @@ export class WorkerOrchestrator {
    * cannot drift. `delivery` likewise reports only what the background can
    * actually observe (a protected URL, or an un-captured site value).
    */
+  /** Test-facing accessor for the dashboard rows (see `buildDashboard`). */
+  async buildDashboardForTest(): Promise<import('@shared/types').DashboardRow[]> {
+    const result = await this.buildDashboard();
+    return result.rows;
+  }
+
   private async buildDashboard(): Promise<{ success: true; rows: import('@shared/types').DashboardRow[] }> {
     const sync = await this.repo.getSyncState();
     const local = await this.repo.getLocalState();
@@ -984,6 +1079,36 @@ export class WorkerOrchestrator {
             ? chainFor(tabId, tabById.get(tabId)?.url ?? url ?? '')
             : { title: resolveFieldChain('title', { sync, local, tabId: -1, tabUrl: url ?? '' }), favicon: resolveFieldChain('favicon', { sync, local, tabId: -1, tabUrl: url ?? '' }) },
         delivery: tabId !== undefined ? deliveryFor(url, tabId) : 'unknown',
+      });
+    }
+
+    // 3. Rule-hit tabs — the "managed tabs" view (review item 7.1).
+    //
+    // A tab is a rule-hit when an ENABLED rule matches its URL and the tab is
+    // not already covered above (an explicit override or a slot-bound tab owns
+    // that row). The winning rule is reported as the anchor so the dashboard can
+    // jump to it.
+    const coveredTabIds = new Set<number>([
+      ...local.tabOverrides.map((o) => o.tabId),
+      ...local.bindings.map((b) => b.tabId),
+    ]);
+    for (const tab of allTabs) {
+      if (coveredTabIds.has(tab.id)) continue;
+      const candidates = sync.rules
+        .filter((r) => r.enabled !== false && matchesUrl(tab.url, r.urlMatch))
+        .sort((a, b) => b.priority - a.priority || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      if (candidates.length === 0) continue;
+      const matched = candidates[0];
+      rows.push({
+        id: `hit-${String(tab.id)}`,
+        kind: 'rule-hit',
+        label: `Tab ${String(tab.id)}`,
+        url: tab.url,
+        anchor: { kind: 'rule', ruleId: matched.id },
+        tabId: tab.id,
+        ruleId: matched.id,
+        chain: chainFor(tab.id, tab.url),
+        delivery: deliveryFor(tab.url, tab.id),
       });
     }
 

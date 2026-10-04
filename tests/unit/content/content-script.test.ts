@@ -74,7 +74,7 @@ describe('T8: Content script — FIELD_APPLY set / restore / none', () => {
     );
   });
 
-  it('inserts our own favicon link and never removes the site original', async () => {
+  it('our favicon REPLACES the site link, so no competing declaration remains', async () => {
     const { applyFieldMessage } = await import('@content/index');
 
     const siteLink = document.createElement('link');
@@ -84,13 +84,16 @@ describe('T8: Content script — FIELD_APPLY set / restore / none', () => {
 
     applyFieldMessage({ type: 'FIELD_APPLY', favicon: { kind: 'set', value: 'https://cdn/new.png' } });
 
+    // Review round 2 (issue 2): leaving the site's link in place let IT keep
+    // winning, so the tab appeared not to change its icon. Ours must be the only
+    // declaration while we own the tab; the original is restored on `restore`.
     const links = document.head.querySelectorAll('link[rel*="icon"]');
-    expect(links.length).toBe(2);
-    expect(Array.from(links).some((l) => l.getAttribute('href') === 'https://cdn/new.png')).toBe(true);
-    expect(document.head.contains(siteLink)).toBe(true);
+    expect(links.length).toBe(1);
+    expect(links[0].getAttribute('href')).toBe('https://cdn/new.png');
+    expect(document.head.contains(siteLink)).toBe(false);
   });
 
-  it('restores by removing only the link we inserted (site link survives)', async () => {
+  it('restores by putting the site original back (our link is gone, theirs returns)', async () => {
     const { applyFieldMessage } = await import('@content/index');
 
     const siteLink = document.createElement('link');
@@ -103,7 +106,9 @@ describe('T8: Content script — FIELD_APPLY set / restore / none', () => {
 
     const links = document.head.querySelectorAll('link[rel*="icon"]');
     expect(links.length).toBe(1);
-    expect(links[0]).toBe(siteLink);
+    // The href is what matters: our link was removed and the site value is back.
+    expect(links[0].getAttribute('href')).toBe('https://site.example/original.ico');
+    expect(links[0]).not.toBe(siteLink);
   });
 
   it('refuses to write an unsafe favicon protocol', async () => {

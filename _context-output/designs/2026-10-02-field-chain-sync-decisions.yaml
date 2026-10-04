@@ -1,0 +1,646 @@
+# Decisions Manifest — Field Chain Correctness, Three-View Sync & Rewrite UI Redesign
+# Baseline: HEAD a3d6ab3 · Date: 2026-10-02
+# Layers: Goal / Constraint / Architecture(+3 deep-dives) / Detail(+2 deep-dives)
+# Status legend: RESOLVED / OPEN / SKIPPED / DEFERRED
+
+meta:
+  topic: field-chain-sync
+  date: "2026-10-02"
+  baseline_commit: a3d6ab3
+  layers: 4
+  total_decisions: 140
+  open: 0
+  deferred: 1
+  act3_additions: 3
+  registered_risks: 4
+  sub_documents:
+    goal: 2026-10-02-field-chain-sync-goal-scope-design.md
+    constraint: 2026-10-02-field-chain-sync-constraint-boundaries-design.md
+    architecture_module: 2026-10-02-field-chain-sync-architecture-module-design.md
+    architecture_deepdive_1: 2026-10-02-field-chain-sync-architecture-ui-deepdive-design.md
+    architecture_deepdive_2: 2026-10-02-field-chain-sync-architecture-four-surfaces-ui-direction-design.md
+    architecture_deepdive_3: 2026-10-02-field-chain-sync-architecture-three-surfaces-implementation-direction-design.md
+    detail: 2026-10-02-field-chain-sync-detail-interaction-copy-design.md
+    detail_deepdive_2: 2026-10-02-field-chain-sync-detail-copy-a11y-design.md
+    detail_deepdive_3: 2026-10-02-field-chain-sync-detail-validation-focus-empty-design.md
+    main: 2026-10-02-field-chain-sync-design.md
+
+# ─────────────────────────────────────────────────────────────────────────────
+goal:
+  - node: Q1
+    decision: "迭代范围 = A 正确性 + B 优先级与重应用 + C 流程 + D 界面（全组合）"
+    alternatives:
+      - option: "只做 D 界面"
+        rejected_reason: "侦察证明「改了不生效」是非 UI 缺陷，只做界面会把它留在原地"
+    rationale: "B（重定/触发重应用）正是这些缺陷的修法"
+    implications: "单一设计文档 → 单一计划"
+    status: RESOLVED
+
+  - node: Q2
+    decision: "「同步」的语义 = 纯派生（只读重算）；编辑只写它所属那一层，三视图都从链重算"
+    alternatives:
+      - option: "双向写传播"
+        rejected_reason: "把「改这一个标签页」静默放大成「改该槽全局」，作用域失控且不可逆"
+      - option: "派生 + 显式同步"
+        rejected_reason: "保留为可选动作，非默认"
+    status: RESOLVED
+
+  - node: Q3
+    decision: "slot 的「对应 tabId」= 模拟一次真实切换（复用 resolveSwitch）；位置槽不推算，用已记录 binding"
+    alternatives:
+      - option: "候选集合成员判定"
+        rejected_reason: "多值会让 Dashboard 联动标注随排序抖动"
+    status: RESOLVED
+
+  - node: Q4
+    decision: "重算+重投递收敛为单一服务入口 recomputeAndRedeliver(affectedTabIds) + 显式调用"
+    alternatives:
+      - option: "纯事件驱动"
+        rejected_reason: "写入方无法表达「这是清除」，清除语义会继续只在部分路径生效"
+      - option: "各写入方自理"
+        rejected_reason: "即现状，正是缺陷来源"
+    status: RESOLVED
+
+  - node: Q5
+    decision: "共享字段链抽成 src/shared/field-chain.ts 纯函数；UI 用内存 state 同步计算"
+    alternatives:
+      - option: "保留在 background + 新增 COMPUTE_FIELDS 消息"
+        rejected_reason: "侧边栏是高频路径，每次 onActivated/onUpdated 都往返一次"
+      - option: "保留两份 + 锁步测试"
+        rejected_reason: "只能事后发现分叉"
+    implications: "「视图显示值 = 实际投递值」成为构造保证；顺带修掉 UI 侧缺协议白名单"
+    status: RESOLVED
+
+  - node: Q6
+    decision: "「清除/Reset」= 回落下一层 + 站点原值还原"
+    alternatives:
+      - option: "只「停止干预」"
+        rejected_reason: "标题半场不可靠：多数站点不会重设 title"
+      - option: "维持清空行为"
+        rejected_reason: "Reset 后标题变空、图标消失，比不清除更糟"
+    implications: "只需两种投递模式 apply / restore-site"
+    status: RESOLVED
+
+  - node: Q7
+    decision: "三视图一致显示：来源徽标 + 遮蔽标记 + 一键清除；徽标可点击跳焦"
+    alternatives:
+      - option: "只在 Dashboard 集中呈现"
+        rejected_reason: "用户察觉问题的地方没有解法"
+    status: RESOLVED
+
+  - node: Q8
+    decision: "影响面标注时机 = 两者都要（编辑期行内实时预览 + 提交后权威汇总）"
+    rationale: "A 是预测（基于当前快照），B 为权威；已知并接受预测可能不同"
+    status: RESOLVED
+
+  - node: Q9
+    decision: "影响面列表粒度 = 计数 + 前 3 条 + 折叠展开"
+    alternatives:
+      - option: "只给计数 + 跳 Dashboard"
+        rejected_reason: "打断编辑流"
+      - option: "全部内联"
+        rejected_reason: "规则命中多页时拖慢渲染、淹没表单"
+    status: RESOLVED
+
+  - node: Q10
+    decision: "Data Dashboard 定位 = 混合（受管配置清单 + 折叠的受管标签页视图）"
+    alternatives:
+      - option: "只做按 tab 的统一视图"
+        rejected_reason: "会丢失「我只想看我设置过什么」的定位"
+      - option: "纯配置清单"
+        rejected_reason: "rule 命中的页面看不到"
+    status: RESOLVED
+
+  - node: Q11
+    decision: "取消 mode='manual'；规则一律参与链，仅 enabled 控制开关；删除 PageRule.mode 与 RuleMode"
+    rationale: "manual 目前不可见地永不生效，属「改了不生效」同族；取消后「规则=生效的改写，enabled=开关」一名一义"
+    status: RESOLVED
+
+  - node: Q12
+    decision: "保存覆盖维持非对称（快捷键 Confirm / 侧边栏静默+UndoBar），升格为有意设计"
+    status: RESOLVED
+
+  - node: Q13
+    decision: "收敛为共享编辑件 + 删除孤儿（RuleEditor.tsx / DualCards.tsx 及其专属测试）"
+    note: "title 链与 icon 链独立，不共享"
+    status: RESOLVED
+
+  - node: Q14
+    decision: "site 节点的值来源 = 内容脚本回报站点原值，存 local 临时记录；未捕获显示 —"
+    alternatives:
+      - option: "读 tab.title"
+        rejected_reason: "自证循环：显示的是我们自己的改写"
+      - option: "不展示 site 节点"
+        rejected_reason: "答不出「全部清除后我会看到什么」"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+constraint:
+  - node: C1
+    decision: "权限零扩张（不新增 permission / host_permission / command）"
+    status: RESOLVED
+
+  - node: C2
+    decision: "内容脚本为投递的唯一实现；executeScript 退化为仅 apply 的最小兜底"
+    rationale: "Q6 的页面作用域快照只能活在常驻上下文里"
+    implications: "消除现状「主路径 executeScript / fallback sendMessage」的能力集不同"
+    status: RESOLVED
+
+  - node: C3
+    decision: "有界重试 7 次（1/2/3/5/10/20/30s）；超限降级 + 标 degraded（仅内存）"
+    status: RESOLVED
+
+  - node: C4
+    decision: "同 tab 合流最新一次；编辑 ~300ms 防抖；重试队列每 tab 唯一"
+    alternatives:
+      - option: "全部立即执行"
+        rejected_reason: "规则命中 40 页时放大到 40×7 在途任务，且旧值可能覆盖新值"
+      - option: "全局串行队列"
+        rejected_reason: "最终值可能被旧值覆盖，危险"
+    status: RESOLVED
+
+  - node: C5
+    decision: "受保护页判定集中在投递入口；受保护页不投递 + delivery='protected'；edit 仍允许"
+    status: RESOLVED
+
+  - node: C6
+    decision: "siteSnapshot 严格封闭（只存 local，不进 sync/导出/诊断；字段仅 {title, faviconHref}；只读；tab 关闭丢弃）"
+    alternatives:
+      - option: "仅内存"
+        rejected_reason: "MV3 SW 约 30s 空闲即可能回收 → site 节点会频繁显示 —"
+    status: RESOLVED
+
+  - node: C7
+    decision: "既有测试处置 = 完全自由重写（用户裁决）+ 显式登记 RK-1"
+    status: RESOLVED
+    depends_on: [RK-1]
+
+  - node: C8
+    decision: "工程基线：不新增依赖；lint delta-0；typecheck 0；三浏览器 build；界面统一英文；WCAG 2.1 AA"
+    status: RESOLVED
+
+  - node: RK-1
+    type: risk
+    decision: "登记风险：核心解析语义与投递协议同时重构，行为漂移失去完整证据"
+    mitigation: "field-chain.ts 保留独立穷举单测；计划中显式携带本风险；交付前补「链优先级前后等价」对照用例"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+architecture:
+  - node: A1
+    decision: "src/shared/field-chain.ts 纯函数；title 与 icon 各调用一次；链序 override > slot > rule > site"
+    implications: "一处实现 ⇒ 视图显示值 = 实际投递值成为构造保证"
+    status: RESOLVED
+
+  - node: A1-bis
+    decision: "「设定值」判定：undefined / null / '' 一律未设定；「清除」= 写回未设定，无需 tombstone"
+    note: "两条清除作用域：本层清除（回落下一层） / 整链清除（本层+其下所有层，直达 site）"
+    status: RESOLVED
+
+  - node: A2
+    decision: "新建 src/background/field-delivery-service.ts 作为唯一投递协调者（注入 Rule/Slot/Repo/Adapter）"
+    alternatives:
+      - option: "放 RuleService 内并自行解析 slot→tabId"
+        rejected_reason: "造服务环或迫使 resolveSwitch 上移 shared"
+    status: RESOLVED
+
+  - node: A3
+    decision: "受影响集合按维度：override 唯一 tabId / slot binding 或 resolveSwitch 推算 / rule 多命中"
+    status: RESOLVED
+
+  - node: A4
+    decision: "逐字段三态指令 set / restore / none；协议层不可表达「清空」"
+    status: RESOLVED
+
+  - node: A4-bis
+    decision: "restore 覆盖「整链清除后 site 亦无值」；本层清除落回 set 或 restore，共用同一协议"
+    status: RESOLVED
+
+  - node: A5
+    decision: "单一入口 + leading/trailing 调度；删除 force"
+    implications: "修掉侦察 #11（无按-tab 排序），保证最后一次编辑必然生效"
+    status: RESOLVED
+
+  - node: A6
+    decision: "内容脚本为唯一实现 + 兜底；降级呈现 Limited: can't restore the site value"
+    status: RESOLVED
+
+  - node: A7
+    decision: "siteSnapshot 首次改写前惰性捕获；每次导航重新捕获；链不再改写丢弃；扩展重载保留"
+    status: RESOLVED
+
+  - node: A8
+    decision: "isProtectedUrl 只在投递入口判定一次；移除三处分散判定"
+    status: RESOLVED
+
+  - node: A9
+    decision: "契约清理：删 PageRule.mode / RuleMode / APPLY_RULE_TO_TAB / GET_CANDIDATES / 每 URL guard"
+    status: RESOLVED
+
+  - node: A10
+    decision: "GET_DASHBOARD → DashboardRow[]（kind override|slot|rule-hit，含 chain 与 delivery，anchor 承载跳焦）"
+    status: RESOLVED
+
+  - node: A11
+    decision: "消息清单：新增 FIELD_APPLY / SITE_SNAPSHOT_REPORT；GET_DASHBOARD 重塑；CREATE/UPDATE_RULE 去 mode"
+    status: RESOLVED
+
+  - node: A12
+    decision: "模块结构（含深挖②③ 新增：field-editor / rule-form-fields / undo-bar / empty-state / use-expand-row）"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+architecture_deepdive_1:
+  - node: S1
+    decision: "侧边栏 New Global Page Rule 保留 Dialog；改用 RuleFormFields；四项上下文预填；创作态标注"
+    status: RESOLVED
+
+  - node: S2
+    decision: "Page Rewrite Rules：删孤儿；创建/编辑统一为 RuleFormFields 两模式；新增删除确认/失败提示/影响面/跳焦"
+    note: "IMP-3：位置形状有意保留差异（新建顶部内联、编辑行内）"
+    status: RESOLVED
+
+  - node: S3
+    decision: "Data Dashboard 数据源改 DashboardRow[]；逐节点值；来源徽标+跳焦；遮蔽+一键清除；delivery 呈现；空状态"
+    status: RESOLVED
+
+  - node: S4a
+    decision: "FieldEditor：mode 模型（取代 value: string|IconConfig）+ baseline + onResetEdit + onClearChain + canClearChain + submitMode"
+    status: RESOLVED
+
+  - node: S4b
+    decision: "RuleFormFields：Match URL + Match Type（共享校验）+ FieldEditor + Priority + offset；variant create|edit"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+architecture_deepdive_2:
+  - node: D-1..D-21
+    decision: "四界面 UI/UX 设计方向（21 项）"
+    note: "其中被后续 IMP/CT 修订者：D-4（降级为纯宽度断点）、D-7（IMP-8）、D-8（IMP-3 有意差异）、D-11（IMP-9/18）、D-16（IMP-15/16）、D-17（IMP-4）、D-19（IMP-5）、D-20（IMP-6）"
+    status: RESOLVED
+
+  - node: DT10
+    decision: "提交模型 = A3 混合（Dashboard 用统一 Save；侧边栏/slot 就地编辑立即提交）；Clear 恒立即生效"
+    implications: "同一面板「改值等 Save、Clear 立即生效」需视觉区分（DT12）"
+    status: RESOLVED
+
+  - node: DT11
+    decision: "null 为「未设定」的唯一表示（写入侧一元化；读侧保留三种容错）"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+architecture_deepdive_3:
+  - node: IMP-1
+    decision: "侧边栏弹窗容器 = 保留 Dialog（288px 单列）"
+    status: RESOLVED
+
+  - node: IMP-2
+    decision: "窄栏 FieldEditor 密度 = 常驻展开（靠滚动）"
+    implications: "顺带关闭 IMP-11；暴露 .tbs-dialog 自身滚动导致 header/footer 需 sticky"
+    status: RESOLVED
+
+  - node: IMP-3
+    decision: "Rules New Rule 容器 = 保持现状（顶部内联表单）"
+    implications: "与 DT8 不冲突（Q13 只要求共用组件，未要求位置统一）；需登记为有意差异"
+    status: RESOLVED
+
+  - node: IMP-4
+    decision: "Dashboard Edit 容器 = 行内展开（与 InlineRuleEditor 同形状、可多行）"
+    implications: "草稿容器改 Map<entryId, draft>；新增刷新冲掉草稿风险（IMP-13）"
+    status: RESOLVED
+
+  - node: IMP-5
+    decision: "Dashboard 行内链密度 = 单元格只放胜出值 + 来源徽标；四层值进展开面板"
+    note: "徽标是唯一跨面跳焦入口，须 button 语义 + aria-label"
+    status: RESOLVED
+
+  - node: IMP-6
+    decision: "Clear 的撤销承载 = 泛化 UndoBar 为共享组件（批次快照 + 文案 + 影响 tab 数）"
+    alternatives:
+      - option: "用 Toast.action"
+        rejected_reason: "与 UndoBar 并存 = 两套撤销 UI"
+      - option: "设置页新建独立撤销条"
+        rejected_reason: "明确成为第二套撤销 UI，日后必然分叉"
+    status: RESOLVED
+
+  - node: IMP-7
+    decision: "创作态 Clear = 不渲染（能力由 FormScene 派生，不手写布尔）"
+    implications: "本迭代第一处「有意能力差异」，须登记为例外"
+    status: RESOLVED
+
+  - node: IMP-8
+    decision: "MatchSummary 查询时机 = 打开时查一次；URL/Match Type 改动后即失效（outdated）"
+    implications: "豁免 C4 防抖；N=0 用中性句；须区分「初始即 0」与「已失效」"
+    status: RESOLVED
+
+  - node: IMP-9
+    decision: "Rules 表格列序 = 重排（不合并单元格）：☑ / Icon / Title / URL Pattern / Priority / Enabled / Actions（7 列）"
+    status: RESOLVED
+
+  - node: IMP-10
+    decision: "空态判定 = 各 Section 自行判定（实为四态：empty / no-match / error-first / error-stale；empty 优先）"
+    status: RESOLVED
+
+  - node: IMP-11
+    decision: "已随 IMP-2 自动关闭（两面均常驻展开 ⇒ 不存在密度切换）"
+    status: RESOLVED
+
+  - node: IMP-12
+    decision: "FormField a11y 修复范围 = 只修本迭代触达的字段（不改接口）"
+    implications: "须登记「靠调用方自觉」的固有缺陷 + 未绑清单"
+    status: RESOLVED
+
+  - node: IMP-13
+    decision: "多行草稿 = 不持久（外部变更/刷新即丢弃，无提示）"
+    implications: "损伤面随 IMP-4 放大（可丢 N 个）；Clear 自身与他行 Save 都会触发"
+    status: RESOLVED
+
+  - node: IMP-14
+    decision: "已撤销（Rules 与 Dashboard 不实现脏点 + 汇总条 + Save all）"
+    status: RESOLVED
+
+  - node: IMP-15
+    decision: "抽共享 hook useExpandRow（展开集 + Escape + 焦点移入/回归）"
+    status: RESOLVED
+
+  - node: IMP-16
+    decision: "两处一并修 Escape 与焦点（随 useExpandRow）"
+    status: RESOLVED
+
+  - node: IMP-17
+    decision: "第三选项命名 = 全局改名（撤销 DT6 原定的 Site original value）"
+    status: RESOLVED
+
+  - node: IMP-17b
+    decision: "具体标签字符串 = Use chain"
+    rationale: "须同时适用于 Title；旧名字面暗示「站点原值」而实际可能显示 slot/rule 值"
+    implications: "连带回改 DT2/DT3/DT5/DT6 + ① S1/S4a + A1-bis"
+    status: RESOLVED
+
+  - node: IMP-18
+    decision: "Mode 列冲突 = Q11 成立，删除 Mode 列（7 列）"
+    implications: "明确 Q11 落地 12 条清单（含侧边栏仍在用 mode 的 5 处）"
+    status: RESOLVED
+
+  - node: IMP-19
+    decision: "「不需要脏点+汇总条」= 保留统一 Save（草稿仍在），只是不做未保存指示"
+    implications: "IMP-13 的代价由「部分缓解」回退为「完全无缓解」；仅保留每行 Save.disabled 信号"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+detail:
+  - node: DT1
+    decision: "侧边栏入口处置 = 就地弹窗 + 与设置页共用同一实现（B）"
+    rationale: "① 侧边栏核心价值是「看着当前页直接建规则」；② 共用实现已把分叉风险降到最低；③ 能力不等会制造新的不一致"
+    implications: "靠构造保证一致（单一组件/单一校验/单一影响面）；字段集差异只能用显式 props/variant 表达"
+    status: RESOLVED
+
+  - node: DT2
+    decision: "命名统一以侧边栏显式命名为准（Icon URL / Custom Icon / Use chain）"
+    alternatives:
+      - option: "统一为 URL / Custom"
+        rejected_reason: "过于笼统，且与字段标签 Icon (optional) 不同族"
+    status: RESOLVED
+
+  - node: DT3
+    decision: "Icon 选项重设计：第三项由 Reset 改为 Use chain"
+    rationale: "现状把站点 favicon（http(s)）塞进 dataUri 并误标为 Custom Icon；Reset 的「—」提示属术语错位"
+    status: RESOLVED
+
+  - node: DT4
+    decision: "预填 = 四项全部带入上下文（Match URL / Match Type / Title / Icon）；来源统一为链；打开时快照一次"
+    status: RESOLVED
+
+  - node: DT5
+    decision: "Custom Title 与 Icon 对称支持 Use chain；对称 = 同一控件形状 + 同一术语 + 同一语义（非项数相同）"
+    implications: "S4 的 value 须改为统一模式模型"
+    status: RESOLVED
+
+  - node: DT6
+    decision: "Use chain 写侧语义 = A1（本层不设值 → 回落）"
+    alternatives:
+      - option: "A2 真哨兵钉住站点原值"
+        rejected_reason: "图标值域是 URI 字符串，无法表达哨兵"
+    status: RESOLVED
+
+  - node: DT7
+    decision: "两个按钮各司其职：↺ = 撤销编辑（纯前端）；Clear = 清空整条链（写存储 + 重投递）"
+    implications: "须新增跨层清除契约 onClearChain；清哪些层由 field-chain 输出"
+    status: RESOLVED
+
+  - node: DT8
+    decision: "共享组件边界 = B（RuleFormFields 包全部 5 道菜）"
+    alternatives:
+      - option: "A 只包 Title + Icon"
+        rejected_reason: "Match URL/Type/Priority 仍 3 处自绘；DT4 四项预填要写两遍"
+    implications: "收口 3 组重复块；正则校验 2/3 不一致 → 1"
+    status: RESOLVED
+
+  - node: DT9
+    decision: "Clear 免确认，靠「预览 + 5s UndoBar」"
+    implications: "预览从「提示」升级为「唯一防线」；Undo 须原子批次恢复"
+    status: RESOLVED
+
+  - node: DT12
+    decision: "提交模型对 FieldEditor 的影响：submitMode = immediate | draft（Clear 恒 immediate）"
+    implications: "同面板两种时机需显式视觉区分"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+detail_deepdive_2:
+  - node: D-a-1
+    decision: "文案基准 = 描述句 sentence case + 标签/按钮 Title Case；悬停标点规则"
+    implications: "须修正 4 处既有不一致（rule created 小写 / icon updated 用于清除 等）+ 术语统一表"
+    status: RESOLVED
+
+  - node: CT1
+    decision: "Title 维度形态 = 两选项 radio（Custom Title / Use chain）"
+    implications: "须删除 placeholder、重写 R6 短路、↺ 作用域扩到模式；radiogroup 从 4 处扩为 11 组"
+    status: RESOLVED
+
+  - node: CT2
+    decision: "影响面阈值 = 前 3 条 + …and K more（仅 MatchSummary；Clear 预览不受约束）"
+    implications: "列表排序键 = Tab N 数字序；须与 DT9 分清两套预览机制"
+    status: RESOLVED
+
+  - node: CT3-a
+    decision: "选项组 = 抽共享 RadioGroup 组件（内部 fieldset + legend）"
+    implications: "8→11 组统一；缺 aria-label 的缺陷结构性消失"
+    status: RESOLVED
+
+  - node: CT3-b
+    decision: "Confirm 初始焦点 = 聚焦确认（DOM 顺序 确认→取消）"
+    implications: "须补 4 条约束（防穿透 / 传 returnFocusRef / 不可逆操作配 UndoBar / 保护期）"
+    status: RESOLVED
+
+  - node: CT3-g
+    decision: "UndoBar 焦点 = 抢焦点到 Undo"
+    implications: "须补 4 条约束（焦点归还 / 与 Confirm 串行 / 防穿透 / 修 role 冲突）"
+    status: RESOLVED
+
+  - node: CT4
+    decision: "Custom Title 已选但输入为空 = 无效，禁止提交（+ 行内提示）"
+    alternatives:
+      - option: "自动回退为 Use chain"
+        rejected_reason: "静默改变用户的声明"
+      - option: "允许空标题"
+        rejected_reason: "正是 Q6 要消灭的「清除标题实为清空」"
+    implications: "泛化为通用校验规则（凡「声明有值形态但未提供值」→ 无效）"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+detail_deepdive_3:
+  - node: E1
+    decision: "UI 全量复用后台校验原语（validateRegex + isSafeFaviconProtocol + normalizeUrl）"
+    rationale: "从构造上消除「实时提示与真实结果相反」"
+    status: RESOLVED
+
+  - node: E1-a
+    decision: "必须先 wildcardToRegex 再校验（校验的串与保存的串必须同一个）"
+    implications: "直接修掉 ① N7"
+    status: RESOLVED
+
+  - node: E2
+    decision: "冲突检测 = 不做实时，仅提交后如实提示"
+    alternatives:
+      - option: "实时阻截（复用同一函数）"
+        rejected_reason: "用户按体验偏好选择提交后提示（注：成本已探明为零）"
+    implications: "须补 3 前提（conflictingRuleId 传 UI / 修双重告警 / 统一两条冲突文案）；RuleEditor 的能力不回补"
+    status: RESOLVED
+
+  - node: E3
+    decision: "错误呈现 = 字段级内联 + 取消 toast（复用既有表单级区）"
+    implications: "toast 职责收窄为「成功 + 批量结果」"
+    status: RESOLVED
+
+  - node: E3b
+    decision: "冲突类错误 = 放 Match URL 字段内联"
+    status: RESOLVED
+
+  - node: E4
+    decision: "normalizeUrl 规范化 = 补「尾斜杠等同」"
+    status: RESOLVED
+
+  - node: E5
+    decision: "作用范围 = A 全局改 normalizeUrl（含投递匹配）"
+    alternatives:
+      - option: "B 只给冲突检测用宽松比较"
+        rejected_reason: "用户选择语义一致，接受匹配面变宽"
+    implications: "匹配面静默变宽 → 登记为已发布匹配语义变更（RK-2）"
+    status: RESOLVED
+
+  - node: E5-a
+    decision: "只在非根路径时去尾斜杠（pathname !== '/' && endsWith('/')）"
+    status: RESOLVED
+
+  - node: E5-b
+    decision: "query 与 hash 语义不变（只动尾斜杠）"
+    status: RESOLVED
+
+  - node: E5-c
+    decision: "解析失败仍原样返回；UI 须额外判定「是否可解析」"
+    status: RESOLVED
+
+  - node: E5-d
+    decision: "登记为「已发布匹配语义变更」→ 须补 normalizeUrl 前后对照单测"
+    status: RESOLVED
+
+  - node: E5-e
+    decision: "./ 与 ../ 的归一由 new URL() 负责（不重复实现）"
+    status: RESOLVED
+
+  - node: F1
+    decision: "跳焦动作 = 滚到 + 高亮（不自动展开、不改用户状态）"
+    status: RESOLVED
+
+  - node: F1b
+    decision: "到达保证 = 回退链（目标行 → 表格第一行 → 搜索框）"
+    implications: "回退时绝不高亮（否则误导）+ 必须给如实说明"
+    status: RESOLVED
+
+  - node: F2
+    decision: "高亮形态 = 临时高亮 ~2s（带过渡）"
+    implications: "reduced-motion 降级须保留高亮；必须补非视觉播报（因无焦点移入）"
+    status: RESOLVED
+
+  - node: G1
+    decision: "「有行但全不可投递」= 不新增态，表格上方汇总句"
+    implications: "unknown 不计入统计（它是常态，否则汇总句恒真）；degraded 仅内存故汇总会流动"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Act 3 后补登（规划期复核发现；前两项属 Act 3 自审漏登，第三项属事实性更正）
+act3_additions:
+  - node: D-13
+    layer: architecture_deepdive_2
+    decision: "selectedIds 与可见集关系 = (a) 自动裁剪"
+    rationale: "与「所见即所操作」一致，无需新交互"
+    implications: "N8（可能删除看不见的规则）直接消除；批量条数量文案即为可见集数量"
+    note: "ACT-3 SELF-REVIEW GAP：主文档曾误写 OPEN 0，由规划期复核发现并补登"
+    status: RESOLVED
+
+  - node: G-2
+    layer: architecture_deepdive_3
+    decision: "不建独立 FormScene 模块；canClearChain 由 RuleFormFields.variant 单点派生"
+    rationale: "YAGNI；仍满足 IMP-7 的「能力由一处派生、不手写布尔」硬要求"
+    note: "ACT-3 SELF-REVIEW GAP：子文档保留「待你确认」字样"
+    status: RESOLVED
+
+  - node: G-3
+    type: correction
+    decision: "裸 new RegExp 计数更正为 5 处（原写 4 处，漏 settings:467）"
+    evidence: "sidebar/App.tsx:617,704 / settings/App.tsx:467,736,938"
+    note: "FACTUAL ERROR：由规划期实测发现"
+    status: RESOLVED
+
+# ─────────────────────────────────────────────────────────────────────────────
+deferred:
+  - node: D-d
+    decision: "测试分层与 RED 可构造性"
+    reason: "归入 sw-strategic-planner 阶段（规划者本就负责 RED 可构造性）"
+    directions:
+      - "field-chain 穷举单测（RK-1 缓解）"
+      - "normalizeUrl 前后对照单测（RK-2 / E5-d）"
+      - "投递调度（leading/trailing / 重试 / 降级）"
+      - "RuleFormFields / FieldEditor 等价测试（DT1 三要素）"
+      - "契约清理 + UI"
+    status: DEFERRED
+
+# ─────────────────────────────────────────────────────────────────────────────
+registered_risks:
+  - id: RK-1
+    risk: "核心解析语义与投递协议同时重构，行为漂移失去完整证据"
+    mitigation: "field-chain 独立穷举单测 + 显式携带 + 前后等价对照用例"
+  - id: RK-2
+    risk: "normalizeUrl 匹配面变宽（已发布匹配语义变更）"
+    mitigation: "normalizeUrl 前后对照单测（E5-d）"
+  - id: RK-3
+    risk: "Clear 免确认 + 5s 过期 ⇒ 全局配置（slot.uiMarker / rule.title）不可逆丢失"
+    mitigation: "预览默认展开且以「将被删除的全局配置」为第一信息"
+  - id: RK-4
+    risk: "多行草稿无任何未保存指示 ⇒ 静默丢失（IMP-19 已接受，无缓解）"
+    mitigation: "仅保留每行 Save.disabled 信号（须由本行 dirty 真实驱动）"
+
+# ─────────────────────────────────────────────────────────────────────────────
+reconnaissance_inconsistencies:
+  count: 19
+  items:
+    - "#1 链实现两份（UI 手抄、漏协议白名单）"
+    - "#2 rule 胜出排序三份，未用共享函数"
+    - "#3 注释与代码相反（注释称 slot > override）"
+    - "#4 清除只在 executeScript 生效"
+    - "#5 「清除标题」实为清空 document.title=''"
+    - "#6 REMOVE_TAB_OVERRIDE 不重投递"
+    - "#7 UPDATE_SLOT_URL 不重投递"
+    - "#8 两种覆盖 UX（快捷键 Confirm / 侧边栏静默）"
+    - "#9 同一 Dashboard 两套 Reset 语义"
+    - "#10 孤儿 RuleEditor.tsx / DualCards.tsx 在 src 无引用"
+    - "#11 投递无按 tab 排序"
+    - "#12 Dashboard 不展示 rule/site 来源"
+    - "#13 APPLY_RULE_TO_TAB 绕过链且 UI 不可达"
+    - "#14 正则实时校验只在 3 处中的 2 处（Inline 缺失）"
+    - "#15 ↺ 按钮三种后果（复位到已保存值 / 复位到链胜出值 / 直接清除）"
+    - "#16 站点 favicon 被误判为 Custom Icon 并持久化为 type:'upload'"
+    - "N1 Confirm 在设置页完全未使用（未 import）"
+    - "N8 selectedIds 与可见行不同步 → 批量删除可能删除用户看不见的规则"
+    - "N2 --tbs-* 旧样式层全仓库零引用（死代码）"

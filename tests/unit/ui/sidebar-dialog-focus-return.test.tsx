@@ -128,9 +128,9 @@ describe('F4 — focus returns to the real menu trigger after closing a modal', 
     const trigger = screen.getByRole('button', { name: 'More options for slot 1' });
     fireEvent.click(trigger);
     await waitFor(() => {
-      expect(screen.getByRole('menuitem', { name: 'Delete Slot' })).toBeInTheDocument();
+      expect(screen.getByRole('menuitem', { name: 'Clear Slot Data' })).toBeInTheDocument();
     });
-    const menuItem = screen.getByRole('menuitem', { name: 'Delete Slot' });
+    const menuItem = screen.getByRole('menuitem', { name: 'Clear Slot Data' });
     menuItem.focus();
     fireEvent.click(menuItem);
 

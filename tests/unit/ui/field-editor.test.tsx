@@ -44,11 +44,11 @@ function renderEditor(overrides: Partial<FieldEditorProps> = {}) {
 }
 
 describe('T11: FieldEditor', () => {
-  it('renders the two title options with a native radio group', () => {
+  it('renders the two title options as a tab strip (review item 3.1)', () => {
     renderEditor();
-    expect(screen.getByRole('group', { name: 'Title source' })).toBeTruthy();
-    expect(screen.getByLabelText('Custom Title')).toBeTruthy();
-    expect(screen.getByLabelText('Use chain')).toBeTruthy();
+    expect(screen.getByRole('tablist', { name: 'Title source' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Custom Title/ })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Use chain/ })).toBeTruthy();
   });
 
   it('does not render Clear when canClearChain is false', () => {
@@ -59,6 +59,57 @@ describe('T11: FieldEditor', () => {
   it('renders Clear when canClearChain is true', () => {
     renderEditor({ canClearChain: true });
     expect(screen.getByText('Clear title')).toBeTruthy();
+  });
+
+  /**
+   * Review item 2 (round 6): the icon dimension printed the record summary TWICE.
+   *
+   * `FieldEditor` rendered its own `MaskedSummary` while `IconFieldEditor` — the
+   * component it delegates the icon surface to — rendered another from the same
+   * `chain.nodes`, so the identical list appeared twice in the Dashboard Edit
+   * panel and in the New Global Page Rule dialog.
+   */
+  it('renders the icon record summary exactly once (review item 2)', () => {
+    renderEditor({ field: 'icon', chain: chainWith('R') });
+    // `IconChainLabel`-free assertion: count the summary panels, not the rows.
+    expect(document.querySelectorAll('.tbs-masked')).toHaveLength(1);
+  });
+
+  it('renders the title record summary exactly once as well', () => {
+    renderEditor({ field: 'title', chain: chainWith('R') });
+    expect(document.querySelectorAll('.tbs-masked')).toHaveLength(1);
+  });
+
+  /**
+   * Review item 1 (round 6): `↺` on the icon dimension appeared dead.
+   *
+   * `onResetEdit` restored the parent's `FieldMode` + `iconConfig`, but the
+   * picker's own richer value (which tab, which sub-mode, the preview) lives in
+   * local state that was never touched — so nothing visibly changed. Reset must
+   * therefore also push the ORIGINAL picker value back and report it upward.
+   */
+  it('the icon ↺ restores the picker value and reports it to the parent', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const onIconConfigChange = vi.fn();
+    const onResetEdit = vi.fn();
+    renderEditor({
+      field: 'icon',
+      chain: chainWith(),
+      mode: { kind: 'set', value: 'https://changed.example/i.png' },
+      iconConfig: undefined,
+      baseline: { mode: { kind: 'set', value: 'https://original.example/i.png' } },
+      onChange,
+      onIconConfigChange,
+      onResetEdit,
+    });
+
+    await user.click(screen.getByRole('button', { name: /Reset to the value this editor opened with/i }));
+
+    // The parent learns the original value…
+    expect(onChange).toHaveBeenCalledWith({ kind: 'set', value: 'https://original.example/i.png' });
+    // …and the shared reset hook still runs.
+    expect(onResetEdit).toHaveBeenCalledTimes(1);
   });
 
   it('the ↺ reset never writes storage (only onResetEdit fires)', async () => {
@@ -103,10 +154,10 @@ describe('T11: FieldEditor', () => {
     expect(screen.getByText(/Clears this layer/)).toBeTruthy();
   });
 
-  it('binds the Use chain note to the radio group via aria-describedby (CT3-f)', () => {
+  it('binds the Use chain note to the tab strip via aria-describedby (CT3-f)', () => {
     renderEditor({ mode: { kind: 'use-chain' }, canClearChain: true });
-    const group = screen.getByRole('group', { name: 'Title source' });
-    expect(group.getAttribute('aria-describedby')).toContain('field-title-use-chain-hint');
+    const strip = screen.getByRole('tablist', { name: 'Title source' });
+    expect(strip.getAttribute('aria-describedby')).toContain('field-title-use-chain-hint');
   });
 
   it('renders the immediate-write marker always (DT12)', () => {
@@ -114,8 +165,8 @@ describe('T11: FieldEditor', () => {
     expect(screen.getByText('Applies immediately')).toBeTruthy();
   });
 
-  it('shows a masking note with the masked owners', () => {
-    // A slot + rule both set; the override wins and masks them.
+  it('lists every record that describes the tab, in plain language', () => {
+    // An override AND a rule both carry a value for this tab.
     const sync: SyncState = {
       ...createDefaultSyncState(),
       rules: [{
@@ -134,20 +185,40 @@ describe('T11: FieldEditor', () => {
     const chain = resolveFieldChain('title', { sync, local, tabId: 1, tabUrl: 'https://a.com/' });
 
     renderEditor({ chain });
-    expect(screen.getByText(/Overridden by/)).toBeTruthy();
+    // Review item 5: the summary names how many records describe the tab and
+    // lists them; a bare "Overridden by …" line is what it replaced.
+    expect(screen.getByText(/records describe this tab/)).toBeTruthy();
+    expect(document.querySelectorAll('.tbs-masked__item')).toHaveLength(2);
+    // Review item 7: the badge alone ("Rule") is not enough — each row explains
+    // WHAT that record is, so "which record is this" is answerable.
+    expect(screen.getByText(/Set by a global page rule/)).toBeTruthy();
   });
 
   it('renders the unknown site value as an em dash, not as empty (IMP-5)', () => {
     const chain = chainWith();
     renderEditor({ chain });
-    expect(screen.getByText('—')).toBeTruthy();
+    // The Use chain tier table lists every tier, so several `—` are expected.
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 
-  it('calls onChange when switching mode', async () => {
+  it('seeds the custom tab with lastValue when switching back (review item 3.1)', async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     renderEditor({ onChange, lastValue: 'Prev' });
-    await user.click(screen.getByLabelText('Custom Title'));
+    await user.click(screen.getByRole('tab', { name: /Custom Title/ }));
     expect(onChange).toHaveBeenCalledWith({ kind: 'set', value: 'Prev' });
+  });
+
+  it('lists every chain tier (including empty ones) under Use chain (review item 2)', () => {
+    renderEditor({ mode: { kind: 'use-chain' } });
+    for (const tier of ['override', 'slot', 'rule', 'site'] as const) {
+      expect(document.querySelector(`[data-tier="${tier}"]`)).toBeTruthy();
+    }
+  });
+
+  it('hides the Use chain tab when the surface has no chain (item 6.1)', () => {
+    renderEditor({ allowUseChain: false });
+    expect(screen.queryByRole('tab', { name: /Use chain/ })).toBeNull();
+    expect(screen.getByRole('tab', { name: /Custom Title/ })).toBeTruthy();
   });
 });

@@ -14,18 +14,20 @@ import { Button, Toast, StatusBadge, Confirm } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
 import { renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, IconSource, DashboardRow } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, DashboardRow } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import { FieldEditor } from '@ui/shared/field-editor';
 import type { FieldMode } from '@ui/shared/field-editor';
+import { InlineEditorShell } from '@ui/shared/inline-editor-shell';
+import { normalizeRuleDraft, validateRuleDraft } from '@ui/shared/rule-form-submit';
+import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
 import { resolveFieldChain } from '@shared/field-chain';
-import type { ChainResult, TierOwner } from '@shared/field-chain';
-import { useJumpToRow } from '@ui/shared/use-jump-to-row';
+import type { ChainResult, TierKey, TierOwner } from '@shared/field-chain';
+import { useJumpToRow, JUMP_HIGHLIGHT_CLASS, JUMP_HIGHLIGHT_MS } from '@ui/shared/use-jump-to-row';
 import { UndoBar } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
-import { normalizedRegexPattern, validateRuleForm } from '@shared/form-validation';
 import { getMessageClient } from '@ui/shared/message-client';
 import { MatchSettingsHelp } from './MatchSettingsHelp';
 
@@ -479,30 +481,16 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
   const iconChain = useMemo(() => emptyChain(), []);
 
   const handleSave = useCallback(async () => {
-    const validation = validateRuleForm({
-      matchType,
-      url,
-      titleMode: titleMode.kind === 'set' ? 'set' : 'use-chain',
-      titleValue: titleMode.kind === 'set' ? titleMode.value : '',
-      iconMode: iconMode.kind === 'set' ? 'url' : 'use-chain',
-      iconValue: iconMode.kind === 'set' ? iconMode.value : '',
-      iconConfig: iconConfig ? { dataUri: iconConfig.dataUri ?? '' } : undefined,
-    });
+    const draft: RuleDraftValue = { url, matchType, titleMode, iconMode, iconConfig, priority, enabled };
+    // The SHARED validator converts the wildcard BEFORE validating, so the
+    // validated string is exactly the stored string (E1-a).
+    const validation = validateRuleDraft(draft);
     if (!validation.valid) {
       setError(validation.errors[0]?.message ?? 'Invalid form');
       return;
     }
 
-    const urlValue = matchType === 'regex' ? normalizedRegexPattern(url) : url.trim();
-
-    // Compute favicon from the mode model (mutually exclusive):
-    // set → URL text or the rendered custom data URI; use-chain → cleared.
-    let favicon: IconSource | undefined;
-    if (iconMode.kind === 'set') {
-      const dataUri = iconConfig?.dataUri ?? (iconConfig ? renderIconToDataUri(iconConfig, 64) : '');
-      if (dataUri) favicon = { type: 'upload', value: dataUri };
-      else if (iconMode.value.trim()) favicon = { type: 'url', value: iconMode.value.trim() };
-    }
+    const fields = normalizeRuleDraft(draft);
 
     setStatus('saving');
     setError(null);
@@ -510,11 +498,11 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
     const result = await onSave(
       rule.id,
       {
-        urlMatch: { type: matchType, value: urlValue },
-        priority: Math.max(-100, Math.min(100, priority)),
-        title: titleMode.kind === 'set' ? (titleMode.value.trim() || undefined) : undefined,
-        favicon,
-        enabled,
+        urlMatch: { type: matchType, value: fields.url },
+        priority: fields.priority,
+        title: fields.title,
+        favicon: fields.favicon,
+        enabled: fields.enabled,
       },
       expectedUpdatedAt,
     );
@@ -536,69 +524,78 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
   }, [url, matchType, titleMode, iconMode, iconConfig, priority, enabled, rule.id, expectedUpdatedAt, onSave, onCancel]);
 
   return (
-    <tr
-      className="tbs-settings__inline-editor-row"
+    <InlineEditorShell
+      colSpan={7}
+      title="Edit Rule"
+      ariaLabel={`Edit rule ${rule.id}`}
       // D-16 / IMP-15: Escape collapses the row.
-      onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onCancel(); } }}
+      onEscape={onCancel}
+      error={error}
+      actions={
+        <>
+          <Button size="sm" variant="ghost" onClick={onCancel} aria-label="Cancel">Cancel</Button>
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={() => void handleSave()}
+            disabled={!url.trim() || status === 'saving'}
+            aria-label="Update Rule"
+          >
+            {status === 'saving' ? 'Saving...' : 'Update Rule'}
+          </Button>
+        </>
+      }
     >
-      <td colSpan={7}>
-        <div className="tbs-settings__rule-form" role="form" aria-label={`Edit rule ${rule.id}`}>
-          <h3>Edit Rule</h3>
-          {error && <p className="tbs-settings__rule-form-error" role="alert">{error}</p>}
-          <div className="tbs-settings__rule-form-grid">
-            <RuleFormFields
-              variant="edit"
-              value={{
-                url,
-                matchType,
-                titleMode,
-                iconMode,
-                iconConfig,
-                priority,
-                enabled,
-              }}
-              onChange={(patch) => {
-                if (patch.url !== undefined) setUrl(patch.url);
-                if (patch.matchType !== undefined) setMatchType(patch.matchType);
-                if (patch.titleMode !== undefined) setTitleMode(patch.titleMode);
-                if (patch.iconMode !== undefined) setIconMode(patch.iconMode);
-                if (patch.iconConfig !== undefined) setIconConfig(patch.iconConfig);
-                if (patch.priority !== undefined) setPriority(patch.priority);
-                if (patch.enabled !== undefined) setEnabled(patch.enabled);
-              }}
-              prefill={{ url: rule.urlMatch.value }}
-              chain={titleChain}
-              titleChain={titleChain}
-              iconChain={iconChain}
-              baselineTitle={{ mode: rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' } }}
-              baselineIcon={{
-                mode: hasIcon ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value } : { kind: 'use-chain' },
-                iconConfig: isCustomIcon ? { dataUri: rule.favicon!.value } : undefined,
-              }}
-              onResetTitleEdit={() => { setTitleMode(rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' }); }}
-              onResetIconEdit={() => { setIconMode(hasIcon ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value } : { kind: 'use-chain' }); }}
-              onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
-              onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
-              submitMode={{ kind: 'immediate' }}
-              showEnabled
-              idPrefix={`rf-${rule.id}`}
-            />
-          </div>
-          <div className="tbs-settings__rule-form-actions">
-            <Button size="sm" variant="ghost" onClick={onCancel} aria-label="Cancel">Cancel</Button>
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => void handleSave()}
-              disabled={!url.trim() || status === 'saving'}
-              aria-label="Update Rule"
-            >
-              {status === 'saving' ? 'Saving...' : 'Update Rule'}
-            </Button>
-          </div>
-        </div>
-      </td>
-    </tr>
+      <RuleFormFields
+        variant="edit"
+        value={{
+          url,
+          matchType,
+          titleMode,
+          iconMode,
+          iconConfig,
+          priority,
+          enabled,
+        }}
+        onChange={(patch) => {
+          if (patch.url !== undefined) setUrl(patch.url);
+          if (patch.matchType !== undefined) setMatchType(patch.matchType);
+          if (patch.titleMode !== undefined) setTitleMode(patch.titleMode);
+          if (patch.iconMode !== undefined) setIconMode(patch.iconMode);
+          if (patch.iconConfig !== undefined) setIconConfig(patch.iconConfig);
+          if (patch.priority !== undefined) setPriority(patch.priority);
+          if (patch.enabled !== undefined) setEnabled(patch.enabled);
+        }}
+        prefill={{ url: rule.urlMatch.value }}
+        chain={titleChain}
+        titleChain={titleChain}
+        iconChain={iconChain}
+        baselineTitle={{ mode: rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' } }}
+        baselineIcon={{
+          mode: hasIcon ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value } : { kind: 'use-chain' },
+          iconConfig: isCustomIcon ? { dataUri: rule.favicon!.value } : undefined,
+        }}
+        onResetTitleEdit={() => { setTitleMode(rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' }); }}
+        onResetIconEdit={() => { setIconMode(hasIcon ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value } : { kind: 'use-chain' }); }}
+        onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
+        onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
+        submitMode={{ kind: 'immediate' }}
+        showEnabled
+        idPrefix={`rf-${rule.id}`}
+        // Item 7: a rule DEFINITION is not a page — it has no chain of its own, so
+        // `Use chain` has nothing to fall back to and switching to it stored NO
+        // title/icon while the row still looked edited ("the rule has a title but
+        // the tab never updates"). The create AND edit rule surfaces therefore
+        // drop the tab; the value is always an explicit `set` on this form.
+        allowUseChain={false}
+        // Items 6.2 / 6.3: the impact of this rule over the open tabs, visible on
+        // open and re-checked as the pattern changes. `impactExcludeRuleId` keeps
+        // the rule from counting itself as the winner while it is being edited.
+        showImpactPreview
+        impactDefaultExpanded
+        impactExcludeRuleId={rule.id}
+      />
+    </InlineEditorShell>
   );
 }
 
@@ -693,43 +690,73 @@ function RulesSection() {
     }
   }, [loadRules]);
 
+  /**
+   * Item 6.1: fill the title / icon from the value the Match URL resolves to.
+   *
+   * The background resolves it through the same field chain the sidebar uses, so
+   * what lands in the form is exactly what a tab at that URL currently shows.
+   * A no-match result is reported rather than silently doing nothing.
+   */
+  const resolveMatchUrlInto = async (field: 'title' | 'icon') => {
+    if (!form.url.trim()) {
+      setError('Enter a URL pattern first.');
+      return;
+    }
+    try {
+      const res = await sendMessage('RESOLVE_MATCH_URL', {
+        urlMatch: { type: form.matchType, value: form.url.trim() },
+      });
+      const result = extractResult(res) as { resolved?: { matchedTabs: number; title: string | null; icon: string | null } } | null;
+      const resolved = result?.resolved;
+      if (!resolved || resolved.matchedTabs === 0) {
+        setError('No open tab matches this pattern, so there is nothing to copy.');
+        return;
+      }
+      const value = field === 'title' ? resolved.title : resolved.icon;
+      if (!value) {
+        setError(field === 'title' ? 'The matched tabs have no title to copy.' : 'The matched tabs have no icon to copy.');
+        return;
+      }
+      setError(null);
+      setForm((prev) => (field === 'title'
+        ? { ...prev, titleMode: { kind: 'set', value } }
+        : { ...prev, iconMode: { kind: 'set', value }, iconConfig: undefined }));
+    } catch {
+      setError('Could not read the matched tabs.');
+    }
+  };
+
   const handleSaveRule = async () => {
+    const draft: RuleDraftValue = {
+      url: form.url,
+      matchType: form.matchType,
+      titleMode: form.titleMode,
+      iconMode: form.iconMode,
+      iconConfig: form.iconConfig,
+      priority: form.priority,
+    };
     // E1-a: the SHARED validator converts the wildcard BEFORE validating, so the
     // validated string is exactly the stored string (no bare `new RegExp` here).
-    const validation = validateRuleForm({
-      matchType: form.matchType,
-      url: form.url,
-      titleMode: form.titleMode.kind === 'set' ? 'set' : 'use-chain',
-      titleValue: form.titleMode.kind === 'set' ? form.titleMode.value : '',
-      iconMode: form.iconMode.kind === 'set' ? 'url' : 'use-chain',
-      iconValue: form.iconMode.kind === 'set' ? form.iconMode.value : '',
-      iconConfig: form.iconConfig ? { dataUri: form.iconConfig.dataUri ?? '' } : undefined,
-    });
+    const validation = validateRuleDraft(draft);
     if (!validation.valid) {
       setError(validation.errors[0]?.message ?? 'Invalid form');
       return;
     }
 
-    const urlValue = form.matchType === 'regex' ? normalizedRegexPattern(form.url) : form.url.trim();
-
     setSaving(true);
     setError(null);
 
-    // DT5 mode model: `set` → URL text or the rendered custom data URI.
-    let favicon: { type: string; value: string } | undefined;
-    if (form.iconMode.kind === 'set') {
-      const dataUri = form.iconConfig?.dataUri ?? (form.iconConfig ? renderIconToDataUri(form.iconConfig, 64) : '');
-      if (dataUri) favicon = { type: 'upload', value: dataUri };
-      else if (form.iconMode.value.trim()) favicon = { type: 'url', value: form.iconMode.value.trim() };
-    }
+    // Shared normalisation: regex conversion, priority clamp and the DT5 mode
+    // model (`set` → URL text or the rendered custom data URI) live in ONE place.
+    const fields = normalizeRuleDraft(draft);
 
     try {
       // Create new rule — conflict/duplicate detection happens in the background
       const res = await sendMessage('CREATE_RULE', {
-        urlMatch: { type: form.matchType, value: urlValue },
-        priority: Math.max(-100, Math.min(100, form.priority)),
-        title: form.titleMode.kind === 'set' ? (form.titleMode.value.trim() || undefined) : undefined,
-        favicon,
+        urlMatch: { type: form.matchType, value: fields.url },
+        priority: fields.priority,
+        title: fields.title,
+        favicon: fields.favicon,
       });
       const result = extractResult(res);
       if (result?.success) {
@@ -924,6 +951,14 @@ function RulesSection() {
             iconChain={emptyChain()}
             baselineTitle={{ mode: { kind: 'use-chain' } }}
             baselineIcon={{ mode: { kind: 'use-chain' } }}
+            // Item 6.1: a new rule has no chain, so `Use chain` is dropped and the
+            // matched value is offered instead.
+            allowUseChain={false}
+            onFetchTitleFromMatchUrl={() => void resolveMatchUrlInto('title')}
+            onFetchIconFromMatchUrl={() => void resolveMatchUrlInto('icon')}
+            // Items 6.2 / 6.3: live impact of the pattern over the open tabs.
+            showImpactPreview
+            impactDefaultExpanded
             onResetTitleEdit={() => setForm((prev) => ({ ...prev, titleMode: { kind: 'use-chain' } }))}
             onResetIconEdit={() => setForm((prev) => ({ ...prev, iconMode: { kind: 'use-chain' }, iconConfig: undefined }))}
             onClearTitle={() => setForm((prev) => ({ ...prev, titleMode: { kind: 'use-chain' } }))}
@@ -1301,6 +1336,53 @@ function DashboardSection() {
   });
 
   /**
+   * Review: after a successful write the panel collapses and the row is
+   * reloaded, so the user was left with no idea WHICH row they had just
+   * changed — the new value simply appeared somewhere in the table. The row is
+   * therefore pulled into view and highlighted with the same treatment a
+   * `jumpTo` uses, which keeps ONE visual language for "this is the row".
+   *
+   * The target is addressed by the value the user just edited, and falls back
+   * to the label when the reload changed the row's identity (a rule-hit row
+   * becomes an override row once it is promoted, which is the expected outcome
+   * of editing a managed tab).
+   */
+  const [focusTarget, setFocusTarget] = useState<{ id: string; label: string } | null>(null);
+
+  useEffect(() => {
+    if (!focusTarget) return;
+    // Resolved against the LIVE DOM, never against the `entries` captured at
+    // write time: the reload that decides the row's final shape happens after
+    // the write, so a stale list would point at a row that no longer exists.
+    const el = document.querySelector<HTMLElement>(`[data-dash-entry="${focusTarget.id}"]`)
+      ?? Array.from(document.querySelectorAll<HTMLElement>('tr[data-dash-row]'))
+        .find((tr) => tr.querySelector(`[aria-label="Edit ${focusTarget.label}"]`) !== null);
+    // Not rendered yet; the reload's `entries` change re-runs this effect.
+    if (!el) return;
+    // `scrollIntoView` is not implemented in every host (jsdom in tests), and a
+    // missing scroll must never cost the highlight — the cue is the point.
+    el.scrollIntoView?.({ block: 'center' });
+    el.classList.add(JUMP_HIGHLIGHT_CLASS);
+    // The request is cleared only when the cue is over, so a reload that lands
+    // mid-highlight re-applies the cue instead of cancelling it.
+    const timer = setTimeout(() => {
+      el.classList.remove(JUMP_HIGHLIGHT_CLASS);
+      setFocusTarget(null);
+    }, JUMP_HIGHLIGHT_MS);
+    return () => { clearTimeout(timer); el.classList.remove(JUMP_HIGHLIGHT_CLASS); };
+  }, [focusTarget, entries]);
+
+  /**
+   * Point the cue at the row the write produced. `expectedId` is the backend's
+   * id for the layer just written — a promoted rule-hit becomes an override row,
+   * so it changes from `hit-N` to `cp-N` — and the label is the fallback for any
+   * case where that assumption does not hold.
+   */
+  const focusAfterWrite = (entry: DashboardEntry, expectedId: string) => {
+    setFocusTarget({ id: expectedId, label: entry.label });
+  };
+
+  /**
    * Clear (Q13/N10/DT11): the tier set to write is decided by `clearChain`, so
    * the dashboard does not invent its own notion of "reset". Writes unify on
    * `null` (no legacy empty-string paths).
@@ -1316,6 +1398,16 @@ function DashboardSection() {
           slotId: entry.slotId,
           uiMarker: { customTitle: '', icon: null },
         });
+      } else if (entry.kind === 'rule-hit' && entry.ruleId != null) {
+        // Issue 3: a rule-hit row owns no stored override/marker — the only
+        // thing this row can clear is the RULE that drives it, so Clear disables
+        // the rule instead of pretending to blank a value that is not here.
+        await sendMessage('UPDATE_RULE', { ruleId: entry.ruleId, enabled: false });
+        setToast({ variant: 'success', message: `Rule disabled — ${entry.label} is no longer managed` });
+        void load();
+        setBusy(false);
+        setConfirmReset(null);
+        return;
       }
       setToast({ variant: 'success', message: `${entry.label} cleared` });
       void load();
@@ -1391,7 +1483,11 @@ function DashboardSection() {
       ? entry.chain.title.winner.value
       : entry.chain.favicon.winner.value;
     try {
-      if (entry.kind === 'override' && entry.tabId != null) {
+      // A `rule-hit` row can only express "unset this field at the Page level",
+      // so it writes the same override shape as an `override` row (see
+      // `applyDraft`): clearing the Page field lets the chain fall back to the
+      // rule, which is what "clear this layer" means for a rule-managed tab.
+      if ((entry.kind === 'override' || entry.kind === 'rule-hit') && entry.tabId != null) {
         if (field === 'title') await sendMessage('SET_TAB_OVERRIDE', { tabId: entry.tabId, title: '' });
         else await sendMessage('SET_TAB_OVERRIDE', { tabId: entry.tabId, favicon: null });
       } else if (entry.kind === 'slot' && entry.slotId != null) {
@@ -1405,7 +1501,7 @@ function DashboardSection() {
       setUndoState({
         message: field === 'title' ? `${entry.label} title cleared` : `${entry.label} icon cleared`,
         snapshot: {
-          writes: entry.kind === 'override' && entry.tabId != null
+          writes: (entry.kind === 'override' || entry.kind === 'rule-hit') && entry.tabId != null
             ? [{ kind: 'tab-override', tabId: entry.tabId, ...(field === 'title' ? { title: previous } : { favicon: previous }) }]
             : entry.slotId != null
               ? [{ kind: 'slot-marker', slotId: entry.slotId, ...(field === 'title' ? { customTitle: previous } : { iconValue: previous }) }]
@@ -1417,6 +1513,88 @@ function DashboardSection() {
       void load();
     } catch {
       setToast({ variant: 'error', message: 'Failed to clear' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Review item 1: which record each row's preview is showing.
+   *
+   * Keyed by `${entryId}:${field}` so the title and icon editors of one row
+   * preview independently. Selecting a record only changes this preview — it
+   * never writes; the user still presses Save.
+   */
+  const [preview, setPreview] = useState<Record<string, TierOwner>>({});
+
+  const previewOwner = (entry: DashboardEntry, field: 'title' | 'icon'): TierOwner | null =>
+    preview[`${entry.id}:${field}`] ?? null;
+
+  /**
+   * Review item 1: selecting a record previews BOTH dimensions of it.
+   *
+   * The two editors render one record list each, but a click on either one is a
+   * statement about the record — so the icon preview follows a title-row click
+   * and vice versa. Without this, the user clicks "Slot 3" in the title list and
+   * the icon preview silently keeps showing a different record.
+   */
+  const selectPreview = (entry: DashboardEntry, owner: TierOwner) => {
+    setPreview((prev) => ({ ...prev, [`${entry.id}:title`]: owner, [`${entry.id}:icon`]: owner }));
+  };
+
+  /**
+   * Items 2 / 6 / 8: copy one RECORD's value into the layer this row edits
+   * ("Use" on a chain row). The value becomes an explicit `set` on the row's own
+   * layer, exactly as typing it would.
+   */
+  const applyTierValue = (entry: DashboardEntry, _kind: TierKey, value: string, field: 'title' | 'icon') => {
+    setDrafts((prev) => {
+      const next = new Map(prev);
+      const current = next.get(entry.id);
+      if (!current) return prev;
+      if (field === 'title') {
+        next.set(entry.id, { ...current, titleMode: { kind: 'set', value } });
+      } else {
+        next.set(entry.id, {
+          ...current,
+          iconMode: { kind: 'set', value: value.startsWith('data:') ? '' : value },
+          iconConfig: value.startsWith('data:') ? { dataUri: value } : undefined,
+        });
+      }
+      return next;
+    });
+  };
+
+  /**
+   * Items 2 / 6 / 8: clear ONE RECORD's own value from a chain row.
+   *
+   * Keyed by the record, not the layer: a layer can hold several records (two
+   * slots bound to the same tab, several matching rules), so a layer-keyed action
+   * could not say which one the user meant.
+   *
+   * `override` / `slot` are writable per field here; `rule` / `site` are not the
+   * dashboard's to blank for a single field, so they are reported instead of
+   * pretending to succeed.
+   */
+  const clearChainTier = async (owner: TierOwner, field: 'title' | 'icon') => {
+    setBusy(true);
+    try {
+      if (owner.kind === 'override') {
+        if (field === 'title') await sendMessage('SET_TAB_OVERRIDE', { tabId: owner.tabId, title: '' });
+        else await sendMessage('SET_TAB_OVERRIDE', { tabId: owner.tabId, favicon: null });
+      } else if (owner.kind === 'slot') {
+        await sendMessage('UPDATE_SLOT_UI_MARKER', {
+          slotId: owner.slotId,
+          uiMarker: field === 'title' ? { customTitle: '' } : { icon: null },
+        });
+      } else {
+        setToast({ variant: 'error', message: `The ${owner.kind} value is managed in the rule editor.` });
+        return;
+      }
+      setToast({ variant: 'success', message: `${field === 'title' ? 'Title' : 'Icon'} layer cleared` });
+      void load();
+    } catch {
+      setToast({ variant: 'error', message: `Failed to clear the ${field} layer` });
     } finally {
       setBusy(false);
     }
@@ -1487,6 +1665,24 @@ function DashboardSection() {
           title: titleValue ?? '',
           favicon: faviconValue ? { type: 'upload', value: faviconValue } : null,
         });
+        focusAfterWrite(entry, `cp-${String(entry.tabId)}`);
+      } else if (entry.kind === 'rule-hit' && entry.tabId != null) {
+        // A rule-hit row owns NO stored value of its own: `rule-hit` is the
+        // "managed tab" view over a tab whose value comes from a rule. Editing
+        // one therefore PROMOTES that tab to a Page-level override (the top of
+        // the `override > slot > rule > site` chain) — which is exactly what the
+        // user asked for when they edited a rule-driven tab.
+        //
+        // Writing nothing here (the former behaviour) reported `Tab x updated`
+        // while the tab, its title/icon and the row all stayed unchanged.
+        await sendMessage('SET_TAB_OVERRIDE', {
+          tabId: entry.tabId,
+          title: titleValue ?? '',
+          favicon: faviconValue ? { type: 'upload', value: faviconValue } : null,
+        });
+        // Promotion is exactly what the cue must show: `hit-N` is no longer a
+        // row after the reload, the tab is now an `override` row `cp-N`.
+        focusAfterWrite(entry, `cp-${String(entry.tabId)}`);
       } else if (entry.kind === 'slot' && entry.slotId != null) {
         await sendMessage('UPDATE_SLOT_UI_MARKER', {
           slotId: entry.slotId,
@@ -1495,6 +1691,7 @@ function DashboardSection() {
             icon: faviconValue ? { type: 'upload', value: faviconValue } : null,
           },
         });
+        focusAfterWrite(entry, `slot-${String(entry.slotId)}`);
       }
       setToast({ variant: 'success', message: `${entry.label} updated` });
       setDrafts((prev) => { const next = new Map(prev); next.delete(entry.id); return next; });
@@ -1626,6 +1823,7 @@ function DashboardSection() {
                 <tr
                   className={entry.delivery === 'protected' ? 'tbs-settings__row--disabled' : ''}
                   data-dash-row="true"
+                  data-dash-entry={entry.id}
                   data-dash-anchor={entry.anchor
                     ? `${entry.anchor.kind}:${entry.anchor.kind === 'rule' ? entry.anchor.ruleId : entry.anchor.kind === 'slot' ? String(entry.anchor.slotId) : entry.anchor.kind === 'override' ? String(entry.anchor.tabId) : 'site'}`
                     : undefined}
@@ -1681,61 +1879,86 @@ function DashboardSection() {
                     </div>
                   </td>
                 </tr>
-                {/* IMP-4: the edit panel is INLINE in the row (no Dialog/drawer). */}
+                {/* IMP-4: the edit panel is INLINE in the row (no Dialog/drawer),
+                    via the SAME shell `InlineRuleEditor` uses. */}
                 {isOpen && draft && (
-                  <tr className="tbs-settings__inline-editor-row">
-                    <td colSpan={5}>
-                      <div className="tbs-settings__rule-form" role="form" aria-label={`Edit ${entry.label}`}>
-                        <h3>Edit {entry.label}</h3>
-                        <FieldEditor
-                          field="title"
-                          idPrefix={`dash-${entry.id}`}
-                          mode={draft.titleMode}
-                          onChange={(mode) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: mode }); return n; }); }}
-                          chain={entry.chain.title}
-                          baseline={{ mode: { kind: 'use-chain' } }}
-                          onResetEdit={() => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: { kind: 'use-chain' } }); return n; }); }}
-                          onClearChain={() => void clearEntryField(entry, 'title')}
-                          clearing={busy}
-                          canClearChain
-                          submitMode={{ kind: 'draft', dirty: draft.titleMode.kind === 'set', onDraftChange: (next) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: next.mode }); return n; }); } }}
-                          onJumpToOwner={jumpTo}
-                          disabled={busy}
-                        />
-                        <FieldEditor
-                          field="icon"
-                          idPrefix={`dash-${entry.id}`}
-                          mode={draft.iconMode}
-                          onChange={(mode) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: mode }); return n; }); }}
-                          iconConfig={draft.iconConfig}
-                          onIconConfigChange={(cfg) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconConfig: cfg }); return n; }); }}
-                          chain={entry.chain.favicon}
-                          baseline={{ mode: { kind: 'use-chain' } }}
-                          onResetEdit={() => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: { kind: 'use-chain' }, iconConfig: undefined }); return n; }); }}
-                          onClearChain={() => void clearEntryField(entry, 'icon')}
-                          clearing={busy}
-                          canClearChain
-                          submitMode={{ kind: 'draft', dirty: draft.iconMode.kind === 'set' || draft.iconConfig !== undefined, onDraftChange: (next) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: next.mode, iconConfig: next.iconConfig }); return n; }); } }}
-                          onJumpToOwner={jumpTo}
-                          disabled={busy}
-                        />
-                        <div className="tbs-settings__rule-form-actions">
-                          <Button size="sm" variant="ghost" onClick={() => { setDrafts((prev) => { const n = new Map(prev); n.delete(entry.id); return n; }); setExpanded((prev) => { const n = new Set(prev); n.delete(entry.id); return n; }); }}>
-                            Cancel
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            onClick={() => void applyDraft(entry)}
-                            // IMP-19/RK-4: the row's Save is enabled ONLY by that row's real dirty state.
-                            disabled={busy || !isDraftDirty(entry, draft)}
-                          >
-                            Save
-                          </Button>
-                        </div>
-                      </div>
-                    </td>
-                  </tr>
+                  <InlineEditorShell
+                    colSpan={5}
+                    title={`Edit ${entry.label}`}
+                    ariaLabel={`Edit ${entry.label}`}
+                    // Review: the Dashboard pairs its two editors side by side,
+                    // exactly like `New Rule` / `Edit Rule` do through
+                    // `RuleFormFields`' own pair. Same responsive behaviour: the
+                    // two tracks collapse to one below the shared 560px
+                    // breakpoint, so the panel never squeezes a field in half.
+                    grid
+                    onEscape={() => { setDrafts((prev) => { const n = new Map(prev); n.delete(entry.id); return n; }); setExpanded((prev) => { const n = new Set(prev); n.delete(entry.id); return n; }); }}
+                    actions={
+                      <>
+                        <Button size="sm" variant="ghost" onClick={() => { setDrafts((prev) => { const n = new Map(prev); n.delete(entry.id); return n; }); setExpanded((prev) => { const n = new Set(prev); n.delete(entry.id); return n; }); }}>
+                          Cancel
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          onClick={() => void applyDraft(entry)}
+                          // IMP-19/RK-4: the row's Save is enabled ONLY by that row's real dirty state.
+                          disabled={busy || !isDraftDirty(entry, draft)}
+                        >
+                          Save
+                        </Button>
+                      </>
+                    }
+                  >
+                    <FieldEditor
+                      field="title"
+                      idPrefix={`dash-${entry.id}`}
+                      mode={draft.titleMode}
+                      onChange={(mode) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: mode }); return n; }); }}
+                      chain={entry.chain.title}
+                      baseline={{ mode: { kind: 'use-chain' } }}
+                      onResetEdit={() => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: { kind: 'use-chain' } }); return n; }); }}
+                      onClearChain={() => void clearEntryField(entry, 'title')}
+                      clearing={busy}
+                      canClearChain
+                      submitMode={{ kind: 'draft', dirty: draft.titleMode.kind === 'set', onDraftChange: (next) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, titleMode: next.mode }); return n; }); } }}
+                      onJumpToOwner={jumpTo}
+                      // Items 2 / 3 / 4 / 6 / 8: per-RECORD apply/clear inside
+                      // `Use chain`; selecting a record previews its title.
+                      onApplyTier={(_kind, value) => { applyTierValue(entry, _kind, value, 'title'); }}
+                      onClearTier={(owner) => { void clearChainTier(owner, 'title'); }}
+                      previewOwner={previewOwner(entry, 'title')}
+                      onSelectPreview={(owner) => { selectPreview(entry, owner); }}
+                      selfOwner={entry.anchor}
+                      tabId={entry.tabId ?? null}
+                      disabled={busy}
+                    />
+                    <FieldEditor
+                      field="icon"
+                      idPrefix={`dash-${entry.id}`}
+                      mode={draft.iconMode}
+                      onChange={(mode) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: mode }); return n; }); }}
+                      iconConfig={draft.iconConfig}
+                      onIconConfigChange={(cfg) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconConfig: cfg }); return n; }); }}
+                      chain={entry.chain.favicon}
+                      baseline={{ mode: { kind: 'use-chain' } }}
+                      onResetEdit={() => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: { kind: 'use-chain' }, iconConfig: undefined }); return n; }); }}
+                      onClearChain={() => void clearEntryField(entry, 'icon')}
+                      clearing={busy}
+                      canClearChain
+                      submitMode={{ kind: 'draft', dirty: draft.iconMode.kind === 'set' || draft.iconConfig !== undefined, onDraftChange: (next) => { setDrafts((prev) => { const n = new Map(prev); n.set(entry.id, { ...draft, iconMode: next.mode, iconConfig: next.iconConfig }); return n; }); } }}
+                      onJumpToOwner={jumpTo}
+                      // Items 2 / 3 / 4 / 6 / 8: per-RECORD apply/clear inside
+                      // `Use chain`; selecting a record previews its icon.
+                      onApplyTier={(_kind, value) => { applyTierValue(entry, _kind, value, 'icon'); }}
+                      onClearTier={(owner) => { void clearChainTier(owner, 'icon'); }}
+                      previewOwner={previewOwner(entry, 'icon')}
+                      onSelectPreview={(owner) => { selectPreview(entry, owner); }}
+                      selfOwner={entry.anchor}
+                      tabId={entry.tabId ?? null}
+                      disabled={busy}
+                    />
+                  </InlineEditorShell>
                 )}
               </Fragment>
             );

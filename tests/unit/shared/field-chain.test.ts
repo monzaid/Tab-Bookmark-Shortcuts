@@ -83,12 +83,10 @@ describe('field-chain — title chain', () => {
     const result = resolve('title', state);
     expect(result.winner.value).toBe('O');
     expect(result.winner.source).toBe('override');
-    expect(result.masked).toEqual(
-      expect.arrayContaining([
-        { kind: 'slot', slotId: 5 },
-        { kind: 'rule', ruleId: 'r1' },
-      ]),
-    );
+    // The slot is masked (it is superseded by the override). The rule is NOT:
+    // a matching rule is applied to the page on its own, so calling it "masked"
+    // told the user its value was hidden when its effect is what they see.
+    expect(result.masked).toEqual([{ kind: 'slot', slotId: 5 }]);
   });
 
   it('slot wins over rule when no override', () => {
@@ -101,7 +99,7 @@ describe('field-chain — title chain', () => {
     const result = resolve('title', state);
     expect(result.winner.value).toBe('S');
     expect(result.winner.source).toBe('slot');
-    expect(result.masked).toEqual([{ kind: 'rule', ruleId: 'r1' }]);
+    expect(result.masked).toEqual([]);
   });
 
   it('rule wins when no override/slot', () => {
@@ -346,9 +344,82 @@ describe('field-chain — favicon chain (independent from title)', () => {
 
     // The rule has no favicon, so the favicon chain sees nothing beyond the override.
     expect(titleResult.winner.source).toBe('override');
-    expect(titleResult.masked).toEqual([{ kind: 'rule', ruleId: 'r1' }]);
+    expect(titleResult.masked).toEqual([]);
     expect(faviconResult.winner.source).toBe('override');
     expect(faviconResult.masked).toEqual([]);
+  });
+});
+
+describe('field-chain — several records on the SAME layer (review item 6)', () => {
+  /**
+   * `bindings` is keyed by `slotId`, so nothing stops two slots from being bound
+   * to one tabId. The chain must list BOTH — the tab really is described by two
+   * slot records — instead of silently picking one and hiding the other.
+   */
+  const twoSlots = () => makeState({
+    slots: [
+      slot({ id: 1, uiMarker: { customTitle: 'First' } }),
+      slot({ id: 3, uiMarker: { customTitle: 'Third' } }),
+    ],
+    bindings: [
+      { slotId: 1, tabId: TAB_ID, windowId: 1, boundAt: '2026-01-01T00:00:00.000Z' },
+      { slotId: 3, tabId: TAB_ID, windowId: 1, boundAt: '2026-01-01T00:00:00.000Z' },
+    ],
+  });
+
+  it('lists every slot bound to the tab, not just one', () => {
+    const result = resolve('title', twoSlots());
+    const slots = result.nodes.filter((n) => n.owner.kind === 'slot');
+    expect(slots.map((n) => (n.owner as { slotId: number }).slotId)).toEqual([3, 1]);
+    expect(slots.map((n) => n.value)).toEqual(['Third', 'First']);
+  });
+
+  it('marks the highest-id slot as the winner and masks the other', () => {
+    const result = resolve('title', twoSlots());
+    expect(result.winner).toEqual({ value: 'Third', source: 'slot' });
+    const [winner] = result.nodes.filter((n) => n.owner.kind === 'slot');
+    expect(winner.winner).toBe(true);
+    // The lower slot still carries a value and is superseded -> masked.
+    expect(result.masked).toEqual([{ kind: 'slot', slotId: 1 }]);
+  });
+
+  it('does not double-count a single slot in `masked`', () => {
+    const state = makeState({
+      slots: [slot({ id: 1, uiMarker: { customTitle: 'First' } })],
+      bindings: [{ slotId: 1, tabId: TAB_ID, windowId: 1, boundAt: '2026-01-01T00:00:00.000Z' }],
+      overrides: [{ tabId: TAB_ID, title: 'O', createdAt: '2026-01-01T00:00:00.000Z' }],
+    });
+    const result = resolve('title', state);
+    expect(result.masked).toEqual([{ kind: 'slot', slotId: 1 }]);
+  });
+
+  it('keeps the nodes in priority order with the extra slots appended', () => {
+    const state = makeState({
+      slots: [
+        slot({ id: 1, uiMarker: { customTitle: 'First' } }),
+        slot({ id: 3, uiMarker: { customTitle: 'Third' } }),
+      ],
+      bindings: [
+        { slotId: 1, tabId: TAB_ID, windowId: 1, boundAt: '2026-01-01T00:00:00.000Z' },
+        { slotId: 3, tabId: TAB_ID, windowId: 1, boundAt: '2026-01-01T00:00:00.000Z' },
+      ],
+      rules: [rule({ id: 'r1', title: 'R' })],
+    });
+    const result = resolve('title', state);
+    expect(result.nodes.map((n) => n.owner.kind)).toEqual(['slot', 'slot', 'rule', 'site']);
+  });
+
+  it('exposes the single record for the tabId-keyed layers', () => {
+    const state = makeState({
+      overrides: [{ tabId: TAB_ID, title: 'O', createdAt: '2026-01-01T00:00:00.000Z' }],
+      siteSnapshot: [{ tabId: TAB_ID, title: 'Site', faviconHref: null, capturedAt: '2026-01-01T00:00:00.000Z' }],
+    });
+    const result = resolve('title', state);
+    // `tabOverrides` and `siteSnapshot` hold at most one entry per tabId, so the
+    // override/site layers are single-node by CONSTRUCTION, not by omission.
+    expect(result.nodes.filter((n) => n.owner.kind === 'override')).toHaveLength(1);
+    expect(result.nodes.filter((n) => n.owner.kind === 'site')).toHaveLength(1);
+    expect(result.nodes.find((n) => n.owner.kind === 'site')?.value).toBe('Site');
   });
 });
 

@@ -5,8 +5,9 @@
  * requires a second confirmation for slot unbinding. So the destructive action
  * must be BLOCKED behind a Confirm before any UNBIND_SLOT message is sent.
  *
- * Wording convergence (P6): `Reset` -> `Delete Slot`, toast `Slot N unbound`
- * -> `Slot N deleted`, error `Failed to unbind slot N` -> `Failed to delete slot N`.
+ * Wording convergence (P6, later renamed by review item 5.3): `Reset` ->
+ * `Clear Slot Data`, toast `Slot N unbound` -> `Slot N deleted`, error
+ * `Failed to unbind slot N` -> `Failed to delete slot N`.
  *
  * RED guard: the pre-fix menu item is `Reset` and clicking it sends UNBIND_SLOT
  * immediately with no confirmation, so ①②④ fail.
@@ -107,11 +108,11 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
     respondWith({ success: true });
   });
 
-  it('should name the destructive entry "Delete Slot" (no "Reset")', async () => {
+  it('should name the destructive entry "Clear Slot Data" (no "Reset")', async () => {
     render(<SidebarApp />);
     await openSlotMenu();
 
-    expect(screen.getByRole('menuitem', { name: 'Delete Slot' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Clear Slot Data' })).toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'Reset' })).toBeNull();
   });
 
@@ -119,13 +120,13 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
     render(<SidebarApp />);
     await openSlotMenu();
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete Slot' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Slot Data' }));
 
     // A confirmation must appear and nothing may be sent yet.
     await waitFor(() => {
       expect(screen.getByRole('dialog')).toBeInTheDocument();
     });
-    expect(screen.getByRole('dialog').textContent).toContain('Delete Slot');
+    expect(screen.getByRole('dialog').textContent).toContain('Clear Slot Data');
     expect(unbindCalls()).toHaveLength(0);
   });
 
@@ -133,7 +134,7 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
     render(<SidebarApp />);
     await openSlotMenu();
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete Slot' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Slot Data' }));
     await waitFor(() => {
       expect(screen.getByRole('dialog')).toBeInTheDocument();
     });
@@ -150,13 +151,13 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
     render(<SidebarApp />);
     await openSlotMenu();
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete Slot' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Slot Data' }));
     await waitFor(() => {
       expect(screen.getByRole('dialog')).toBeInTheDocument();
     });
 
     await flushConfirmGuard();
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
 
     await waitFor(() => {
       expect(unbindCalls()).toHaveLength(1);
@@ -168,12 +169,12 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
     render(<SidebarApp />);
     await openSlotMenu();
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete Slot' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Slot Data' }));
     await waitFor(() => {
       expect(screen.getByRole('dialog')).toBeInTheDocument();
     });
     await flushConfirmGuard();
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
 
     await waitFor(() => {
       const texts = screen.getAllByRole('alert').map((a) => a.textContent);
@@ -185,7 +186,7 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
     render(<SidebarApp />);
     await openSlotMenu();
 
-    expect(screen.getByRole('menuitem', { name: 'Rename Slot…' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Rename Title…' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Change Icon…' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Edit URL…' })).toBeInTheDocument();
   });
@@ -208,7 +209,7 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
     render(<SidebarApp />);
     await openSlotMenu();
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename Slot…' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename Title…' }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue('Example')).toBeInTheDocument();

@@ -24,6 +24,11 @@ export interface RadioGroupProps {
   disabled?: boolean;
   /** Optional id of a node describing the whole group. */
   'aria-describedby'?: string;
+  /**
+   * Item 2.1: lay the options out in a single horizontal row (wrapping only when
+   * the panel is too narrow) instead of stacking them one per line.
+   */
+  inline?: boolean;
 }
 
 export function RadioGroup({
@@ -34,37 +39,43 @@ export function RadioGroup({
   options,
   disabled = false,
   'aria-describedby': ariaDescribedBy,
+  inline = false,
 }: RadioGroupProps) {
   return (
     <fieldset
-      className="tbs-radio-group"
+      className={`tbs-radio-group${inline ? ' tbs-radio-group--inline' : ''}`}
       aria-describedby={ariaDescribedBy}
       disabled={disabled}
     >
       <legend className="tbs-radio-group__legend">{label}</legend>
-      {options.map((opt) => {
-        const id = `${name}-${opt.value}`;
-        const descId = opt.description ? `${id}-desc` : undefined;
-        return (
-          <div className="tbs-radio-group__option" key={opt.value}>
-            <input
-              type="radio"
-              id={id}
-              name={name}
-              value={opt.value}
-              checked={value === opt.value}
-              onChange={() => { onChange(opt.value); }}
-              aria-describedby={descId}
-            />
-            <label htmlFor={id}>{opt.label}</label>
-            {opt.description && (
-              <span id={descId} className="tbs-radio-group__description">
-                {opt.description}
-              </span>
-            )}
-          </div>
-        );
-      })}
+      {/* The wrapper exists so the inline layout can lay the OPTIONS out as a
+          row while the legend stays on its own line (a bare flex row would put
+          the legend inline with the choices). */}
+      <div className="tbs-radio-group__options">
+        {options.map((opt) => {
+          const id = `${name}-${opt.value}`;
+          const descId = opt.description ? `${id}-desc` : undefined;
+          return (
+            <div className="tbs-radio-group__option" key={opt.value}>
+              <input
+                type="radio"
+                id={id}
+                name={name}
+                value={opt.value}
+                checked={value === opt.value}
+                onChange={() => { onChange(opt.value); }}
+                aria-describedby={descId}
+              />
+              <label htmlFor={id}>{opt.label}</label>
+              {opt.description && (
+                <span id={descId} className="tbs-radio-group__description">
+                  {opt.description}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </fieldset>
   );
 }

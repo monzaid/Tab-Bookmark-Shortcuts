@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { SettingsApp } from '@ui/settings/App';
 import { resolveFieldChain } from '@shared/field-chain';
+import { JUMP_HIGHLIGHT_CLASS } from '@ui/shared/use-jump-to-row';
 import { createDefaultLocalState, createDefaultSyncState } from '@background/storage-repository';
 import type { ChainResult, TierOwner } from '@shared/field-chain';
 import type { DashboardRow, SyncState } from '@shared/types';
@@ -167,6 +168,140 @@ describe('T16: Dashboard', () => {
 
     await waitFor(() => {
       expect(mockSendMessage).toHaveBeenCalledWith(expect.objectContaining({ action: 'REMOVE_TAB_OVERRIDE' }));
+    });
+  });
+
+  /**
+   * Review round 4 — the Edit panel pairs its two editors.
+   *
+   * The Dashboard used to stack them by passing `grid={false}`, which made its
+   * Edit panel a visibly different shape from the `New Rule` / `Edit Rule`
+   * panels it is modelled on. Both must now go through the two-track pair.
+   */
+  it('renders the Title/Icon editors side by side, like New Rule does (review)', async () => {
+    rows = [row({ id: 'cp-7' })];
+    await openDashboard();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Tab 7' }));
+    const form = await screen.findByRole('form', { name: 'Edit Tab 7' });
+
+    // The pair wrapper carries the 2-track grid…
+    const pair = form.querySelector('.tbs-settings__rule-form-grid');
+    expect(pair).not.toBeNull();
+    // …and it holds exactly the two dimension editors.
+    const fields = Array.from(pair!.querySelectorAll('.tbs-field-editor')).map((el) => el.getAttribute('data-field'));
+    expect(fields).toEqual(['title', 'icon']);
+  });
+
+  /**
+   * Review round 4 — the post-write cue.
+   *
+   * A successful Save collapses the panel and reloads the table; without a cue
+   * the user cannot tell WHICH row just changed. The edited row must therefore
+   * be highlighted with the same treatment a `jumpTo` uses. The rule-hit case is
+   * the important one: its `hit-N` row does not exist after the write, so the cue
+   * has to follow the row to the `cp-N` override it was promoted into.
+   */
+  it('highlights the edited row after a successful Save (review)', async () => {
+    rows = [row({ id: 'cp-7' })];
+    await openDashboard();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Tab 7' }));
+    const form = await screen.findByRole('form', { name: 'Edit Tab 7' });
+    fireEvent.change(within(form).getByLabelText('Custom title text'), { target: { value: 'Updated' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(document.querySelector('tr[data-dash-entry="cp-7"]')?.classList.contains(JUMP_HIGHLIGHT_CLASS)).toBe(true);
+    });
+  });
+
+  it('follows a promoted rule-hit row to its new override id (review)', async () => {
+    rows = [row({
+      id: 'hit-7',
+      kind: 'rule-hit',
+      label: 'Tab 7',
+      tabId: 7,
+      ruleId: 'r1',
+      anchor: { kind: 'rule', ruleId: 'r1' } as TierOwner,
+    })];
+    await openDashboard();
+
+    // The write turns the managed tab into an explicit override row.
+    const original = mockSendMessage.getMockImplementation();
+    mockSendMessage.mockImplementation((msg: { action: string }) => {
+      if (msg.action === 'SET_TAB_OVERRIDE') {
+        rows = [row({ id: 'cp-7' })];
+        return { result: { success: true } };
+      }
+      return original?.(msg) as unknown;
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Tab 7' }));
+    const form = await screen.findByRole('form', { name: 'Edit Tab 7' });
+    fireEvent.change(within(form).getByLabelText('Custom title text'), { target: { value: 'Promoted' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(document.querySelector('tr[data-dash-entry="cp-7"]')?.classList.contains(JUMP_HIGHLIGHT_CLASS)).toBe(true);
+    });
+  });
+
+  /**
+   * Review round 3 — the rule-hit (managed tab) write path.
+   *
+   * A `rule-hit` row owns no stored value of its own: it is the "managed tab"
+   * view over a tab whose value comes from a rule. Editing it must PROMOTE the
+   * tab to a Page-level override — the exact symptom reported was `Tab x updated`
+   * while the row, the title and the icon all stayed unchanged. A surface that
+   * silently writes nothing is indistinguishable from success here, so this test
+   * asserts the message that the background must receive.
+   */
+  it('rule-hit Save promotes the tab to a Page-level override (regression)', async () => {
+    rows = [row({
+      id: 'hit-7',
+      kind: 'rule-hit',
+      label: 'Tab 7',
+      tabId: 7,
+      ruleId: 'r1',
+      anchor: { kind: 'rule', ruleId: 'r1' } as TierOwner,
+    })];
+    await openDashboard();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Tab 7' }));
+    const form = await screen.findByRole('form', { name: 'Edit Tab 7' });
+    fireEvent.change(within(form).getByLabelText('Custom title text'), { target: { value: 'Promoted' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockSendMessage).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'SET_TAB_OVERRIDE',
+        payload: expect.objectContaining({ tabId: 7, title: 'Promoted' }),
+      }));
+    });
+  });
+
+  it('rule-hit Clear disables the rule that drives the managed tab', async () => {
+    rows = [row({
+      id: 'hit-7',
+      kind: 'rule-hit',
+      label: 'Tab 7',
+      tabId: 7,
+      ruleId: 'r1',
+      anchor: { kind: 'rule', ruleId: 'r1' } as TierOwner,
+    })];
+    await openDashboard();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear Tab 7' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Clear selection?' });
+    await new Promise((r) => setTimeout(r, 150));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear' }));
+
+    await waitFor(() => {
+      expect(mockSendMessage).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'UPDATE_RULE',
+        payload: expect.objectContaining({ ruleId: 'r1', enabled: false }),
+      }));
     });
   });
 });

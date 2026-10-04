@@ -261,6 +261,79 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
       expect(payloads.some((p) => p.favicon === 'https://newicon.com/icon.png')).toBe(true);
     });
 
+    it('should MERGE uiMarker per dimension so editing one does not clear the other', async () => {
+      adapter.setTabs([tabA]);
+      await seedSlotBinding(10, 1, 'Original Snapshot', 'https://snapshot.com/icon.png');
+
+      // 1. Set a custom title only.
+      const first = await (worker as unknown as { routeMessage: (m: unknown, s: unknown) => Promise<unknown> }).routeMessage(
+        {
+          requestId: 'merge-1',
+          action: 'UPDATE_SLOT_UI_MARKER',
+          payload: { slotId: 1, uiMarker: { customTitle: 'Keep Me' } },
+        },
+        {},
+      );
+      expect(first).toEqual(expect.objectContaining({ success: true }));
+
+      // 2. Now change the icon only — the title must SURVIVE.
+      const second = await (worker as unknown as { routeMessage: (m: unknown, s: unknown) => Promise<unknown> }).routeMessage(
+        {
+          requestId: 'merge-2',
+          action: 'UPDATE_SLOT_UI_MARKER',
+          payload: { slotId: 1, uiMarker: { icon: { type: 'url', value: 'https://newicon.com/icon.png' } } },
+        },
+        {},
+      );
+      expect(second).toEqual(expect.objectContaining({ success: true }));
+
+      const sync = await worker.repo.getSyncState();
+      const slot = sync.slots.find((s) => s.id === 1);
+      // The title set in step 1 must still be present after the icon-only edit.
+      expect(slot?.uiMarker.customTitle).toBe('Keep Me');
+      expect(slot?.uiMarker.icon?.value).toBe('https://newicon.com/icon.png');
+
+      // 3. And the reverse: a title-only edit must not clear the icon.
+      const third = await (worker as unknown as { routeMessage: (m: unknown, s: unknown) => Promise<unknown> }).routeMessage(
+        {
+          requestId: 'merge-3',
+          action: 'UPDATE_SLOT_UI_MARKER',
+          payload: { slotId: 1, uiMarker: { customTitle: 'Renamed Again' } },
+        },
+        {},
+      );
+      expect(third).toEqual(expect.objectContaining({ success: true }));
+
+      const sync2 = await worker.repo.getSyncState();
+      const slot2 = sync2.slots.find((s) => s.id === 1);
+      expect(slot2?.uiMarker.customTitle).toBe('Renamed Again');
+      expect(slot2?.uiMarker.icon?.value).toBe('https://newicon.com/icon.png');
+    });
+
+    it('should treat an explicit null as a clear while leaving the other dimension intact', async () => {
+      adapter.setTabs([tabA]);
+      await seedSlotBinding(10, 1, 'Original Snapshot', 'https://snapshot.com/icon.png');
+
+      await (worker as unknown as { routeMessage: (m: unknown, s: unknown) => Promise<unknown> }).routeMessage(
+        { requestId: 'clr-1', action: 'UPDATE_SLOT_UI_MARKER', payload: { slotId: 1, uiMarker: { customTitle: 'Combo' } } },
+        {},
+      );
+      await (worker as unknown as { routeMessage: (m: unknown, s: unknown) => Promise<unknown> }).routeMessage(
+        { requestId: 'clr-2', action: 'UPDATE_SLOT_UI_MARKER', payload: { slotId: 1, uiMarker: { icon: { type: 'url', value: 'https://i.com/a.png' } } } },
+        {},
+      );
+      // Clear ONLY the icon with an explicit null.
+      await (worker as unknown as { routeMessage: (m: unknown, s: unknown) => Promise<unknown> }).routeMessage(
+        { requestId: 'clr-3', action: 'UPDATE_SLOT_UI_MARKER', payload: { slotId: 1, uiMarker: { icon: null } } },
+        {},
+      );
+
+      const sync = await worker.repo.getSyncState();
+      const slot = sync.slots.find((s) => s.id === 1);
+      expect(slot?.uiMarker.icon).toBeNull();
+      expect(slot?.uiMarker.customTitle).toBe('Combo');
+    });
+
     it('should prefer the user-modified uiMarker over the stale snapshot in the slot tier', async () => {
       adapter.setTabs([tabA]);
       // Slot has stale snapshot but a user-modified uiMarker.

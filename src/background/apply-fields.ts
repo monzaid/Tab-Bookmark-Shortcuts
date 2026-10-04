@@ -69,6 +69,10 @@ function applyInPage(payload: any): void {
         document.querySelectorAll('link[rel*="icon"]').forEach((l: Element) => { l.remove(); });
         const faviconValue: string = String(favicon);
         if (!isSafeFavicon(faviconValue)) return;
+        // Mirror of the content script's rule: a FRESH element is required for
+        // the browser to re-read the icon (mutating an existing `href` leaves the
+        // already-decoded favicon in place), and every competing declaration was
+        // removed above so ours wins.
         const link = document.createElement('link');
         link.rel = 'icon';
         link.type = 'image/png';

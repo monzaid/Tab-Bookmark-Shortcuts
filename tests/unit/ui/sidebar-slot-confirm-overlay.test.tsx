@@ -83,9 +83,9 @@ async function openDeleteConfirm(): Promise<void> {
   });
   fireEvent.click(screen.getByRole('button', { name: 'More options for slot 1' }));
   await waitFor(() => {
-    expect(screen.getByRole('menuitem', { name: 'Delete Slot' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Clear Slot Data' })).toBeInTheDocument();
   });
-  fireEvent.click(screen.getByRole('menuitem', { name: 'Delete Slot' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Slot Data' }));
   await waitFor(() => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });

@@ -235,7 +235,22 @@ function resetCapturedSite(): void {
   injectedIconLink = null;
 }
 
-/** Insert (or replace) the favicon link WE own, leaving the site's links alone. */
+/**
+ * Apply OUR favicon, forcing the browser to actually re-read it.
+ *
+ * Two mechanisms silently defeat a naive update, which is why the reported
+ * symptom was "the title changes but the icon does not":
+ *
+ * 1. Mutating `href` on the SAME `<link>` element. The browser has already
+ *    decoded the favicon and does not re-read it for an in-place attribute
+ *    change, so the tab keeps the old icon. A FRESH element is required.
+ * 2. Leaving the SITE's own `<link rel="icon">` in place. Two competing
+ *    declarations let the site's icon keep winning, regardless of document
+ *    order. Ours must REPLACE it while we own the tab.
+ *
+ * The site's original href is preserved in `capturedFaviconHref` (A7) and
+ * re-inserted by `restoreFavicon`, so nothing is lost by removing it here.
+ */
 function setFavicon(dataUri: string): void {
   if (!document.head) {
     // document_start: head not available yet — defer
@@ -246,10 +261,10 @@ function setFavicon(dataUri: string): void {
   // B9-7 (T32): never write a dangerous protocol into link.href.
   if (!isSafeFaviconValue(dataUri)) return;
 
-  if (injectedIconLink && document.contains(injectedIconLink)) {
-    injectedIconLink.href = dataUri;
-    return;
-  }
+  // (2) Drop every competing icon declaration, including the site's own.
+  document.querySelectorAll('link[rel*="icon"]').forEach((l) => { l.remove(); });
+
+  // (1) Always a NEW element, so the browser re-reads the icon.
   const link = document.createElement('link');
   link.rel = 'icon';
   link.type = 'image/png';
@@ -259,15 +274,27 @@ function setFavicon(dataUri: string): void {
 }
 
 /**
- * Restore the site's ORIGINAL favicon by removing only the link WE inserted.
- * The site's own `<link rel="icon">` was never removed, so the page falls back
- * to it naturally.
+ * Restore the site's ORIGINAL favicon.
+ *
+ * Removes ours and puts the site's captured declaration back. Simply deleting
+ * our link is NOT enough: the site's own link was removed by `setFavicon`, so
+ * without re-adding it the page would keep showing OUR icon (the tab would
+ * never fall back to the site value).
  */
 function restoreFavicon(): void {
   if (injectedIconLink && document.contains(injectedIconLink)) {
     injectedIconLink.remove();
   }
   injectedIconLink = null;
+
+  if (!document.head) return;
+  if (document.querySelector('link[rel*="icon"]')) return;
+  if (!capturedFaviconHref) return;
+
+  const link = document.createElement('link');
+  link.rel = 'icon';
+  link.href = capturedFaviconHref;
+  document.head.appendChild(link);
 }
 
 /**

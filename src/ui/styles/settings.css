@@ -287,6 +287,44 @@
   gap: var(--space-sm);
 }
 
+/* A row that cannot be delivered (protected page) or is disabled. */
+.tbs-settings__row--disabled {
+  opacity: 0.55;
+}
+
+/* IMP-5: the source badge doubles as the jump-to-row entry. */
+.tbs-settings__anchor-badge {
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  padding: 1px 8px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tbs-settings__anchor-badge:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* delivery state: text, never colour alone (CT3-e). */
+.tbs-settings__delivery {
+  display: block;
+  margin-top: var(--space-xxs);
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+/* chain winner source marker. */
+.tbs-settings__chain-badge {
+  margin-left: var(--space-xs);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  font-weight: 600;
+}
+
 .tbs-settings__table select {
   padding: 4px 8px;
   border: 1px solid var(--color-border-strong);
@@ -521,11 +559,24 @@
   margin: 0 0 var(--space-sm);
 }
 
+/* The two dimension editors of an inline editor, side by side.
+   Review: the Dashboard's `Edit <row>` panel now uses this pair, so it must
+   behave like `RuleFormFields`' own `.tbs-rule-form-fields__pair`: two tracks
+   when there is room, and ONE column in a narrow panel (a track that is too
+   thin squeezes the fields rather than helping anyone). `align-items: start` so
+   the taller editor does not stretch its sibling's controls. */
 .tbs-settings__rule-form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: var(--space-md);
   margin-bottom: var(--space-md);
+}
+
+@media (max-width: 559px) {
+  .tbs-settings__rule-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .tbs-settings__rule-form-radio {

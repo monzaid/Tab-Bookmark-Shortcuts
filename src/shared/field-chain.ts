@@ -53,10 +53,44 @@ export interface ChainTiers {
   site: TierValue;
 }
 
+/**
+ * ONE stored record that takes part in this tab's chain.
+ *
+ * The chain is not one value per layer: SEVERAL records can sit on the same
+ * layer as long as they all address the same `tabId`. That is a real property of
+ * the data model, not a hypothetical —
+ *   - `bindings` is keyed by `slotId`, so slot 1 and slot 3 can both be bound to
+ *     tab 12 (the repository only ever replaces the entry for the SAME slot),
+ *   - every enabled rule whose pattern matches the URL is a candidate,
+ *   - `tabOverrides` is keyed by `tabId` and `siteSnapshot` is one entry per
+ *     `tabId`, so those two layers hold at most one record each.
+ *
+ * A list of nodes is therefore what the user has to be shown: "which records
+ * describe THIS tab", not "which layer won".
+ */
+export interface ChainNode {
+  /** Address of this record — what a badge, a jump and an apply target. */
+  owner: TierOwner;
+  /** The value this record carries; `null` = the record sets nothing. */
+  value: string | null;
+  /** True for the single record that currently provides the delivered value. */
+  winner: boolean;
+}
+
 export interface ChainResult {
   winner: { value: string | null; source: TierKey };
   tiers: ChainTiers;
-  /** Tiers that carry a value but are covered by a higher tier (drive "clear masking"). */
+  /**
+   * Every record on this tab, highest priority first. Multi-node per layer.
+   */
+  nodes: ChainNode[];
+  /**
+   * Records that carry a value but are covered by a higher RESOLVED record.
+   *
+   * The `rule` layer never appears here: a rule's value is delivered on its own
+   * (the rule is applied to the page), so listing it as "masked" claimed the
+   * user could not see it when in fact its effect is what they were editing.
+   */
   masked: TierOwner[];
 }
 
@@ -96,11 +130,17 @@ interface SlotTierResolution {
 }
 
 /**
- * Resolve the slot tier for a tab.
+ * Resolve EVERY slot bound to this tab.
  *
- * The slot tier applies ONLY when a `SlotBinding` exists whose `tabId` equals
- * the given tabId. Tabs that merely match the same URL but are not the bound
- * tabId fall straight through to the rule / site tiers.
+ * The slot tier applies ONLY to a tab that has a `SlotBinding` whose `tabId`
+ * equals the given tabId. Tabs that merely match the same URL but are not bound
+ * fall straight through to the rule / site tiers.
+ *
+ * There can be MORE THAN ONE: `bindings` is keyed by `slotId`, so nothing stops
+ * slot 1 and slot 3 from both being bound to tab 12 (the repository only ever
+ * replaces the entry for the same slot). The highest-id slot keeps the priority
+ * it had when a single binding was assumed, and the rest are listed as additional
+ * nodes rather than hidden — they are real records describing this tab.
  *
  * Title: a user-modified `uiMarker.customTitle` wins over the stale
  * `titleSnapshot`. Favicon: `uiMarker.icon.value` when it clears the protocol
@@ -110,26 +150,35 @@ function resolveSlotTier(
   local: LocalState,
   sync: SyncState,
   tabId: number,
-): SlotTierResolution | null {
-  const binding = local.bindings.find((b) => b.tabId === tabId);
-  if (!binding) return null;
+): SlotTierResolution[] {
+  const boundSlotIds = local.bindings
+    .filter((b) => b.tabId === tabId)
+    .map((b) => b.slotId);
+  if (boundSlotIds.length === 0) return [];
 
-  const slot: SlotDefinition | undefined = sync.slots.find((s) => s.id === binding.slotId);
-  if (!slot) return null;
+  const records: SlotTierResolution[] = [];
+  for (const slotId of boundSlotIds) {
+    const slot: SlotDefinition | undefined = sync.slots.find((s) => s.id === slotId);
+    if (!slot) continue;
 
-  const customTitle = slot.uiMarker.customTitle?.trim();
-  const title = customTitle || slot.titleSnapshot.trim() || null;
+    const customTitle = slot.uiMarker.customTitle?.trim();
+    const title = customTitle || slot.titleSnapshot.trim() || null;
 
-  let favicon: string | null = null;
-  const iconValue = slot.uiMarker.icon?.value.trim();
-  if (iconValue && isSafeFaviconProtocol(iconValue)) {
-    favicon = iconValue;
-  } else {
-    const snapshot = slot.faviconSnapshot.trim();
-    if (snapshot && isSafeFaviconProtocol(snapshot)) favicon = snapshot;
+    let favicon: string | null = null;
+    const iconValue = slot.uiMarker.icon?.value.trim();
+    if (iconValue && isSafeFaviconProtocol(iconValue)) {
+      favicon = iconValue;
+    } else {
+      const snapshot = slot.faviconSnapshot.trim();
+      if (snapshot && isSafeFaviconProtocol(snapshot)) favicon = snapshot;
+    }
+
+    records.push({ slotId: slot.id, title, favicon });
   }
 
-  return { slotId: slot.id, title, favicon };
+  // Highest slot id first — the order the single-binding version effectively had.
+  records.sort((a, b) => b.slotId - a.slotId);
+  return records;
 }
 
 // ─── Rule tier (reuses the shared sorting primitives) ────────────────────────
@@ -162,7 +211,8 @@ export function resolveFieldChain(field: FieldKind, input: ResolveFieldChainInpu
   const { sync, local, tabId, tabUrl } = input;
 
   const override = local.tabOverrides.find((o) => o.tabId === tabId) ?? null;
-  const slotRes = resolveSlotTier(local, sync, tabId);
+  const slotRecords = resolveSlotTier(local, sync, tabId);
+  const primarySlot = slotRecords.length > 0 ? slotRecords[0] : null;
   const winningRule = resolveWinningRule(sync, tabUrl);
   const snapshot = (local.siteSnapshot ?? []).find((s) => s.tabId === tabId) ?? null;
 
@@ -189,10 +239,10 @@ export function resolveFieldChain(field: FieldKind, input: ResolveFieldChainInpu
     };
   }
 
-  if (slotRes) {
+  if (primarySlot) {
     tiers.slot = {
-      value: field === 'title' ? slotRes.title : slotRes.favicon,
-      owner: { kind: 'slot', slotId: slotRes.slotId },
+      value: field === 'title' ? primarySlot.title : primarySlot.favicon,
+      owner: { kind: 'slot', slotId: primarySlot.slotId },
       known: true,
     };
   }
@@ -212,25 +262,65 @@ export function resolveFieldChain(field: FieldKind, input: ResolveFieldChainInpu
   let winnerSource: TierKey = 'site';
   let winnerValue: string | null = null;
   const masked: TierOwner[] = [];
+  const nodes: ChainNode[] = [];
   let settled = false;
 
   for (const key of TIER_ORDER) {
     const tier = tiers[key];
-    if (!tier || tier.value === null) continue;
-    if (!settled) {
+    if (!tier) continue;
+    const owner = tier.owner;
+    const isWinner = !settled && tier.value !== null;
+    if (isWinner) {
       settled = true;
       winnerSource = key;
       winnerValue = tier.value;
+    } else if (tier.value !== null && key !== 'rule') {
+      masked.push(owner);
+    }
+    nodes.push({
+      owner,
+      // Every non-slot layer is single-record by construction; `slotRecords`
+      // holds the additional slots bound to the SAME tab, resolved below.
+      value: tier.value,
+      winner: isWinner,
+    });
+  }
+
+  for (const record of slotRecords) {
+    const owner: TierOwner = { kind: 'slot', slotId: record.slotId };
+    const node: ChainNode = {
+      owner,
+      value: field === 'title' ? record.title : record.favicon,
+      winner: false,
+    };
+    const index = nodes.findIndex((n) => sameOwner(n.owner, owner));
+    if (index >= 0) {
+      // Already placed by the tier loop — replace the payload, keep the flag.
+      // It was also already counted by that loop, so it is NOT re-added below.
+      node.winner = nodes[index].winner;
+      nodes[index] = node;
       continue;
     }
-    masked.push(tier.owner);
+    nodes.push(node);
+    if (node.value !== null && settled) masked.push(owner);
   }
+
+  // Keep the layers in priority order even after the extra slots were appended.
+  nodes.sort((a, b) => TIER_ORDER.indexOf(a.owner.kind) - TIER_ORDER.indexOf(b.owner.kind));
 
   return {
     winner: { value: winnerValue, source: winnerSource },
     tiers,
+    nodes,
     masked,
   };
+}
+
+/** Identity of a record, so the extra slots can replace the primary one. */
+function sameOwner(a: TierOwner, b: TierOwner): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'slot') return a.slotId === (b as { slotId: number }).slotId;
+  return true;
 }
 
 // ─── Clear scope (which tiers to write) ──────────────────────────────────────
