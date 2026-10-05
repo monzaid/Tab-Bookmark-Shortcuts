@@ -58,6 +58,10 @@ function handleUiAction(request: UiRequest): string {
     case 'EXPORT_CONFIG': return 'export';
     case 'IMPORT_PREVIEW': return 'import-preview';
     case 'IMPORT_COMMIT': return 'import-commit';
+    // T14a: the redesigned trio (legacy cases above stay until T14b).
+    case 'EXPORT_PACKAGE': return 'export-package';
+    case 'IMPORT_INSPECT': return 'import-inspect';
+    case 'IMPORT_APPLY': return 'import-apply';
     case 'GET_DIAGNOSTICS': return 'get-diag';
     case 'CLEAR_DIAGNOSTICS': return 'clear-diag';
     case 'EXPORT_DIAGNOSTICS': return 'export-diag';

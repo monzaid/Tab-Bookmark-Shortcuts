@@ -73,6 +73,12 @@ const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
   'EXPORT_CONFIG',
   'IMPORT_PREVIEW',
   'IMPORT_COMMIT',
+  // T14a: the redesigned trio. Registered here in the same change as the union
+  // (G-D) so a message is not "compiled in the union but rejected at runtime".
+  // The legacy trio above is deleted in T14b (merged into T21).
+  'EXPORT_PACKAGE',
+  'IMPORT_INSPECT',
+  'IMPORT_APPLY',
   'GET_DIAGNOSTICS',
   'CLEAR_DIAGNOSTICS',
   'EXPORT_DIAGNOSTICS',

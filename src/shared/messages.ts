@@ -13,6 +13,10 @@ import type {
   IconSource,
   ImportPreview,
   ImportSlotConflict,
+  ExportScope,
+  ImportIntent,
+  ImportInspection,
+  ImportApplyResult,
   SwitchOutcome,
   DiagnosticEntry,
   SlotDefinition,
@@ -222,6 +226,39 @@ export interface ImportCommitRequest extends RequestBase {
   };
 }
 
+// ─── Import/Export — redesigned protocol (T14a / A10 / A11) ──────────────────
+//
+// Three actions, one semantic each. ADDITIVE for now: the legacy trio above
+// stays registered until T14b (merged into T21) deletes it, because settings and
+// the integrated tests still call it. Each new action is added to `UiRequest`
+// AND `KNOWN_ACTIONS` in the same change (G-D: never "compiles, rejected at
+// runtime").
+
+/** A10/A11: produce a package for the selected scope. Read-only. */
+export interface ExportPackageRequest extends RequestBase {
+  action: 'EXPORT_PACKAGE';
+  payload: { scope: ExportScope };
+}
+
+/**
+ * A10/A11: parse a file and diff it against the current state. Read-only and
+ * intent-independent — changing a dimension mode or a row decision re-renders
+ * from this result and never re-inspects.
+ */
+export interface ImportInspectRequest extends RequestBase {
+  action: 'IMPORT_INSPECT';
+  payload: { file: string };
+}
+
+/**
+ * A10/A11: apply a file under an intent. The ONLY writer; binds to the
+ * configVersion read at INSPECT time via `RequestBase` (C3/F4).
+ */
+export interface ImportApplyRequest extends RequestBase {
+  action: 'IMPORT_APPLY';
+  payload: { file: string; intent: ImportIntent };
+}
+
 // Diagnostics operations
 export interface GetDiagnosticsRequest extends RequestBase {
   action: 'GET_DIAGNOSTICS';
@@ -414,6 +451,9 @@ export type UiRequest =
   | ExportConfigRequest
   | ImportPreviewRequest
   | ImportCommitRequest
+  | ExportPackageRequest
+  | ImportInspectRequest
+  | ImportApplyRequest
   | GetDiagnosticsRequest
   | ClearDiagnosticsRequest
   | ExportDiagnosticsRequest
@@ -496,6 +536,26 @@ export interface GetDiagnosticsResponse {
 export interface ExportConfigResponse {
   action: 'EXPORT_CONFIG';
   result: { success: true; json: string } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+// ─── Import/Export — redesigned protocol responses (T14a) ────────────────────
+
+/** A10/A11: the serialized package. The UI shows it first, then downloads. */
+export interface ExportPackageResponse {
+  action: 'EXPORT_PACKAGE';
+  result: { success: true; package: string } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+/** A10/A11: the read-only inspection (diff + presence + tolerances + overlaps). */
+export interface ImportInspectResponse {
+  action: 'IMPORT_INSPECT';
+  result: { success: true; inspection: ImportInspection } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+/** A10/A11: the applied-result checklist (§4.3). */
+export interface ImportApplyResponse {
+  action: 'IMPORT_APPLY';
+  result: { success: true; applied: ImportApplyResult } | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
 export interface RecoveryResponse {

@@ -11,7 +11,7 @@
  * Does NOT: read/write storage directly in React, silently overwrite on conflict
  */
 
-import type { DomainErrorCode, SyncState, LocalState, SwitchOutcome, DiagnosticEntry, ImportPreview, ImportSlotConflict, MatchRuleSettings, SwitchDirection } from '@shared/types';
+import type { DomainErrorCode, SyncState, LocalState, SwitchOutcome, DiagnosticEntry, ImportPreview, ImportSlotConflict, ExportScope, ImportIntent, ImportInspection, ImportApplyResult, MatchRuleSettings, SwitchDirection } from '@shared/types';
 
 // ─── Error Message Mapping ───────────────────────────────────────────────────
 
@@ -291,6 +291,21 @@ export class MessageClient {
 
   async importCommit(preview: ImportPreview, slotDecisions: ImportSlotConflict[]): Promise<ClientResult> {
     return this.send('IMPORT_COMMIT', { preview, slotDecisions }, true);
+  }
+
+  // T14a (A10/A11): the redesigned trio. Additive — the legacy wrappers above
+  // stay until T14b (merged into T21) removes them with their contracts.
+
+  async exportPackage(scope: ExportScope): Promise<ClientResult<{ package: string }>> {
+    return this.send('EXPORT_PACKAGE', { scope });
+  }
+
+  async importInspect(file: string): Promise<ClientResult<{ inspection: ImportInspection }>> {
+    return this.send('IMPORT_INSPECT', { file });
+  }
+
+  async importApply(file: string, intent: ImportIntent): Promise<ClientResult<{ applied: ImportApplyResult }>> {
+    return this.send('IMPORT_APPLY', { file, intent }, true);
   }
 
   // ─── Diagnostics ───────────────────────────────────────────────────────
