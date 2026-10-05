@@ -25,7 +25,7 @@ import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
 import { resolveFieldChain } from '@shared/field-chain';
 import type { ChainResult, TierKey, TierOwner } from '@shared/field-chain';
 import { useJumpToRow, JUMP_HIGHLIGHT_CLASS, JUMP_HIGHLIGHT_MS } from '@ui/shared/use-jump-to-row';
-import { iconSourceForOwner } from '@ui/shared/icon-source';
+import { canonicalIconSource, iconSourceForOwner } from '@ui/shared/icon-source';
 import { UndoBar } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
@@ -1275,12 +1275,16 @@ function DashboardSection() {
    */
   const thisEntryIconSource = (entry: DashboardEntry): IconSource | null => {
     const owner = entry.chain.favicon.nodes.find((n) => n.winner)?.owner;
-    if (owner) return iconSourceForOwner(owner, sourceCtxRef.current);
-    // Fallback for a row whose anchor names the record directly.
-    if (entry.tabId != null) return iconSourceForOwner({ kind: 'override', tabId: entry.tabId }, sourceCtxRef.current);
-    if (entry.slotId != null) return iconSourceForOwner({ kind: 'slot', slotId: entry.slotId }, sourceCtxRef.current);
-    if (entry.ruleId != null) return iconSourceForOwner({ kind: 'rule', ruleId: entry.ruleId }, sourceCtxRef.current);
-    return null;
+    const source = owner
+      ? iconSourceForOwner(owner, sourceCtxRef.current)
+      : entry.tabId != null
+        ? iconSourceForOwner({ kind: 'override', tabId: entry.tabId }, sourceCtxRef.current)
+        : entry.slotId != null
+          ? iconSourceForOwner({ kind: 'slot', slotId: entry.slotId }, sourceCtxRef.current)
+          : entry.ruleId != null
+            ? iconSourceForOwner({ kind: 'rule', ruleId: entry.ruleId }, sourceCtxRef.current)
+            : null;
+    return source ? canonicalIconSource(source) : null;
   };
 
   const sortedEntries = useMemo(() => {

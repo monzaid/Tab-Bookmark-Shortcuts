@@ -20,7 +20,6 @@ describe('T11: UndoBar', () => {
     writes: [
       { kind: 'tab-override', tabId: 1, title: 'T' },
       { kind: 'slot-marker', slotId: 5 },
-      { kind: 'rule', ruleId: 'r1' },
     ],
     affectedTabIds: [1, 2],
   };
@@ -40,7 +39,7 @@ describe('T11: UndoBar', () => {
     await user.click(screen.getByRole('button', { name: /undo/i }));
     expect(onUndo).toHaveBeenCalledTimes(1);
     expect(onUndo).toHaveBeenCalledWith(snapshot);
-    expect(onUndo.mock.calls[0][0].writes).toHaveLength(3);
+    expect(onUndo.mock.calls[0][0].writes).toHaveLength(2);
   });
 
   it('takes focus on open so a keyboard user can undo immediately (CT3-g)', () => {

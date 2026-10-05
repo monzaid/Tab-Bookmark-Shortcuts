@@ -35,18 +35,22 @@ function overrideChainWithRender(): ChainResult {
   return resolveFieldChain('favicon', { sync, local, tabId: 7, tabUrl: 'https://a.com/' });
 }
 
-/** The RAW state GET_STATE returns (recipe value stays EMPTY — R2 honours it). */
-const rawSync: SyncState = createDefaultSyncState();
-const rawLocal: LocalState = {
+/**
+ * The state GET_STATE returns in PRODUCTION: FIX-B materializes the override
+ * recipe at the read boundary, so its `value` is the rendered PNG while the
+ * recipe fields remain intact. A mock that returned the persisted `value:''`
+ * would bypass that materialization and test nothing.
+ */
+const materializedLocal: LocalState = {
   ...createDefaultLocalState(),
-  tabOverrides: [{ tabId: 7, favicon: RECIPE, createdAt: '2026-01-01T00:00:00Z' } as TabOverride],
+  tabOverrides: [{ tabId: 7, favicon: { ...RECIPE, value: PNG }, createdAt: '2026-01-01T00:00:00Z' } as TabOverride],
 };
 
 let rows: DashboardRow[] = [];
 
 const mockSendMessage = vi.fn().mockImplementation((msg: { action: string }) => {
   if (msg.action === 'GET_DASHBOARD') return { result: { success: true, rows } };
-  if (msg.action === 'GET_STATE') return { result: { success: true, sync: rawSync, local: rawLocal } };
+  if (msg.action === 'GET_STATE') return { result: { success: true, sync: rawSync, local: materializedLocal } };
   if (msg.action === 'GET_COMMANDS') return { result: { success: true, commands: [] } };
   return { result: { success: true } };
 });
@@ -57,6 +61,8 @@ vi.stubGlobal('chrome', {
   storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
 });
 
+const rawSync: SyncState = createDefaultSyncState();
+
 function row(): DashboardRow {
   return {
     id: 'cp-7',
@@ -65,7 +71,7 @@ function row(): DashboardRow {
     url: 'https://a.com/',
     anchor: { kind: 'override', tabId: 7 },
     tabId: 7,
-    chain: { title: resolveFieldChain('title', { sync: rawSync, local: rawLocal, tabId: 7, tabUrl: 'https://a.com/' }), favicon: overrideChainWithRender() },
+    chain: { title: resolveFieldChain('title', { sync: rawSync, local: materializedLocal, tabId: 7, tabUrl: 'https://a.com/' }), favicon: overrideChainWithRender() },
     delivery: 'ok',
   };
 }

@@ -81,6 +81,25 @@ export function iconSourceToDraft(source: IconSource): IconFieldValue {
   }
 }
 
+/**
+ * FIX-A: the CANONICAL (persistable) form of an icon source.
+ *
+ * A source read through the repository may be MATERIALIZED — a recipe's `value`
+ * is the rendered PNG (R2/FIX-B). That render is a display cache; the recipe
+ * fields are the durable truth (C1). Anything that will be persisted or replayed
+ * must normalize `template` back to `value:''`, otherwise the derived render
+ * becomes the stored value.
+ *
+ * Deliberately a direct spread-and-clear: a `iconSourceToIconConfig` round-trip
+ * would damage a `url` source (it has no config carrier).
+ */
+export function canonicalIconSource(source: IconSource): IconSource {
+  if (source.type === 'template' && source.value !== '') {
+    return { ...source, value: '' };
+  }
+  return source;
+}
+
 /** FIX-C: everything `iconSourceForOwner` may need to resolve an owner to a source. */
 export interface OwnerSourceContext {
   slots?: ReadonlyArray<SlotDefinition>;

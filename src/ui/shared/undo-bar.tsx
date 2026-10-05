@@ -36,8 +36,7 @@ export type UndoLayerWrite =
       customTitle?: string | null;
       /** FIX-A: see `tab-override.favicon`. */
       icon?: IconSource | null;
-    }
-  | { kind: 'rule'; ruleId: string; title?: string | null; favicon?: IconSource | null };
+    };
 
 export interface UndoSnapshot {
   writes: UndoLayerWrite[];
