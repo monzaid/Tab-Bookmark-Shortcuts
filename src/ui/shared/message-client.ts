@@ -146,14 +146,23 @@ export class MessageClient {
     return raw;
   }
 
-  private async send<T>(action: string, payload?: unknown, includeVersion = false): Promise<ClientResult<T>> {
+  private async send<T>(
+    action: string,
+    payload?: unknown,
+    includeVersion: boolean | number = false,
+  ): Promise<ClientResult<T>> {
     try {
       const message: Record<string, unknown> = {
         requestId: `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         action,
       };
       if (payload !== undefined) message.payload = payload;
-      if (includeVersion) message.configVersion = this.configVersion;
+      // `false` = none, `true` = the client's tracked version, a number = that
+      // exact version (T18: APPLY must carry the INSPECT-read version, which is
+      // not necessarily the latest the client has seen — F4/C3).
+      if (includeVersion !== false) {
+        message.configVersion = includeVersion === true ? this.configVersion : includeVersion;
+      }
 
       const response = await chrome.runtime.sendMessage(message);
 
@@ -304,8 +313,18 @@ export class MessageClient {
     return this.send('IMPORT_INSPECT', { file });
   }
 
-  async importApply(file: string, intent: ImportIntent): Promise<ClientResult<{ applied: ImportApplyResult }>> {
-    return this.send('IMPORT_APPLY', { file, intent }, true);
+  /**
+   * A11/C3: `expectedVersion` is the `configVersion` read at INSPECT time — the
+   * optimistic lock APPLY binds to. Passing it explicitly (rather than letting
+   * the client default to its own tracked version) is the F4 fix: the lock must
+   * catch a write that happened between INSPECT and APPLY.
+   */
+  async importApply(
+    file: string,
+    intent: ImportIntent,
+    expectedVersion: number,
+  ): Promise<ClientResult<{ applied: ImportApplyResult }>> {
+    return this.send('IMPORT_APPLY', { file, intent }, expectedVersion);
   }
 
   // ─── Diagnostics ───────────────────────────────────────────────────────

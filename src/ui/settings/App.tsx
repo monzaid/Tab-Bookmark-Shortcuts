@@ -10,11 +10,11 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
-import { Button, Toast, StatusBadge, Confirm } from '@ui/shared/components';
+import { Button, Toast, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, ImportPreview, ImportSlotConflict, DashboardRow } from '@shared/types';
-import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, DimensionPresence, DimensionMode } from '@shared/types';
+import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
 
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import { FieldEditor } from '@ui/shared/field-editor';
@@ -2092,11 +2092,27 @@ function DashboardSection() {
 
 // ─── Import/Export Section (Problem 7) ──────────────────────────────────────
 
+/** T18: the fixed four dimensions (D5), in the order the diff groups them. */
+const DIMENSION_LABELS: ReadonlyArray<{ dim: keyof DimensionPresence; label: string }> = [
+  { dim: 'slots', label: 'Slots' },
+  { dim: 'rules', label: 'Rules' },
+  { dim: 'settings', label: 'Settings' },
+  { dim: 'shortcuts', label: 'Shortcuts' },
+];
+
 function ImportExportSection() {
   const [importing, setImporting] = useState(false);
-  const [preview, setPreview] = useState<ImportPreview | null>(null);
-  const [importMode, setImportMode] = useState<'replace' | 'merge'>('merge');
+  /**
+   * The file string READ AT INSPECT. APPLY sends THIS exact string (D12:
+   * constructive sameness — no re-read, no fingerprint), so it is held here.
+   */
+  const [file, setFile] = useState<string | null>(null);
+  const [inspection, setInspection] = useState<ImportInspection | null>(null);
+  const [intent, setIntent] = useState<ImportIntent>(() => defaultImportIntent());
+  /** The quantized confirmation is CONSTANT (D7) — opened by Apply, always. */
+  const [confirming, setConfirming] = useState(false);
   const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleExport = async () => {
     try {
@@ -2118,53 +2134,91 @@ function ImportExportSection() {
   };
 
   const handleImportClick = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      setImporting(true);
-      setPreview(null);
-      try {
-        const text = await file.text();
-        // Basic JSON validation
-        JSON.parse(text);
-        // Send to background for preview
-        const res = await sendMessage('IMPORT_PREVIEW', { json: text });
-        const result = extractResult(res);
-        if (result?.success && result.preview) {
-          setPreview(result.preview as ImportPreview);
-        } else {
-          setToast({ variant: 'error', message: (result?.message as string) || 'Invalid import file' });
-        }
-      } catch {
-        setToast({ variant: 'error', message: 'Failed to parse JSON file' });
-      } finally {
-        setImporting(false);
-      }
-    };
-    input.click();
+    fileInputRef.current?.click();
   };
 
-  const handleCommitImport = async () => {
-    if (!preview) return;
+  /**
+   * D6/A11: choose a file → `IMPORT_INSPECT` (read-only). The INSPECTION is
+   * intent-independent, so later mode/record changes only re-render — they never
+   * re-inspect and never re-read the file.
+   */
+  const handleFileChosen = async (input: HTMLInputElement) => {
+    const chosen = input.files?.[0];
+    if (!chosen) return;
+    setImporting(true);
+    setInspection(null);
+    setFile(null);
+    try {
+      const text = typeof chosen.text === 'function' ? await chosen.text() : '';
+      const res = await sendMessage('IMPORT_INSPECT', { file: text });
+      const result = extractResult(res);
+      if (result?.success && result.inspection) {
+        setFile(text);
+        setInspection(result.inspection as ImportInspection);
+        setIntent(defaultImportIntent());
+      } else {
+        setToast({ variant: 'error', message: (result?.message as string) || 'Invalid import file' });
+      }
+    } catch {
+      setToast({ variant: 'error', message: 'Failed to read the import file' });
+    } finally {
+      setImporting(false);
+      input.value = ''; // allow re-selecting the same file
+    }
+  };
+
+  const setDimensionMode = (dim: keyof ImportIntent['dimensionModes'], mode: DimensionMode) => {
+    setIntent((prev) => ({ ...prev, dimensionModes: { ...prev.dimensionModes, [dim]: mode } }));
+  };
+
+  /** A4: sparse per-record override; absent = inherit the dimension mode. */
+  const setRecordAction = (kind: 'slot' | 'rule', id: number | string, action: 'keep' | 'take') => {
+    setIntent((prev) => {
+      const rest = (prev.recordOverrides ?? []).filter((o) => !(o.kind === kind && o.id === id));
+      return { ...prev, recordOverrides: [...rest, { kind, id, action }] };
+    });
+  };
+
+  const carried = (d: keyof DimensionPresence): boolean => inspection?.dimensions[d] ?? false;
+
+  /** Design D7: count only IRREVERSIBLE deletions (not replacements). */
+  const deletionCounts = (() => {
+    const counts = { slots: 0, rules: 0 };
+    for (const r of inspection?.diff.records ?? []) {
+      if (r.status !== 'deleted') continue;
+      if (r.kind === 'slot') counts.slots += 1;
+      else counts.rules += 1;
+    }
+    return counts;
+  })();
+
+  /** D7/A9: the confirmation copy is CONSTANT (even at 0 deletions). */
+  const quantizedMessage = (() => {
+    const parts: string[] = [];
+    if (deletionCounts.slots > 0) parts.push(`${String(deletionCounts.slots)} slots`);
+    if (deletionCounts.rules > 0) parts.push(`${String(deletionCounts.rules)} rules`);
+    const noun = parts.length > 0 ? parts.join(' and ') : 'no records';
+    return `This import will delete ${noun}, and cannot be undone.`;
+  })();
+
+  const handleApply = () => {
+    if (!file || !inspection) return;
+    // D7: the dialog is constant — there is no "0 deletions" fast path.
+    setConfirming(true);
+  };
+
+  const handleConfirmApply = async () => {
+    if (!file || !inspection) return;
+    setConfirming(false);
     setImporting(true);
     try {
-      // Build slot decisions based on import mode
-      const slotDecisions: ImportSlotConflict[] = preview.slotConflicts.map((conflict) => ({
-        ...conflict,
-        decision: importMode === 'replace' ? 'import' as const : 'existing' as const,
-      }));
-
-      const res = await sendMessage('IMPORT_COMMIT', {
-        preview,
-        slotDecisions,
-      });
+      // D12: the SAME string read at INSPECT; C3/F4: bind to the INSPECT version.
+      const res = await sendMessage('IMPORT_APPLY', { file, intent }, inspection.configVersion);
       const result = extractResult(res);
       if (result?.success) {
-        setToast({ variant: 'success', message: 'Import successful' });
-        setPreview(null);
+        setToast({ variant: 'success', message: 'Import applied' });
+        setInspection(null);
+        setFile(null);
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Import failed' });
       }
@@ -2175,51 +2229,138 @@ function ImportExportSection() {
     }
   };
 
+  /**
+   * A9: a SIBLING of the confirm action, never a gate. Exporting the current
+   * state is a backup the user MAY take; it must not become an implicit
+   * prerequisite (that would re-create the forced-backup defect). It leaves the
+   * dialog open and applies nothing.
+   */
+  const handleExportBackup = () => {
+    void handleExport();
+  };
+
   return (
     <section aria-label="Import and export">
       <h2>Import / Export</h2>
 
       <div className="tbs-settings__import-zone">
         <p>Import configuration from a JSON file</p>
+        <input
+          ref={fileInputRef}
+          data-testid="import-file-input"
+          type="file"
+          accept=".json,application/json"
+          hidden
+          onChange={(e) => { void handleFileChosen(e.currentTarget); }}
+        />
         <Button size="md" variant="secondary" onClick={handleImportClick} loading={importing} aria-label="Import configuration">
           Choose File to Import
         </Button>
       </div>
 
-      {/* Import preview */}
-      {preview && (
-        <div className="tbs-settings__import-preview" role="region" aria-label="Import preview">
-          <h3>Import Preview</h3>
-          <ul>
-            <li>Slots: {preview.newSlots.length} new, {preview.slotConflicts.length} conflicts</li>
-            <li>Rules: {preview.rules.length}</li>
-            <li>
-              Matching: {preview.matchSettings.tabIdMode} + {preview.matchSettings.ruleCheckMode} + priority {preview.matchSettings.priority}
-            </li>
-          </ul>
-
-          {preview.slotConflicts.length > 0 && (
-            <div className="tbs-settings__import-mode">
-              <p>Conflict resolution:</p>
-              <label>
-                <input type="radio" name="import-mode" checked={importMode === 'merge'} onChange={() => { setImportMode('merge'); }} />
-                Keep existing (merge)
-              </label>
-              <label>
-                <input type="radio" name="import-mode" checked={importMode === 'replace'} onChange={() => { setImportMode('replace'); }} />
-                Replace with imported
-              </label>
-            </div>
-          )}
+      {/* D6: single page — dimension groups, diff and the confirm dialog are all
+          reachable without stepping through a wizard. */}
+      {inspection && (
+        <div className="tbs-settings__import-diff" data-testid="import-diff" role="region" aria-label="Import diff">
+          {DIMENSION_LABELS.map(({ dim, label }) => {
+            const records = inspection.diff.records.filter((r) =>
+              dim === 'slots' ? r.kind === 'slot' : dim === 'rules' ? r.kind === 'rule' : false,
+            );
+            const isRecordDimension = dim === 'slots' || dim === 'rules';
+            return (
+              <section key={dim} className="tbs-settings__import-dim" data-testid={`import-dim-${dim}`}>
+                <h3>{label}</h3>
+                {!carried(dim) ? (
+                  // A2: a dimension the package did not carry cannot be chosen —
+                  // offering a selector here would be a lie.
+                  <p className="tbs-settings__hint" data-testid={`import-absent-${dim}`}>
+                    This package does not include {label.toLowerCase()}.
+                  </p>
+                ) : (
+                  <>
+                    <label>
+                      Mode for {label}
+                      <select
+                        data-testid={`import-mode-${dim}`}
+                        value={intent.dimensionModes[dim]}
+                        onChange={(e) => { setDimensionMode(dim, e.currentTarget.value as DimensionMode); }}
+                      >
+                        <option value="incremental">Incremental (add / replace)</option>
+                        <option value="overwrite">Overwrite</option>
+                      </select>
+                    </label>
+                    {isRecordDimension && records.length > 0 && (
+                      <ul className="tbs-settings__import-records">
+                        {records.map((r) => (
+                          <li key={`${r.kind}-${String(r.id)}`}>
+                            <span>{r.label}</span> <span>{r.status}</span>
+                            <button
+                              type="button"
+                              aria-label={`Keep ${r.label}`}
+                              onClick={() => { setRecordAction(r.kind, r.id, 'keep'); }}
+                            >
+                              Keep
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Take ${r.label}`}
+                              onClick={() => { setRecordAction(r.kind, r.id, 'take'); }}
+                            >
+                              Take
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
+                )}
+              </section>
+            );
+          })}
 
           <div className="tbs-settings__import-actions">
-            <Button size="sm" variant="ghost" onClick={() => { setPreview(null); }}>Cancel</Button>
-            <Button size="sm" variant="primary" onClick={() => void handleCommitImport()} loading={importing}>
-              Confirm Import
+            <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); }}>Cancel</Button>
+            <Button
+              size="sm"
+              variant="primary"
+              data-testid="import-apply"
+              onClick={handleApply}
+              loading={importing}
+            >
+              Apply
             </Button>
           </div>
         </div>
       )}
+
+      {/* D7: the quantized confirmation is CONSTANT — opened by Apply, even with
+          zero deletions. A9: "Export backup" and the confirm action are SIBLINGS
+          (backup is a choice, not a prerequisite), so applying is a separate,
+          explicit click inside this dialog. */}
+      <Dialog
+        open={confirming}
+        onClose={() => { setConfirming(false); }}
+        title="Confirm import"
+        footer={
+          <>
+            <Button
+              size="sm"
+              variant="danger"
+              data-testid="import-confirm"
+              onClick={() => { void handleConfirmApply(); }}
+              loading={importing}
+            >
+              I understand the risk, confirm import
+            </Button>
+            <Button size="sm" variant="secondary" onClick={handleExportBackup}>
+              Export backup
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => { setConfirming(false); }}>Cancel</Button>
+          </>
+        }
+      >
+        <p>{quantizedMessage}</p>
+      </Dialog>
 
       <h3>Export</h3>
       <p className="tbs-settings__hint">
