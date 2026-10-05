@@ -17,14 +17,14 @@ export const LOCAL_ICON_REF_PREFIX = 'local-icon:';
  * - `local-ref` — a BARE `local-icon:<key>` reference (portable; the consumer
  *                 decides whether it resolves or is "missing").
  * - `data-uri`  — an uploaded bitmap (the dereferenced form of a local-ref).
- * - `unknown`   — anything else, including the retired `[local:…]` wrapper.
+ * - `unknown`   — anything else, including the retired legacy local wrapper.
  */
 export type IconValueKind = 'url' | 'local-ref' | 'data-uri' | 'unknown';
 
 /**
  * Classify a raw stored icon value.
  *
- * The `[local:…]` wrapper is deliberately `unknown`: it never matched
+ * The retired legacy local wrapper is deliberately `unknown`: it never matched
  * `startsWith('local-icon:')`, so it could never resolve — treating it as a
  * reference would produce a "fake resolution". The wrapper is not produced
  * anymore (no back-compat, G1) and must not be accepted.

@@ -15,9 +15,9 @@
 
 import { normalizedRegexPattern, validateRuleForm } from '@shared/form-validation';
 import type { RuleFormInput, ValidationResult } from '@shared/form-validation';
-import { renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
 import type { IconSource } from '@shared/types';
+import { iconConfigToIconSource } from './icon-source';
 import type { FieldMode } from './field-editor';
 
 /** A rule form's in-memory values. Shared by create and edit surfaces. */
@@ -72,13 +72,27 @@ export function clampPriority(priority: number): number {
  * The stored favicon for a draft, or `undefined` when the icon dimension is
  * "use chain" (DT11: unset, never an empty-string placeholder).
  *
- * A rendered custom icon (data URI) wins over the URL text, mirroring the
- * mutually-exclusive modes of `FieldEditor`.
+ * A custom icon config (upload data URI OR recipe) wins over the URL text,
+ * mirroring the mutually-exclusive modes of `FieldEditor`. C1: a recipe is
+ * persisted as `type:'template'` rather than being rendered to an upload.
+ *
+ * Takes only the icon fields so the Data Dashboard draft (which shares the same
+ * two fields) can reuse it (T7: one converter, no hand-copied drift).
  */
-export function resolveDraftFavicon(value: RuleDraftValue): IconSource | undefined {
+export function resolveDraftFavicon(
+  value: Pick<RuleDraftValue, 'iconMode' | 'iconConfig'>,
+): IconSource | undefined {
   if (value.iconMode.kind !== 'set') return undefined;
-  const dataUri = value.iconConfig?.dataUri ?? (value.iconConfig ? renderIconToDataUri(value.iconConfig, 64) : '');
-  if (dataUri) return { type: 'upload', value: dataUri };
+
+  const config = value.iconConfig;
+  if (config) {
+    const source = iconConfigToIconSource(config);
+    // A real upload, or a recipe with actual content, wins. An empty recipe is
+    // not a real icon — fall through to the URL text.
+    if (source.type === 'upload') return source;
+    if (source.backgroundColor !== undefined || (source.text ?? '') !== '') return source;
+  }
+
   const url = value.iconMode.value.trim();
   if (url) return { type: 'url', value: url };
   return undefined;

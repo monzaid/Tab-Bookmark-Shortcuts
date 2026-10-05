@@ -21,6 +21,7 @@ import type {
   ImportSlotDecision,
 } from '@shared/types';
 import { partitionByDomainRules, type DomainRecord, type DomainRejection } from './domain-rules';
+import { iconToPortable, portableToIcon } from '@shared/export-package';
 
 // ─── Import/Export Service ───────────────────────────────────────────────────
 
@@ -37,20 +38,24 @@ export class ImportExportService {
     try {
       const sync = await this.repo.getSyncState();
 
+      // C2: icons are carried as URL / BARE `local-icon:` reference / recipe —
+      // never the retired legacy local wrapper and never a bitmap.
       const payload: ExportPayload = {
         version: 1,
         exportedAt: new Date().toISOString(),
         slots: sync.slots.map((slot) => ({
           ...slot,
-          // Strip any local icon data URIs from UI markers
           uiMarker: {
             ...slot.uiMarker,
             icon: slot.uiMarker.icon
-              ? { ...slot.uiMarker.icon, value: slot.uiMarker.icon.type === 'url' ? slot.uiMarker.icon.value : `[local:${slot.uiMarker.icon.value}]` }
+              ? portableToIcon(iconToPortable(slot.uiMarker.icon, `icon:slot-${String(slot.id)}`))
               : undefined,
           },
         })),
-        rules: sync.rules,
+        rules: sync.rules.map((rule) => ({
+          ...rule,
+          favicon: rule.favicon ? portableToIcon(iconToPortable(rule.favicon, `icon:${rule.id}`)) : undefined,
+        })),
         matchSettings: sync.matchSettings,
         switchDirection: sync.switchDirection,
         autoBindGlobal: sync.autoBindGlobal,
@@ -58,7 +63,7 @@ export class ImportExportService {
       };
 
       return { success: true, json: JSON.stringify(payload, null, 2) };
-    } catch (e) {
+    } catch {
       return { success: false, errorCode: 'INTERNAL_ERROR', message: 'Failed to export configuration' };
     }
   }

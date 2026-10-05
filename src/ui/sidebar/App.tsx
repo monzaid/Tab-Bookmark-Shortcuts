@@ -17,7 +17,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import type { SlotDefinition, SlotBinding, SyncState, LocalState } from '@shared/types';
+import type { SlotDefinition, SlotBinding, SyncState, LocalState, IconSource } from '@shared/types';
 import { Button, IconButton, Toast, Tooltip, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { getMessageClient } from '@ui/shared/message-client';
 import { openOrReusePage } from '@shared/open-page';
@@ -802,10 +802,10 @@ function SidebarUndoBar({ undo, onUndo, onExpire }: SidebarUndoAdapters) {
 
 // ─── Icon Editor Modal (uses reusable IconEditor component) ─────────────────
 
-import { renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
 import { IconFieldEditor } from '@ui/shared/icon-field-editor';
 import type { IconFieldValue } from '@ui/shared/icon-field-editor';
+import { iconDraftToIconSource } from '@ui/shared/icon-source';
 import { wildcardToRegex } from '@shared/url-utils';
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import type { FieldMode } from '@ui/shared/field-editor';
@@ -822,7 +822,12 @@ import type { UndoState as SharedUndoState } from '@ui/shared/undo-bar';
 
 interface IconEditorModalProps {
   open: boolean;
-  onApply: (iconData: string) => void;
+  /**
+   * T7/C1: hand the WHOLE draft over so the caller persists a recipe
+   * (`type:'template'`) rather than a rendered data URI. `iconDraftToIconSource`
+   * is the single converter every write path shares.
+   */
+  onApply: (draft: IconFieldValue) => void;
   onCancel: () => void;
   onReset?: () => void;
   initialIcon?: string;
@@ -926,13 +931,11 @@ function IconEditorModal({
   }, [openedSource, onReset]);
 
   const handleApply = useCallback(() => {
-    // Write EXACTLY the value the chosen source produces — including an empty
-    // string for "Icon URL" left blank, which the write path reads as "clear
-    // this layer" (removing the icon) instead of silently doing nothing.
-    const raw = source.mode === 'custom'
-      ? (source.iconConfig?.dataUri ?? renderIconToDataUri(source.iconConfig ?? {}, 64))
-      : source.value.trim();
-    onApply(raw);
+    // T7/C1: hand the WHOLE draft to the caller so a recipe persists as
+    // `type:'template'` instead of being flattened to a rendered data URI. The
+    // caller runs it through the single `iconDraftToIconSource` converter, which
+    // also treats a blank URL / upload / `use-chain` as "clear this layer".
+    onApply(source);
   }, [source, onApply]);
 
   // P4: reuse the shared Dialog primitive — it supplies Escape, a Tab focus trap
@@ -1020,7 +1023,7 @@ interface CreateRuleModalProps {
   iconChain?: ChainResult;
   /** Items 2 / 6: clear ONE chain RECORD's own value. */
   onClearTier?: (owner: TierOwner, field: 'title' | 'icon') => void;
-  onSave: (data: { url: string; matchType: 'exact' | 'regex'; title?: string; icon?: string; priority: number }) => Promise<{ success: boolean; message?: string }>;
+  onSave: (data: { url: string; matchType: 'exact' | 'regex'; title?: string; favicon?: IconSource; priority: number }) => Promise<{ success: boolean; message?: string }>;
   onCancel: () => void;
 }
 
@@ -1065,9 +1068,9 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
       return;
     }
 
-    // Shared normalisation (regex conversion / clamp / DT5 mode model). The
-    // surface keeps its own wire shape: this modal hands the icon over as a bare
-    // data-URI-or-URL string and lets its caller build the IconSource.
+    // Shared normalisation (regex conversion / clamp / DT5 mode model). T7/C1:
+    // the modal hands over the WHOLE IconSource (a recipe stays `type:'template'`)
+    // so the caller persists it unchanged — no data-URI flattening here.
     const fields = normalizeRuleDraft(draft);
 
     setSaving(true);
@@ -1077,7 +1080,7 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         url: fields.url,
         matchType,
         title: fields.title,
-        icon: fields.favicon?.value,
+        favicon: fields.favicon,
         priority: fields.priority,
       });
       if (!result.success) {
@@ -1791,10 +1794,13 @@ export function SidebarApp() {
     setShowIconEditor(true);
   }, []);
 
-  const handleIconApply = useCallback(async (iconData: string) => {
+  const handleIconApply = useCallback(async (draft: IconFieldValue) => {
     if (!state.currentTabId) return;
     try {
-      await sendMessage('SET_TAB_OVERRIDE', { tabId: state.currentTabId, favicon: { type: 'upload', value: iconData } });
+      // T7/C1: persist through the shared converter — a recipe stays
+      // `type:'template'`, a blank draft clears the layer (`null`).
+      const favicon = iconDraftToIconSource(draft);
+      await sendMessage('SET_TAB_OVERRIDE', { tabId: state.currentTabId, favicon });
       setToast({ variant: 'success', message: 'Icon updated' });
       await loadState();
       setShowIconEditor(false);
@@ -1818,13 +1824,13 @@ export function SidebarApp() {
     }
   }, [state.currentTabId, loadState]);
 
-  const handleCreateGlobalRule = useCallback(async (ruleData: { url: string; matchType: 'exact' | 'regex'; title?: string; icon?: string; priority: number }): Promise<{ success: boolean; message?: string; conflictingRuleId?: string }> => {
+  const handleCreateGlobalRule = useCallback(async (ruleData: { url: string; matchType: 'exact' | 'regex'; title?: string; favicon?: IconSource; priority: number }): Promise<{ success: boolean; message?: string; conflictingRuleId?: string }> => {
     try {
       const response = await sendMessage('CREATE_RULE', {
         urlMatch: { type: ruleData.matchType, value: ruleData.url },
         priority: ruleData.priority,
         title: ruleData.title || undefined,
-        favicon: ruleData.icon ? { type: 'upload', value: ruleData.icon } : undefined,
+        favicon: ruleData.favicon,
       }) as { result?: { success: boolean; message?: string; conflict?: { conflictingRuleId?: string } }; success?: boolean; message?: string };
       const result = response?.result ?? response;
       if (result?.success) {
@@ -1872,13 +1878,14 @@ export function SidebarApp() {
     setSlotIconEditorId(slotId);
   }, []);
 
-  const handleSlotIconApply = useCallback(async (iconData: string) => {
+  const handleSlotIconApply = useCallback(async (draft: IconFieldValue) => {
     const slotId = slotIconEditorId;
     if (!slotId) return;
     try {
+      // T7/C1: same shared converter — a recipe persists as `type:'template'`.
       await sendMessage('UPDATE_SLOT_UI_MARKER', {
         slotId,
-        uiMarker: { icon: { type: 'upload', value: iconData } },
+        uiMarker: { icon: iconDraftToIconSource(draft) },
       });
       setToast({ variant: 'success', message: `Slot ${slotId} icon updated` });
       await loadState();

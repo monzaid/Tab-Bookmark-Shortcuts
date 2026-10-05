@@ -23,6 +23,7 @@ import type {
   SlotUiMarker,
   ExportScope,
 } from './types';
+import { LOCAL_ICON_REF_PREFIX } from './icon-ref';
 
 // ─── Portable shapes ─────────────────────────────────────────────────────────
 
@@ -110,10 +111,15 @@ const GENERATOR = { name: 'tab-bookmark-shortcuts', version: '1.0.0' };
 // ─── Icon ⇄ portable ─────────────────────────────────────────────────────────
 
 /**
- * Shape-only conversion. `type:'upload'` is carried as a bare `local-ref`; T5
- * refines the exact key derivation on the export path.
+ * Convert a stored `IconSource` into its portable form (C1/C2).
+ *
+ * Q1=A: `type:'template'` is judged directly from the `IconSource` (background
+ * passes recipes through unrendered), so no data-URI reverse-engineering is
+ * needed. `type:'upload'` may arrive already dereferenced to a data URI (the
+ * storage read resolves refs) — in that case `iconKey` (derived from the record
+ * id) supplies the BARE reference key to send.
  */
-export function iconToPortable(icon: IconSource): PortableIcon {
+export function iconToPortable(icon: IconSource, iconKey?: string): PortableIcon {
   if (icon.type === 'url') return { kind: 'url', url: icon.value };
   if (icon.type === 'template') {
     return {
@@ -123,7 +129,12 @@ export function iconToPortable(icon: IconSource): PortableIcon {
       textColor: icon.textColor,
     };
   }
-  return { kind: 'local-ref', ref: icon.value };
+  // upload: already-bare ref passes through; a dereferenced data URI is mapped
+  // back to its derived key (`icon:slot-N` / `icon:<rule.id>`).
+  if (icon.value.startsWith(LOCAL_ICON_REF_PREFIX)) {
+    return { kind: 'local-ref', ref: icon.value };
+  }
+  return { kind: 'local-ref', ref: `${LOCAL_ICON_REF_PREFIX}${iconKey ?? ''}` };
 }
 
 export function portableToIcon(portable: PortableIcon): IconSource {
@@ -168,7 +179,7 @@ export function syncStateToPackage(
         id: slot.id,
         urlMatch: slot.urlMatch,
         autoBindOverride: slot.autoBindOverride,
-        marker: markerToPortable(slot.uiMarker),
+        marker: markerToPortable(slot.uiMarker, `icon:slot-${String(slot.id)}`),
         titleSnapshot: slot.titleSnapshot,
         faviconSnapshot: slot.faviconSnapshot,
       }));
@@ -182,7 +193,7 @@ export function syncStateToPackage(
         urlMatch: rule.urlMatch,
         priority: rule.priority,
         title: rule.title,
-        favicon: rule.favicon ? iconToPortable(rule.favicon) : undefined,
+        favicon: rule.favicon ? iconToPortable(rule.favicon, `icon:${rule.id}`) : undefined,
         enabled: rule.enabled,
       }));
   }
@@ -207,10 +218,10 @@ export function syncStateToPackage(
   return pkg;
 }
 
-function markerToPortable(marker: SlotUiMarker): PortableSlotMarker {
+function markerToPortable(marker: SlotUiMarker, iconKey?: string): PortableSlotMarker {
   return {
     customTitle: marker.customTitle,
-    icon: marker.icon ? iconToPortable(marker.icon) : undefined,
+    icon: marker.icon ? iconToPortable(marker.icon, iconKey) : undefined,
     backgroundColor: marker.backgroundColor,
   };
 }

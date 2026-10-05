@@ -12,7 +12,6 @@
 import { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
 import { Button, Toast, StatusBadge, Confirm } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
-import { renderIconToDataUri } from '@ui/components/IconEditor';
 import type { IconConfig } from '@ui/components/IconEditor';
 import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, DashboardRow } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
@@ -21,7 +20,7 @@ import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import { FieldEditor } from '@ui/shared/field-editor';
 import type { FieldMode } from '@ui/shared/field-editor';
 import { InlineEditorShell } from '@ui/shared/inline-editor-shell';
-import { normalizeRuleDraft, validateRuleDraft } from '@ui/shared/rule-form-submit';
+import { normalizeRuleDraft, resolveDraftFavicon, validateRuleDraft } from '@ui/shared/rule-form-submit';
 import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
 import { resolveFieldChain } from '@shared/field-chain';
 import type { ChainResult, TierKey, TierOwner } from '@shared/field-chain';
@@ -1653,17 +1652,15 @@ function DashboardSection() {
     setBusy(true);
     try {
       const titleValue = draft.titleMode.kind === 'set' ? draft.titleMode.value.trim() : null;
-      const iconDataUri = draft.iconConfig?.dataUri
-        ?? (draft.iconConfig ? renderIconToDataUri(draft.iconConfig, 64) : '');
-      const faviconValue = draft.iconMode.kind === 'set'
-        ? (iconDataUri || draft.iconMode.value.trim() || null)
-        : null;
+      // T7/C1: persist the IconSource directly — a recipe stays `type:'template'`
+      // (never flattened to a rendered data URI). `null` clears the layer.
+      const favicon = resolveDraftFavicon(draft) ?? null;
 
       if (entry.kind === 'override' && entry.tabId != null) {
         await sendMessage('SET_TAB_OVERRIDE', {
           tabId: entry.tabId,
           title: titleValue ?? '',
-          favicon: faviconValue ? { type: 'upload', value: faviconValue } : null,
+          favicon,
         });
         focusAfterWrite(entry, `cp-${String(entry.tabId)}`);
       } else if (entry.kind === 'rule-hit' && entry.tabId != null) {
@@ -1678,7 +1675,7 @@ function DashboardSection() {
         await sendMessage('SET_TAB_OVERRIDE', {
           tabId: entry.tabId,
           title: titleValue ?? '',
-          favicon: faviconValue ? { type: 'upload', value: faviconValue } : null,
+          favicon,
         });
         // Promotion is exactly what the cue must show: `hit-N` is no longer a
         // row after the reload, the tab is now an `override` row `cp-N`.
@@ -1688,7 +1685,7 @@ function DashboardSection() {
           slotId: entry.slotId,
           uiMarker: {
             customTitle: titleValue ?? '',
-            icon: faviconValue ? { type: 'upload', value: faviconValue } : null,
+            icon: favicon,
           },
         });
         focusAfterWrite(entry, `slot-${String(entry.slotId)}`);
