@@ -19,6 +19,14 @@ export interface IconConfig {
   text?: string;
   textColor?: string;
   dataUri?: string;
+  /**
+   * FIX-C: the reverse converter's URL carrier.
+   *
+   * The composer itself never sets this; it exists so `iconSourceToIconConfig`
+   * can round-trip a `type:'url'` source instead of silently dropping it (v1
+   * returned `{}`, so a URL icon reopened blank).
+   */
+  url?: string;
 }
 
 export interface IconEditorProps {

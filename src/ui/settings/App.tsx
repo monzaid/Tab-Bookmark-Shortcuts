@@ -27,6 +27,7 @@ import type { ChainResult, TierKey, TierOwner } from '@shared/field-chain';
 import { useJumpToRow, JUMP_HIGHLIGHT_CLASS, JUMP_HIGHLIGHT_MS } from '@ui/shared/use-jump-to-row';
 import { UndoBar } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
+import { iconSourceToIconConfig } from '@ui/shared/icon-source';
 import { getMessageClient } from '@ui/shared/message-client';
 import { MatchSettingsHelp } from './MatchSettingsHelp';
 
@@ -446,7 +447,19 @@ interface InlineRuleEditorProps {
  */
 function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
   const hasIcon = !!rule.favicon?.value;
-  const isCustomIcon = hasIcon && rule.favicon!.value.startsWith('data:');
+  // FIX-C: derive from the SOURCE TYPE, never from the value's shape. A recipe
+  // whose value was materialized to a PNG would otherwise be classified as an
+  // upload, and saving this editor would destroy the recipe (C1).
+  const seed = rule.favicon ? iconSourceToIconConfig(rule.favicon) : undefined;
+  const isTemplateIcon = rule.favicon?.type === 'template';
+  const isUploadIcon = hasIcon && rule.favicon?.type === 'upload';
+  const seedValue = isTemplateIcon
+    ? ''
+    : isUploadIcon
+      ? rule.favicon!.value
+      : rule.favicon?.type === 'url'
+        ? rule.favicon.value
+        : '';
 
   // The editor drives the SHARED field set (SC8); it only owns the values.
   const [url, setUrl] = useState(rule.urlMatch.value);
@@ -455,12 +468,10 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
     rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' },
   );
   const [iconMode, setIconMode] = useState<FieldMode>(
-    hasIcon
-      ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value }
-      : { kind: 'use-chain' },
+    hasIcon ? { kind: 'set', value: seedValue } : { kind: 'use-chain' },
   );
   const [iconConfig, setIconConfig] = useState<IconConfig | undefined>(
-    isCustomIcon ? { dataUri: rule.favicon!.value } : undefined,
+    isTemplateIcon ? { bgColor: seed?.bgColor, text: seed?.text, textColor: seed?.textColor } : undefined,
   );
   const [priority, setPriority] = useState(rule.priority);
   const [enabled, setEnabled] = useState(rule.enabled !== false);
@@ -571,11 +582,13 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
         iconChain={iconChain}
         baselineTitle={{ mode: rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' } }}
         baselineIcon={{
-          mode: hasIcon ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value } : { kind: 'use-chain' },
-          iconConfig: isCustomIcon ? { dataUri: rule.favicon!.value } : undefined,
+          mode: hasIcon ? { kind: 'set', value: seedValue } : { kind: 'use-chain' },
+          iconConfig: isTemplateIcon
+            ? { bgColor: seed?.bgColor, text: seed?.text, textColor: seed?.textColor }
+            : undefined,
         }}
         onResetTitleEdit={() => { setTitleMode(rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' }); }}
-        onResetIconEdit={() => { setIconMode(hasIcon ? { kind: 'set', value: isCustomIcon ? '' : rule.favicon!.value } : { kind: 'use-chain' }); }}
+        onResetIconEdit={() => { setIconMode(hasIcon ? { kind: 'set', value: seedValue } : { kind: 'use-chain' }); }}
         onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
         onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
         submitMode={{ kind: 'immediate' }}

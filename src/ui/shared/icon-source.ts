@@ -9,8 +9,15 @@
  * rendered form is only a display cache. A real user upload stays `upload`.
  */
 
-import type { IconSource } from '@shared/types';
+import type {
+  IconSource,
+  PageRule,
+  SlotDefinition,
+  TabOverride,
+} from '@shared/types';
+import type { TierOwner } from '@shared/field-chain';
 import type { IconConfig } from '@ui/components/IconEditor';
+import type { IconFieldValue } from '@ui/shared/icon-field-editor';
 
 /**
  * Single converter used by every write path (sidebar / rule form / settings).
@@ -44,9 +51,66 @@ export function iconSourceToIconConfig(source: IconSource | null | undefined): I
   if (!source) return {};
   if (source.type === 'upload') return { dataUri: source.value };
   if (source.type === 'template') {
+    // FIX-C: dispatch on `type`, NEVER on the value's shape. A materialized
+    // recipe's `value` is a `data:image/png` URI (R2/FIX-B), so a prefix guess
+    // would misclassify it as an upload and destroy the recipe on re-save.
     return { bgColor: source.backgroundColor, text: source.text, textColor: source.textColor };
   }
+  if (source.type === 'url') return { url: source.value };
   return {};
+}
+
+/**
+ * FIX-C: the SINGLE source-aware reverse boundary.
+ *
+ * Every place that already holds an `IconSource` (a stored rule/slot/override
+ * value) must seed the editor through THIS, not through a `data:`-prefix guess.
+ * `IconFieldValue` has no `type`, so the guess can never recover a recipe.
+ */
+export function iconSourceToDraft(source: IconSource): IconFieldValue {
+  switch (source.type) {
+    case 'template':
+      // `mode:'custom'` WITHOUT `dataUri` — that is what makes the round-trip
+      // re-persist a recipe instead of an upload. `value` is only the display
+      // cache and is never what the write path reads for a custom icon.
+      return { mode: 'custom', value: source.value, iconConfig: iconSourceToIconConfig(source) };
+    case 'upload':
+      return { mode: 'upload', value: source.value };
+    case 'url':
+      return { mode: 'url', value: source.value };
+  }
+}
+
+/** FIX-C: everything `iconSourceForOwner` may need to resolve an owner to a source. */
+export interface OwnerSourceContext {
+  slots?: ReadonlyArray<SlotDefinition>;
+  rules?: ReadonlyArray<PageRule>;
+  tabOverrides?: ReadonlyArray<TabOverride>;
+}
+
+/**
+ * FIX-C: resolve a chain owner (or a dashboard row's kind+id) to the ACTUAL
+ * stored `IconSource`, so a seeding surface can use the source-aware boundary
+ * instead of guessing a mode from a materialized value.
+ *
+ * ONE implementation, reused by every seeding path — a per-surface copy would
+ * drift, which is the whole class of defect this iteration is removing.
+ */
+export function iconSourceForOwner(
+  owner: TierOwner | null | undefined,
+  ctx: OwnerSourceContext,
+): IconSource | null {
+  if (!owner) return null;
+  switch (owner.kind) {
+    case 'override':
+      return ctx.tabOverrides?.find((o) => o.tabId === owner.tabId)?.favicon ?? null;
+    case 'slot':
+      return ctx.slots?.find((s) => s.id === owner.slotId)?.uiMarker.icon ?? null;
+    case 'rule':
+      return ctx.rules?.find((r) => r.id === owner.ruleId)?.favicon ?? null;
+    case 'site':
+      return null;
+  }
 }
 
 /**

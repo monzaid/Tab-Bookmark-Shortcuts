@@ -131,7 +131,16 @@ function modesEqual(a: FieldMode, b: FieldMode): boolean {
 
 function iconConfigsEqual(a?: IconConfig, b?: IconConfig): boolean {
   if (!a || !b) return a === b;
-  return a.dataUri === b.dataUri && a.bgColor === b.bgColor && a.text === b.text && a.textColor === b.textColor;
+  // FIX-C: every field, including the reverse-converter's `url` carrier —
+  // a partial comparison would report a stale match once a field only one
+  // side sets differs.
+  return (
+    a.dataUri === b.dataUri &&
+    a.bgColor === b.bgColor &&
+    a.text === b.text &&
+    a.textColor === b.textColor &&
+    a.url === b.url
+  );
 }
 
 /**
@@ -176,7 +185,10 @@ function useIconFieldState(
 /** Whether the incoming parent value is already what the picker is showing. */
 function matchesLocal(state: IconFieldValue, mode: FieldMode, iconConfig: IconConfig | undefined): boolean {
   if (mode.kind === 'use-chain') return state.mode === 'use-chain';
-  if (iconConfig) return state.mode === 'custom' && state.iconConfig?.dataUri === iconConfig.dataUri;
+  // FIX-C: compare the WHOLE config. Comparing only `dataUri` made a
+  // source-aware composer's recipe (which never fills `dataUri`) look like a
+  // mismatch on every parent re-render, so the picker never settled.
+  if (iconConfig) return state.mode === 'custom' && iconConfigsEqual(state.iconConfig, iconConfig);
   // `url` and `upload` both surface as a plain string; either one is an
   // acceptable representation of the same value.
   return (state.mode === 'url' || state.mode === 'upload') && state.value === mode.value;
