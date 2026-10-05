@@ -36,13 +36,21 @@ export const RESPONSE_TIMEOUT_MS = 10_000;
 /**
  * T21: the action whitelist used to decide whether the message port is claimed.
  *
- * N4 (known limitation): the `AnyRequest['action']` annotation catches typos and
- * removed actions, but it does NOT force this list to stay in sync with the union
- * — adding a new contract action without adding it here compiles fine and the
- * action would simply be rejected as unknown. Kept as an explicit list rather
- * than derived from the switch because the guard runs before dispatch.
+ * T17-③c: `KNOWN_ACTIONS` is the WORKER RECEIPT DOMAIN — it equals `AnyRequest`
+ * (UiRequest + ContentRequest), NOT a UI-only list. The `CONTENT_*` /
+ * `SITE_SNAPSHOT_REPORT` entries are therefore REQUIRED; dropping them for being
+ * "not UI actions" would correctly break the bidirectional guard below.
+ *
+ * T17-③b: N4's known limitation ("adding a new contract action without adding it
+ * here compiles fine, and is then rejected as unknown") is CLOSED by that guard.
+ * This is also why the declaration is `as const` rather than annotated: literal
+ * element types are what make the check non-vacuous — a wide
+ * `ReadonlyArray<AnyRequest['action']>` annotation erases them, making
+ * `Exclude<…>` collapse to `never` and the guard silently pass. Kept as an
+ * explicit list rather than derived from the switch because the guard runs
+ * before dispatch.
  */
-const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
+const KNOWN_ACTIONS = [
   'SAVE_SLOT',
   'SWITCH_SLOT',
   'NEXT_MATCH',
@@ -96,13 +104,27 @@ const KNOWN_ACTIONS: ReadonlyArray<AnyRequest['action']> = [
   'CONTENT_NAVIGATION',
   'CONTENT_READY',
   'SITE_SNAPSHOT_REPORT',
-];
+] as const satisfies readonly AnyRequest['action'][];
+
+// T17-③b: keep the hand-written whitelist in sync with the union IN BOTH
+// DIRECTIONS, at compile time. The literal element types (see the declaration
+// note) are what make this non-vacuous.
+//   _Unknown     — a union member missing from the whitelist (whitelist too small)
+//   _NotAnAction — a whitelist entry that is not a real action (ghost entry)
+type _Unknown = Exclude<AnyRequest['action'], (typeof KNOWN_ACTIONS)[number]>;
+type _NotAnAction = Exclude<(typeof KNOWN_ACTIONS)[number], AnyRequest['action']>;
+const _bidirectional: [_Unknown, _NotAnAction] extends [never, never] ? true : never = true;
+void _bidirectional;
 
 /** T21: whether an inbound message carries an action this worker handles. */
 function isKnownAction(message: unknown): boolean {
   if (!message || typeof message !== 'object') return false;
   const action = (message as { action?: unknown }).action;
-  return typeof action === 'string' && KNOWN_ACTIONS.includes(action as AnyRequest['action']);
+  // T17-③a: `as const` narrows KNOWN_ACTIONS to a literal-element tuple, so the
+  // parameter of `includes` is that 50-literal union. Widen back to the action
+  // union before the call (passing the wider type narrows without a cast).
+  return typeof action === 'string'
+    && (KNOWN_ACTIONS as readonly AnyRequest['action'][]).includes(action as AnyRequest['action']);
 }
 
 export class WorkerOrchestrator {
@@ -1032,8 +1054,14 @@ export class WorkerOrchestrator {
         return { success: true };
       }
 
-      default:
+      default: {
+        // T17-③a: exhaustiveness guard. `request` is `AnyRequest`, so any union
+        // member missing a `case` above makes this assignment a compile error.
+        // Unreachable at runtime — it does not widen the dispatch.
+        const _exhaustive: never = request;
+        void _exhaustive;
         return { success: false, errorCode: 'UNKNOWN_ACTION', message: 'Unknown action' };
+      }
     }
   }
 

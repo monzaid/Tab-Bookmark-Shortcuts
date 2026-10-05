@@ -17,6 +17,7 @@
  * runtime" (G-D).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { UiRequest, UiAction, ExportPackageRequest, ImportInspectRequest, ImportApplyRequest, ExportPackageResponse, ImportInspectResponse, ImportApplyResponse } from '@shared/messages';
 import type { ImportInspection, ImportApplyResult } from '@shared/types';
 import { defaultImportIntent } from '@shared/types';
@@ -63,6 +64,30 @@ describe('T14a: import/export protocol — three new actions', () => {
 
   it('an unregistered action is still rejected (negative control)', () => {
     expect(gate('NOT_A_REAL_ACTION').claimed).toBe(false);
+  });
+
+  // Runtime half of the G-D guard: a CONTINUOUS check that the hand-written
+  // whitelist and the protocol's declared actions do not drift. The compile-time
+  // guard in worker-orchestrator.ts covers KNOWN_ACTIONS ↔ AnyRequest; this also
+  // covers KNOWN_ACTIONS ↔ the literals actually written in messages.ts, and
+  // fails loudly at test time if either side gains an entry alone.
+  it('KNOWN_ACTIONS and the declared protocol actions have no difference', () => {
+    const workerSrc = readFileSync('src/background/worker-orchestrator.ts', 'utf8');
+    const start = workerSrc.indexOf('const KNOWN_ACTIONS');
+    const block = workerSrc.slice(start, workerSrc.indexOf('as const satisfies', start));
+    const known = new Set([...block.matchAll(/'([A-Z][A-Z0-9_]*)'/g)].map((m) => m[1]));
+
+    // Every `action: '…'` literal in messages.ts (requests + responses carry the
+    // same string, so the distinct set is the full declared vocabulary).
+    const declared = new Set<string>();
+    for (const line of readFileSync('src/shared/messages.ts', 'utf8').split('\n')) {
+      if (!line.includes('action:')) continue;
+      for (const m of line.matchAll(/'([A-Z][A-Z0-9_]*)'/g)) declared.add(m[1]);
+    }
+
+    expect(known.size).toBe(50);
+    expect([...declared].filter((a) => !known.has(a)).sort()).toEqual([]); // in union, not whitelisted
+    expect([...known].filter((a) => !declared.has(a)).sort()).toEqual([]); // whitelisted, not in union
   });
 
   // ── Type-level: the new actions are members of the UiAction union ──────────
