@@ -24,6 +24,12 @@ export interface MockAdapterState {
   incognitoAllowed: boolean;
   sidePanelSupported: boolean;
   browserType: BrowserType;
+  /**
+   * T15: override for `commands.updateSupported()`. Omitted = derived from
+   * `browserType` (firefox ⇒ true). Set it to force the unsupported path even on
+   * firefox, or to model a future capability change without touching the default.
+   */
+  commandsUpdateSupported?: boolean;
   /** If set, next operation throws this error */
   nextError?: { code: string; message: string };
   /** If set, scripting.executeScript always throws this error (for fallback tests) */
@@ -258,6 +264,30 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
       removeCommandListener(listener) {
         const idx = commandListeners.indexOf(listener);
         if (idx >= 0) commandListeners.splice(idx, 1);
+      },
+      updateSupported(): boolean {
+        return state.commandsUpdateSupported ?? state.browserType === 'firefox';
+      },
+      update(name, shortcut): Promise<void> {
+        logCall('commands.update', name, shortcut);
+        // Not `async`: the mock has no real async work, and the contract still
+        // needs a REJECTED promise (not a synchronous throw) on an unsupported
+        // platform, so errors are routed through `Promise.reject` explicitly.
+        try {
+          checkError();
+          if (!(state.commandsUpdateSupported ?? state.browserType === 'firefox')) {
+            throw new AdapterError('BROWSER_API_ERROR', 'commands.update is not supported on this browser');
+          }
+          const idx = state.commands.findIndex((c) => c.name === name);
+          if (idx >= 0) {
+            state.commands[idx] = { ...state.commands[idx], shortcut };
+          } else {
+            state.commands.push({ name, description: '', shortcut });
+          }
+          return Promise.resolve();
+        } catch (e) {
+          return Promise.reject(e instanceof Error ? e : new AdapterError('BROWSER_API_ERROR', 'update failed'));
+        }
       },
     },
 

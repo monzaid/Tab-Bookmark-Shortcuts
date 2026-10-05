@@ -70,6 +70,32 @@ export function createChromeAdapter(browserType: BrowserType = 'chrome'): Browse
       removeCommandListener(listener: (command: string) => void): void {
         chrome.commands.onCommand.removeListener(listener);
       },
+      updateSupported(): boolean {
+        // D4: only Firefox exposes `commands.update`.
+        return browserType === 'firefox';
+      },
+      async update(name: string, shortcut: string | null): Promise<void> {
+        if (browserType !== 'firefox') {
+          throw new AdapterError('BROWSER_API_ERROR', 'commands.update is not supported on this browser');
+        }
+        // `@types/chrome` deliberately omits `commands.update` because it is a
+        // Firefox/WebExtensions API (Chrome really has no such method). Address
+        // it through a narrow local shape and FEATURE-DETECT at runtime, so the
+        // declared capability and the actually-callable API cannot disagree —
+        // if a future engine drops it, this reports unsupported rather than
+        // throwing a bare TypeError.
+        const commandsApi = chrome.commands as unknown as {
+          update?: (details: { name: string; shortcut: string | null }) => Promise<void>;
+        };
+        if (typeof commandsApi.update !== 'function') {
+          throw new AdapterError('BROWSER_API_ERROR', 'commands.update is unavailable');
+        }
+        try {
+          await commandsApi.update({ name, shortcut });
+        } catch (e) {
+          throw new AdapterError('BROWSER_API_ERROR', 'Failed to update command', e);
+        }
+      },
     },
 
     tabs: {

@@ -83,6 +83,15 @@ export interface BrowserAdapter {
     getAll(): Promise<NormalizedCommand[]>;
     onCommand(listener: (command: string) => void): void;
     removeCommandListener(listener: (command: string) => void): void;
+    /**
+     * T15 / D4: whether `update` can actually execute here (Firefox). Chrome and
+     * Edge have no `commands.update`, so the shortcut dimension is read-only
+     * there — the UI branches on this probe rather than on a rejection, because
+     * an unsupported platform is a guidance case, NEVER an import failure.
+     */
+    updateSupported(): boolean;
+    /** T15: WebExtensions `commands.update`; `null`/empty unbinds the shortcut. */
+    update(name: string, shortcut: string | null): Promise<void>;
   };
 
   // Tabs
