@@ -101,13 +101,15 @@ describe('F3 — first open of the icon editor pre-loads the existing icon', () 
     });
 
     // The existing icon must be shown immediately — not a blank default.
-    // FIX-C: an uploaded icon now seeds the UPLOAD tab (source-aware), whose
-    // preview is the plain `<img>` inside `aria-label="Icon preview"` rather than
-    // the composite editor's `<img alt="Icon preview">`. Query by src so the
-    // assertion covers whichever preview shape the current mode uses.
+    // FIX-C: an uploaded icon seeds the UPLOAD tab (source-aware), whose preview
+    // is the editor's own `<img class="tbs-icon-field__img">`. Assert THAT exact
+    // element (scoped to `.tbs-icon-field`, which only the modal renders) plus
+    // the mode — a document-wide "some img has this src" is vacuously true,
+    // because the sidebar itself already renders the same src on the slot row.
     await waitFor(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      expect(imgs.some((i) => i.getAttribute('src') === EXISTING_ICON)).toBe(true);
+      const field = document.querySelector('.tbs-icon-field');
+      expect(field?.getAttribute('data-mode')).toBe('upload');
+      expect(field?.querySelector('.tbs-icon-field__img')?.getAttribute('src')).toBe(EXISTING_ICON);
     });
   });
 
@@ -131,9 +133,14 @@ describe('F3 — first open of the icon editor pre-loads the existing icon', () 
       expect(screen.getByRole('dialog')).toBeInTheDocument();
     });
 
+    // Scoped to the editor, and the mode is `url` — a live page favicon has no
+    // stored source, so the source-aware seed falls back to the URL tab. The
+    // sidebar header also renders this src, so an unscoped query would pass even
+    // with a blank editor (the regression this guard exists to catch).
     await waitFor(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      expect(imgs.some((i) => i.getAttribute('src') === EXISTING_ICON)).toBe(true);
+      const field = document.querySelector('.tbs-icon-field');
+      expect(field?.getAttribute('data-mode')).toBe('url');
+      expect(field?.querySelector('.tbs-icon-field__img')?.getAttribute('src')).toBe(EXISTING_ICON);
     });
   });
 });
