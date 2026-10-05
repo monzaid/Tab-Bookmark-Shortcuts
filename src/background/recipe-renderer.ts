@@ -40,6 +40,22 @@ export interface RecipeInput {
 const DEFAULT_BG = '#9CA3AF';
 
 /**
+ * R2: the PNG-shaped placeholder used when a REAL recipe cannot be rendered.
+ *
+ * It MUST be a recipe (and therefore render to a PNG). A `data:image/svg+xml`
+ * placeholder — notably `IconService.getPlaceholder()` — would be SILENTLY
+ * DROPPED by the page-side gate (`apply-fields.ts` / `content/index.ts` only
+ * allow bitmap data URIs), leaving the user unable to tell "no icon set" from
+ * "rendering failed". Mirrors the existing grey `?` look so they stay visually
+ * consistent.
+ */
+export const RECIPE_PLACEHOLDER: RecipeInput = {
+  backgroundColor: '#e0e0e0',
+  text: '?',
+  textColor: '#999999',
+};
+
+/**
  * Auto text colour by background luminance (mirrors `IconEditor.autoTextColor`).
  * Kept local so the renderer carries no UI import (background must not depend on
  * `@ui/*`).
@@ -119,6 +135,42 @@ export class RecipeRenderer {
       // retry a broken canvas on every call, and never throw into the chain.
       this.repo.cacheRecipeResolution(signature, null);
       return renderFallback();
+    }
+  }
+
+  /**
+   * R2: render a recipe for the READ path (`resolveIconReferences`).
+   *
+   * ALWAYS returns a PNG data URI, or `undefined` when not even the PNG
+   * placeholder can be produced (no `OffscreenCanvas` at all). It NEVER returns
+   * an SVG: the page-side gate would drop it, so a failure must degrade to the
+   * PNG placeholder — the caller treats `undefined` as "leave the value unset"
+   * (the chain then reads `null` and the delivery falls back to `restore`).
+   */
+  async renderForResolution(recipe: RecipeInput): Promise<string | undefined> {
+    const direct = await this.renderPngOrUndefined(recipe);
+    if (direct) return direct;
+    // The real recipe failed → the PNG placeholder (never an SVG).
+    return this.renderPngOrUndefined(RECIPE_PLACEHOLDER);
+  }
+
+  /**
+   * The memoized render, expressed as `string | undefined` instead of the
+   * string-returning `renderToPng` (which needs a caller-owned fallback).
+   */
+  private async renderPngOrUndefined(recipe: RecipeInput): Promise<string | undefined> {
+    const signature = recipeSignature(recipe);
+
+    const memo = this.repo.getRecipeResolution(signature);
+    if (memo !== undefined) return memo ?? undefined;
+
+    try {
+      const rendered = await this.drawPng(recipe);
+      this.repo.cacheRecipeResolution(signature, rendered);
+      return rendered;
+    } catch {
+      this.repo.cacheRecipeResolution(signature, null);
+      return undefined;
     }
   }
 

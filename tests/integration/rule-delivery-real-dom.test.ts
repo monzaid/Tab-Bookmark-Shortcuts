@@ -5,6 +5,7 @@ import { RuleService } from '@background/rule-service';
 import { WorkerOrchestrator } from '@background/worker-orchestrator';
 import { FieldDeliveryService } from '@background/field-delivery-service';
 import { ICON_OFFLOAD_THRESHOLD } from '@background/storage-repository';
+import type { RecipeRenderer } from '@background/recipe-renderer';
 import { wildcardToRegex } from '@shared/url-utils';
 import type { MockAdapter } from '@adapters/mock-adapter';
 import type { NormalizedTab, NormalizedWindow } from '@adapters/contract';
@@ -282,6 +283,80 @@ describe('Regex rule (wildcard-converted) matches and delivers to real DOM', () 
     mod.resetCapturedSite();
     mod.applyFieldMessage(first.args[1] as FieldApplyMessage);
     expect(document.title).toBe('Regex Delivered');
+  });
+});
+
+// ─── R2: a RECIPE genuinely reaches link.href as a PNG ───────────────────────
+// This is the coverage whose ABSENCE let the BLOCKER hide: every existing
+// delivery test used `type:'url'|'upload'`, so a `type:'template'` recipe was
+// never exercised end-to-end. It must land in the real DOM as `data:image/png`,
+// NOT as an SVG (the page gate drops svg+xml) and NOT as an empty href.
+
+describe('R2: a template recipe is delivered to link.href as a PNG', () => {
+  let adapter: MockAdapter;
+  let repo: StorageRepository;
+  let service: RuleService;
+  let applies: CapturedApply[];
+  const contentMod = { applyFieldMessage: null as unknown as (m: FieldApplyMessage) => void, resetCapturedSite: null as unknown as () => void };
+
+  const tab = baseTab(1, 'https://example.com/page');
+  const PNG = 'data:image/png;base64,AAAA';
+
+  beforeEach(async () => {
+    resetDocument();
+    applies = [];
+    adapter = makeContentAdapter((c) => applies.push(c));
+    adapter.setWindows([window]);
+    adapter.setTabs([tab]);
+    repo = new StorageRepository(adapter);
+    // jsdom has no OffscreenCanvas — inject a PNG-producing renderer, exactly as
+    // the real `RecipeRenderer` would produce.
+    repo.setRecipeRenderer({
+      renderForResolution: () => Promise.resolve(PNG),
+    } as unknown as RecipeRenderer);
+    await repo.initialize();
+
+    service = new RuleService(adapter, repo);
+    const delivery = new FieldDeliveryService(adapter, repo);
+    service.setDelivery((tabIds) => delivery.recomputeAndRedeliver(tabIds));
+
+    const mod = await import('@content/index');
+    contentMod.applyFieldMessage = mod.applyFieldMessage;
+    contentMod.resetCapturedSite = mod.resetCapturedSite;
+    contentMod.resetCapturedSite();
+  });
+
+  it('sets the page favicon to the rendered PNG (not svg, not empty)', async () => {
+    const result = await service.createRule({
+      urlMatch: { type: 'exact', value: 'https://example.com/page' },
+      priority: 5,
+      favicon: { type: 'template', value: '', backgroundColor: '#2563EB', text: 'A', textColor: '#FFFFFF' },
+    }, 0);
+    expect(result.success).toBe(true);
+
+    expect(applies.length).toBeGreaterThan(0);
+    contentMod.applyFieldMessage(applies[0].message);
+
+    const iconLinks = Array.from(document.querySelectorAll('link[rel*="icon"]'));
+    expect(iconLinks.length).toBe(1);
+    const href = iconLinks[0].getAttribute('href') ?? '';
+    expect(href.startsWith('data:image/png')).toBe(true);
+    expect(href).not.toContain('svg');
+    expect(href).not.toBe('');
+  });
+
+  it('keeps the recipe EDITABLE after read (type + fields preserved)', async () => {
+    await service.createRule({
+      urlMatch: { type: 'exact', value: 'https://example.com/page' },
+      priority: 5,
+      favicon: { type: 'template', value: '', backgroundColor: '#2563EB', text: 'A', textColor: '#FFFFFF' },
+    }, 0);
+
+    const stored = (await repo.getSyncState()).rules[0].favicon!;
+    expect(stored.type).toBe('template'); // the chain/UI still knows it is a recipe
+    expect(stored.backgroundColor).toBe('#2563EB');
+    expect(stored.text).toBe('A');
+    expect(stored.textColor).toBe('#FFFFFF');
   });
 });
 

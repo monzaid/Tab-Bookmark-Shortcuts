@@ -15,6 +15,7 @@
 import type { StorageRepository } from './storage-repository';
 import { RecipeRenderer } from './recipe-renderer';
 import type { IconSource } from '@shared/types';
+import { LOCAL_ICON_REF_PREFIX } from '@shared/icon-ref';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -441,6 +442,42 @@ export class IconService {
       default:
         return this.getPlaceholder();
     }
+  }
+
+  // ─── Missing-Icon Detection (T6 / C9-② / D9) ────────────────────────────
+
+  /**
+   * Resolve a source for DISPLAY, additionally reporting whether it is MISSING.
+   *
+   * C9-②: a `local-icon:` reference that does not resolve is a missing icon —
+   * not a literal to render. D9 requires "missing" to be distinguishable from
+   * "never set": both may show the placeholder, but `missing` is `true` only for
+   * the former, which is what drives the "需重新选择" repair entry point.
+   *
+   * Mirrors `resolveIconReferences` (the read path) exactly: `type !== 'upload'`
+   * is never a reference, a non-`local-icon:` upload value is self-contained,
+   * and only an unresolvable `local-icon:` value is missing.
+   */
+  async resolveForDisplayState(
+    source: IconSource | undefined | null,
+  ): Promise<{ uri: string; missing: boolean }> {
+    if (!source) return { uri: this.getPlaceholder(), missing: false };
+
+    if (source.type === 'upload' && source.value.startsWith(LOCAL_ICON_REF_PREFIX)) {
+      const resolved = await this.repo.resolveIconReference(source.value);
+      if (!resolved) {
+        return { uri: this.getPlaceholder(), missing: true };
+      }
+      return { uri: resolved, missing: false };
+    }
+
+    return { uri: await this.resolveForDisplay(source), missing: false };
+  }
+
+  /** T6: the boolean alone, for the run-list / repair-entry predicates. */
+  async isMissingIcon(source: IconSource | undefined | null): Promise<boolean> {
+    const { missing } = await this.resolveForDisplayState(source);
+    return missing;
   }
 
   // ─── Private ───────────────────────────────────────────────────────────

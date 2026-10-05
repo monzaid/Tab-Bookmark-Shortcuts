@@ -27,6 +27,7 @@ import type {
 } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 import { urlsMatch } from '@shared/url-utils';
+import { RecipeRenderer } from './recipe-renderer';
 
 // ─── Storage Keys ────────────────────────────────────────────────────────────
 
@@ -122,7 +123,49 @@ export class StorageRepository {
    */
   private iconResolutionCache = new Map<string, string | null>();
 
+  /**
+   * R2: the single recipe renderer (`OffscreenCanvas` → PNG). Owned here because
+   * the render happens on the READ path (`resolveIconReferences`), so delivery
+   * and the UI share one rendered result through `getSyncState()`.
+   */
+  private recipeRenderer: RecipeRenderer = new RecipeRenderer(this);
+
   constructor(private adapter: BrowserAdapter) {}
+
+  /** Test seam: inject a renderer stub (jsdom has no `OffscreenCanvas`). */
+  setRecipeRenderer(renderer: RecipeRenderer): void {
+    this.recipeRenderer = renderer;
+  }
+
+  /**
+   * R2 companion invariant: a recipe's stored `value` must stay EMPTY.
+   *
+   * `resolveIconReferences` renders a recipe INTO `value` (so the synchronous
+   * chain and the delivery path can use it), but the write path re-reads
+   * through `getSyncState()` and persists that object — which would silently
+   * promote the derived render to the durable truth. That is the design's
+   * explicitly REJECTED alternative ("store the recipe AND the first render"),
+   * rejected because the two can drift and then silently deliver a stale icon;
+   * past the 6KB threshold it would also be offloaded, bloating sync storage.
+   *
+   * The invariant is unambiguous: for `type:'template'` the value is only ever
+   * the derived render, so it is normalized back to `''` before any mutate or
+   * persist. Legitimate recipe writes already carry `value:''` and are untouched
+   * (the recipe fields and the `type` are preserved).
+   */
+  private stripDerivedRecipeValues(state: SyncState): void {
+    for (const rule of state.rules) {
+      if (rule.favicon?.type === 'template' && rule.favicon.value !== '') {
+        rule.favicon = { ...rule.favicon, value: '' };
+      }
+    }
+    for (const slot of state.slots) {
+      const icon = slot.uiMarker?.icon;
+      if (icon?.type === 'template' && icon.value !== '') {
+        slot.uiMarker = { ...slot.uiMarker, icon: { ...icon, value: '' } };
+      }
+    }
+  }
 
   // ─── Initialization ──────────────────────────────────────────────────────
 
@@ -269,6 +312,10 @@ export class StorageRepository {
 
         // Apply update and increment version
         const updated = updater(current);
+        // R2: the updater may have carried a read-time render back (the object it
+        // received already had recipe values materialized) — keep the recipe's
+        // own value empty so the render never becomes the durable truth.
+        this.stripDerivedRecipeValues(updated);
         updated.configVersion = current.configVersion + 1;
 
         // Offload large data URI icons to local storage before writing to sync.
@@ -406,12 +453,38 @@ export class StorageRepository {
   /**
    * Resolve icon references back to actual data URIs when reading sync state.
    * Called after hydrate/getSyncState to transparently restore offloaded icons.
+   *
+   * R2 also materializes `type:'template'` recipes HERE — the read boundary, so
+   * it happens BEFORE the (synchronous, value-only) field chain. The chain, the
+   * delivery path and the UI all read `getSyncState()`, so they share this one
+   * rendered PNG (the promise R1 never actually delivered). The recipe fields
+   * and the `type` are left intact so the UI can still EDIT the recipe and the
+   * export can still ship it as a reproducible recipe.
+   *
+   * Same shape as the pre-existing `local-icon:` dereferencing: "parse then
+   * materialize at read time" is the established pattern here, not a new one.
    */
   private async resolveIconReferences(state: SyncState): Promise<SyncState> {
     const resolved = { ...state, rules: [...state.rules], slots: [...state.slots] };
 
     for (let i = 0; i < resolved.rules.length; i++) {
       const rule = resolved.rules[i];
+
+      // R2: a recipe is materialized to a PNG data URI in `value`. The renderer
+      // never yields SVG (a failure degrades to the PNG placeholder, or leaves
+      // the value unset so the chain reads `null` and the delivery restores).
+      if (rule.favicon?.type === 'template') {
+        const rendered = await this.recipeRenderer.renderForResolution({
+          backgroundColor: rule.favicon.backgroundColor,
+          text: rule.favicon.text,
+          textColor: rule.favicon.textColor,
+        });
+        if (rendered) {
+          resolved.rules[i] = { ...rule, favicon: { ...rule.favicon, value: rendered } };
+        }
+        continue;
+      }
+
       const ref = rule.favicon?.value;
       if (ref?.startsWith(ICON_REF_PREFIX)) {
         const actualUri = await this.resolveIconRef(ref);
@@ -423,17 +496,32 @@ export class StorageRepository {
 
     for (let i = 0; i < resolved.slots.length; i++) {
       const slot = resolved.slots[i];
-      const ref = slot.uiMarker?.icon?.value;
+      const icon = slot.uiMarker?.icon;
+
+      // R2: same read-time materialization for a slot's recipe icon.
+      if (icon?.type === 'template') {
+        const rendered = await this.recipeRenderer.renderForResolution({
+          backgroundColor: icon.backgroundColor,
+          text: icon.text,
+          textColor: icon.textColor,
+        });
+        if (rendered) {
+          resolved.slots[i] = {
+            ...slot,
+            uiMarker: { ...slot.uiMarker, icon: { ...icon, value: rendered } },
+          };
+        }
+        continue;
+      }
+
+      const ref = icon?.value;
       if (ref?.startsWith(ICON_REF_PREFIX)) {
         const actualUri = await this.resolveIconRef(ref);
-        if (actualUri) {
-          const icon = slot.uiMarker.icon;
-          if (icon) {
-            resolved.slots[i] = {
-              ...slot,
-              uiMarker: { ...slot.uiMarker, icon: { ...icon, value: actualUri } },
-            };
-          }
+        if (actualUri && icon) {
+          resolved.slots[i] = {
+            ...slot,
+            uiMarker: { ...slot.uiMarker, icon: { ...icon, value: actualUri } },
+          };
         }
       }
     }
@@ -456,6 +544,17 @@ export class StorageRepository {
   /** T12/R1: memoize a recipe render (or a `null` failure) against the signature. */
   cacheRecipeResolution(signature: string, value: string | null): void {
     this.iconResolutionCache.set(signature, value);
+  }
+
+  /**
+   * T6: resolve a `local-icon:<key>` reference for a READ path, memoized.
+   *
+   * Exposed so a consumer can distinguish "resolved" from "unresolvable" — the
+   * latter is a MISSING icon (C9), not a value to keep as a literal. Returns
+   * `null` when the reference has no local blob.
+   */
+  async resolveIconReference(reference: string): Promise<string | null> {
+    return this.resolveIconRef(reference);
   }
 
   /**
@@ -581,6 +680,8 @@ export class StorageRepository {
     const operation = this.syncWriteQueue.then(async (): Promise<void> => {
       const current = await this.getSyncState();
       const draft = structuredClone(current);
+      // R2: never let a read-time render become the durable truth (see below).
+      this.stripDerivedRecipeValues(draft);
       mutator(draft);
       draft.configVersion = current.configVersion + 1;
 
