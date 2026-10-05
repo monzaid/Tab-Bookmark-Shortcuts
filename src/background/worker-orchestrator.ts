@@ -775,6 +775,29 @@ export class WorkerOrchestrator {
         return this.importExportService.commitImport(request.payload.preview, request.payload.slotDecisions, version);
       }
 
+      // ─── Import/Export — redesigned trio (T17 / A10 / A11) ──────────────
+      case 'EXPORT_PACKAGE':
+        return this.importExportService.exportPackage(request.payload.scope);
+
+      case 'IMPORT_INSPECT':
+        return this.importExportService.inspect(request.payload.file);
+
+      case 'IMPORT_APPLY': {
+        // F4: the version is REQUIRED. The legacy case above (IMPORT_COMMIT)
+        // defaulted to the current version, which made the optimistic lock pass
+        // unconditionally — a stale preview could overwrite newer config. A
+        // missing/non-numeric version is refused rather than defaulted.
+        const expectedVersion = request.configVersion;
+        if (typeof expectedVersion !== 'number') {
+          return { success: false, errorCode: 'INVALID_REQUEST', message: 'IMPORT_APPLY requires configVersion' };
+        }
+        return this.importExportService.applyImport(
+          request.payload.file,
+          request.payload.intent,
+          expectedVersion,
+        );
+      }
+
       // ─── Diagnostics ─────────────────────────────────────────────────
       case 'GET_DIAGNOSTICS': {
         const entries = await this.diagnostics.getEntries();

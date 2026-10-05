@@ -16,15 +16,18 @@ import type {
   PageRule,
   MatchRuleSettings,
   ExportPayload,
+  ExportScope,
   ImportPreview,
   ImportSlotConflict,
   ImportSlotDecision,
   ImportIntent,
+  ImportInspection,
   ImportApplyResult,
   ImportRecordStatus,
 } from '@shared/types';
+import { defaultImportIntent } from '@shared/types';
 import { applyIntent, computeDiff, findMatchOverlaps } from '@shared/import-diff';
-import { isExportPackage } from '@shared/export-package';
+import { isExportPackage, syncStateToPackage } from '@shared/export-package';
 import { partitionByDomainRules, type DomainRecord, type DomainRejection } from './domain-rules';
 import { iconToPortable, portableToIcon } from '@shared/export-package';
 
@@ -71,6 +74,76 @@ export class ImportExportService {
     } catch {
       return { success: false, errorCode: 'INTERNAL_ERROR', message: 'Failed to export configuration' };
     }
+  }
+
+  // ─── Export Package (A11 — EXPORT_PACKAGE) ─────────────────────────────
+
+  /**
+   * A11: produce the transfer package for the selected scope.
+   *
+   * Unlike `exportConfig` (the legacy payload), the package is the independent
+   * transport schema (A4): internal fields such as `configVersion` / timestamps
+   * do not leak into the file, and each icon is carried as URL / bare reference
+   * / recipe object.
+   */
+  async exportPackage(
+    scope: ExportScope,
+  ): Promise<{ success: true; package: string } | { success: false; errorCode: string; message: string }> {
+    try {
+      const sync = await this.repo.getSyncState();
+      const pkg = syncStateToPackage(sync, scope);
+      return { success: true, package: JSON.stringify(pkg, null, 2) };
+    } catch {
+      return { success: false, errorCode: 'INTERNAL_ERROR', message: 'Failed to export package' };
+    }
+  }
+
+  // ─── Inspect (A11 — IMPORT_INSPECT) ────────────────────────────────────
+
+  /**
+   * A11: parse a file and diff it against the current state. READ-ONLY.
+   *
+   * Intent-independent by design (A11): the preview is a pure function of the
+   * FILE, so changing a dimension mode or a row decision never requires another
+   * INSPECT — it is idempotent and re-runnable. The default intent is used only
+   * to describe records whose winning dimension mode happens to differ; the UI
+   * re-renders from this same result under the user's real intent.
+   *
+   * `configVersion` is the value read HERE; APPLY binds to it (C3/F4).
+   */
+  async inspect(
+    file: string,
+  ): Promise<{ success: true; inspection: ImportInspection } | { success: false; errorCode: string; message: string }> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(file);
+    } catch {
+      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Invalid JSON format' };
+    }
+    if (!isExportPackage(parsed)) {
+      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Not a valid export package' };
+    }
+
+    const current = await this.repo.getSyncState();
+    const intent = defaultImportIntent();
+    const diff = computeDiff(parsed, current, intent);
+
+    // D6/§6.2: the inspection also discloses which records the domain rejects,
+    // and any exact-duplicate Match overlaps the result would introduce.
+    const final = applyIntent(parsed, current, intent);
+    const partition = this.partitionRecords(final.slots, final.rules);
+
+    return {
+      success: true,
+      inspection: {
+        diff,
+        dimensions: diff.dimensions,
+        tolerant: [],
+        domainViolations: partition.rejected,
+        overlaps: findMatchOverlaps(final),
+        configVersion: current.configVersion,
+      },
+    };
   }
 
   // ─── Import Preview ────────────────────────────────────────────────────
