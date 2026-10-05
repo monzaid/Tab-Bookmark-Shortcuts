@@ -86,6 +86,10 @@ describe('T14a: import/export protocol — three new actions', () => {
     }
 
     expect(known.size).toBe(50);
+    // Symmetric sentinel: the reverse difference below would also catch an empty
+    // `declared`, but this names the failure directly ("declared is not 50")
+    // instead of leaving it to a filter diff.
+    expect(declared.size).toBe(50);
     expect([...declared].filter((a) => !known.has(a)).sort()).toEqual([]); // in union, not whitelisted
     expect([...known].filter((a) => !declared.has(a)).sort()).toEqual([]); // whitelisted, not in union
   });
