@@ -313,9 +313,31 @@ export class ImportExportService {
       rules: final.rules.filter((r) => acceptedRuleIds.has(r.id)),
     };
 
-    // 4. ONE version-bound write. `writeSync` refuses a stale `expectedVersion`
-    //    with `CONFIG_CONFLICT` BEFORE mutating, so a drift leaves zero changes.
-    const write = await this.repo.writeSync(expectedVersion, () => finalSafe);
+    // 4. C10: the records this import REPLACES (or deletes) must not keep their
+    //    target-machine icon blob. The reference key is derived from the record
+    //    id, so a stale blob would make the reference resolve against the
+    //    target's own icon — a "false success" the user never re-selects (§3.7).
+    //    `keep existing` records are never in this set (C10-①: strict scope).
+    const replacedSlotIds = new Set<number>();
+    const replacedRuleIds = new Set<string>();
+    for (const record of diff.records) {
+      if (record.status === 'kept' || record.status === 'added') continue;
+      if (record.kind === 'slot') replacedSlotIds.add(record.id as number);
+      else replacedRuleIds.add(record.id as string);
+    }
+    const keysToClear = [
+      ...[...replacedSlotIds].map((id) => `icon:slot-${String(id)}`),
+      ...[...replacedRuleIds].map((id) => `icon:${id}`),
+    ];
+
+    // 5. ONE version-bound write, with the icon slots cleared atomically-ish
+    //    around it (snapshot → clear → write → restore on failure).
+    //    A stale `expectedVersion` is refused BEFORE mutating (zero changes).
+    const write = await this.repo.clearAndWriteWithCompensation(
+      keysToClear,
+      expectedVersion,
+      () => finalSafe,
+    );
     if (!write.success) {
       return { success: false, errorCode: write.errorCode, message: write.message };
     }

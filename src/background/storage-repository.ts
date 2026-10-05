@@ -906,6 +906,70 @@ export class StorageRepository {
     }));
   }
 
+  /**
+   * T11 / C10: clear the LOCAL icon blobs belonging to records that were just
+   * REPLACED, and restore them if the sync write fails.
+   *
+   * Why this is needed (§3.7): a reference key is derived from the record id
+   * (`icon:slot-3`). If the target machine happens to have slot 3 AND its icon
+   * was offloaded, a replaced record's stale blob would make the reference
+   * resolve against the TARGET's own icon — a "false success" that is WORSE than
+   * a broken image, because the user sees a working icon and never re-selects.
+   * Clearing first makes the reference unresolvable, so it lands in "missing".
+   *
+   * Atomicity (§3.6): there is no cross-area transaction, so this is
+   * snapshot → clear → write → (on failure) restore.
+   *
+   * Scope is strict: only the passed keys are touched; a `keep existing` record
+   * is never in the set (C10-①).
+   */
+  async clearAndWriteWithCompensation(
+    keysToClear: string[],
+    expectedVersion: number,
+    updater: (current: SyncState) => SyncState,
+  ): Promise<WriteResult> {
+    const storage = this.adapter.storage;
+
+    // ① Snapshot the original local values (in memory) — ONLY the keys in scope.
+    const snapshot = new Map<string, unknown>();
+    for (const key of keysToClear) {
+      try {
+        const data = await storage.get('local', key);
+        if (data[key] !== undefined) snapshot.set(key, data[key]);
+      } catch {
+        // Unreadable ⇒ nothing to restore; the clear below is still safe.
+      }
+    }
+
+    // ② Clear the local icon keys.
+    if (keysToClear.length > 0) {
+      try {
+        await storage.remove('local', keysToClear);
+      } catch {
+        // A failed clear means the reference stays resolvable (the pre-C10
+        // behaviour) — a degradation, not corruption, so proceed to the write.
+      }
+    }
+    // The resolution memo may now be stale for these keys (a clear arrives as a
+    // `remove`, which does not broadcast `onChanged` in every adapter).
+    this.iconResolutionCache.clear();
+
+    // ③ Write the sync config through the single version-bound writer.
+    const result = await this.writeSync(expectedVersion, updater);
+
+    // ③ failed → ④ restore the touched local keys so the attempt is a no-op.
+    if (!result.success && snapshot.size > 0) {
+      try {
+        await storage.set('local', Object.fromEntries(snapshot));
+      } catch {
+        console.warn('[StorageRepository] icon-slot compensation failed to restore local keys');
+      }
+      this.iconResolutionCache.clear();
+    }
+
+    return result;
+  }
+
   async setIconCache(cacheKey: string, dataUri: string): Promise<void> {
     await this.writeLocal((state) => ({
       ...state,

@@ -41,7 +41,9 @@ export interface MockAdapterState {
    * write is a "clean failure" — the compensation path (T11/T16) gets an
    * unambiguous rollback baseline.
    */
-  failStorageSet?: { area: StorageArea; key?: string; remaining?: number };
+  failStorageSet?: { area: StorageArea; key?: string; remaining?: number; quota?: boolean };
+  /** Transient: set by `checkStorageFailure`, consumed by the throwing `set`. */
+  injectedFailureWasQuota?: boolean;
 }
 
 export interface MockAdapter extends BrowserAdapter {
@@ -88,6 +90,12 @@ export interface MockAdapter extends BrowserAdapter {
    * (or `reset()`). With `key`, only writes containing that key fail.
    */
   failStorageSet(area: StorageArea, key?: string): void;
+  /**
+   * T11: like `failStorageSet`, but the failure LOOKS like a quota error, which
+   * `setSyncWithRetry` never retries and never escapes via local fallback — so
+   * `writeSync` genuinely fails (the only honest way to exercise compensation).
+   */
+  failStorageSetQuota(area: StorageArea, key?: string): void;
   /** T0: drop any injected storage failures. */
   clearStorageFailures(): void;
 }
@@ -142,6 +150,9 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
       injection.remaining -= 1;
       if (injection.remaining <= 0) state.failStorageSet = undefined;
     }
+    // Record the quota flavour for the thrower, which clears it immediately so a
+    // persistent injection keeps producing quota errors on every attempt.
+    state.injectedFailureWasQuota = injection.quota === true;
     return true;
   }
 
@@ -192,6 +203,13 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
 
     failStorageSet(area: StorageArea, key?: string) {
       state.failStorageSet = { area, key };
+    },
+
+    failStorageSetQuota(area: StorageArea, key?: string) {
+      // A quota-shaped failure: `setSyncWithRetry` never retries and never falls
+      // back to local for it, so `writeSync` genuinely fails. Needed to exercise
+      // compensation for the "sync write failed" contract.
+      state.failStorageSet = { area, key, quota: true };
     },
 
     clearStorageFailures() {
@@ -405,7 +423,12 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
       async set(area: StorageArea, items: Record<string, unknown>): Promise<void> {
         logCall('storage.set', area, items);
         if (checkStorageFailure(area, items)) {
-          throw new AdapterError('BROWSER_API_ERROR', 'Injected storage.set failure');
+          const quota = state.injectedFailureWasQuota === true;
+          state.injectedFailureWasQuota = false;
+          throw new AdapterError(
+            'BROWSER_API_ERROR',
+            quota ? 'QUOTA_BYTES quota exceeded (injected)' : 'Injected storage.set failure',
+          );
         }
         checkError();
         const store = area === 'sync' ? state.syncStorage : state.localStorage;
