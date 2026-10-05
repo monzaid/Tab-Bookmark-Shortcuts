@@ -31,15 +31,23 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
     updatedAt: '2026-01-01T00:00:00Z',
   });
 
-  describe('T31 (B4-3) — commitImport re-validates the preview (TOCTOU)', () => {
-    it('should reject a commit whose preview carries a dangerous rule regex', async () => {
+  describe('T31 (B4-3) / D15 — commitImport re-partitions the preview (TOCTOU)', () => {
+    it('skips a commit whose preview carries a dangerous rule regex (good rules persist)', async () => {
       // A preview that never went through `previewImport` (or was mutated after
-      // it) must not be trusted at commit time.
+      // it) must not be trusted at commit time. D15: the bad rule is SKIPPED,
+      // not a whole-commit rejection.
       const forged = {
         valid: true,
         slotConflicts: [],
         newSlots: [],
         rules: [
+          {
+            id: 'good',
+            urlMatch: { type: 'exact', value: 'https://safe.com' },
+            priority: 0,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
           {
             id: 'evil',
             urlMatch: { type: 'regex', value: '^(a+){10}$' },
@@ -52,34 +60,37 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
         switchDirection: 'next',
         autoBindGlobal: true,
         configVersion: 1,
+        domainViolations: [],
       };
 
       const result = await service.commitImport(forged as never, [], repo.getConfigVersion());
-      expect(result.success, 'a dangerous regex must not be persisted via commit').toBe(false);
-      if (!result.success) {
-        expect(result.errorCode).toBe('IMPORT_INVALID');
-      }
-      expect((await repo.getSyncState()).rules.find((r) => r.id === 'evil')).toBeUndefined();
+      expect(result.success, 'the commit can proceed by skipping the bad rule').toBe(true);
+      const rules = (await repo.getSyncState()).rules;
+      expect(rules.find((r) => r.id === 'evil'), 'the dangerous rule must not be persisted').toBeUndefined();
+      expect(rules.find((r) => r.id === 'good')).toBeDefined();
     });
 
-    it('should reject a commit whose preview carries a dangerous slot regex', async () => {
+    it('skips a commit whose preview carries a dangerous slot regex (good slots persist)', async () => {
       const forged = {
         valid: true,
         slotConflicts: [],
-        newSlots: [makeSlot(9, '^(.*a){20}$')].map((s) => ({
-          ...s,
-          urlMatch: { type: 'regex' as const, value: '^(.*a){20}$' },
-        })),
+        newSlots: [
+          makeSlot(3, 'https://safe-3.com'),
+          { ...makeSlot(9, 'https://bad.com'), urlMatch: { type: 'regex' as const, value: '^(.*a){20}$' } },
+        ],
         rules: [],
         matchSettings: SETTINGS_B,
         switchDirection: 'next',
         autoBindGlobal: true,
         configVersion: 1,
+        domainViolations: [],
       };
 
       const result = await service.commitImport(forged as never, [], repo.getConfigVersion());
-      expect(result.success).toBe(false);
-      expect((await repo.getSyncState()).slots.find((s) => s.id === 9)).toBeUndefined();
+      expect(result.success).toBe(true);
+      const slots = (await repo.getSyncState()).slots;
+      expect(slots.find((s) => s.id === 9)).toBeUndefined();
+      expect(slots.find((s) => s.id === 3)).toBeDefined();
     });
 
     it('should still commit a safe preview', async () => {
@@ -302,12 +313,14 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
       expect(sync.slots).toHaveLength(1); // Only original slot
     });
 
-    it('B4: should reject imported rule with catastrophic backtracking regex', async () => {
+    // ─── T3 (D15): per-record skip replaces whole-package rejection ───
+    it('D15: skips an imported rule with catastrophic regex, keeping good rules', async () => {
       const importJson = JSON.stringify({
         version: 1,
         exportedAt: '2026-06-01T00:00:00Z',
         slots: [],
         rules: [
+          { id: 'good-rule', urlMatch: { type: 'exact', value: 'https://ok.com' }, priority: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
           {
             id: 'evil-rule',
             urlMatch: { type: 'regex', value: '(a+)+$' },
@@ -323,23 +336,22 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
       });
 
       const result = await service.generatePreview(importJson);
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.errorCode).toBe('IMPORT_INVALID');
-        // Message must locate the offending rule
-        expect(result.message).toContain('evil-rule');
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.preview.rules.map((r) => r.id)).toEqual(['good-rule']);
+        expect(result.preview.domainViolations).toHaveLength(1);
+        expect(result.preview.domainViolations[0].id).toBe('evil-rule');
+        expect(result.preview.domainViolations[0].reason).toContain('evil-rule');
       }
     });
 
-    it('B4: should reject imported slot with catastrophic backtracking regex', async () => {
+    it('D15: skips an imported slot with catastrophic regex, keeping good slots', async () => {
       const importJson = JSON.stringify({
         version: 1,
         exportedAt: '2026-06-01T00:00:00Z',
         slots: [
-          {
-            ...makeSlot(1, 'https://example.com'),
-            urlMatch: { type: 'regex', value: '(x+)+' },
-          },
+          makeSlot(1, 'https://good.com'),
+          { ...makeSlot(2, 'https://example.com'), urlMatch: { type: 'regex', value: '(x+)+' } },
         ],
         rules: [],
         matchSettings: SETTINGS_B,
@@ -349,9 +361,12 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
       });
 
       const result = await service.generatePreview(importJson);
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.errorCode).toBe('IMPORT_INVALID');
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.preview.newSlots.map((s) => s.id)).toEqual([1]);
+        expect(result.preview.domainViolations).toHaveLength(1);
+        expect(result.preview.domainViolations[0].kind).toBe('slot');
+        expect(result.preview.domainViolations[0].id).toBe(2);
       }
     });
 

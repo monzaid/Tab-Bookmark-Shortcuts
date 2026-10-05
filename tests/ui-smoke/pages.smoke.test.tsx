@@ -111,6 +111,7 @@ describe('ui-smoke — five page entries render', () => {
           switchDirection: 'next',
           autoBindGlobal: true,
           configVersion: 0,
+          domainViolations: [],
         }}
         onCommit={vi.fn()}
         onCancel={vi.fn()}

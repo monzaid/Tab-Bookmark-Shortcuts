@@ -20,7 +20,7 @@ import type {
   ImportSlotConflict,
   ImportSlotDecision,
 } from '@shared/types';
-import { validateRegex } from '@shared/url-utils';
+import { partitionByDomainRules, type DomainRecord, type DomainRejection } from './domain-rules';
 
 // ─── Import/Export Service ───────────────────────────────────────────────────
 
@@ -99,8 +99,8 @@ export class ImportExportService {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Missing or invalid rules array' };
     }
 
-    const importedSlots = data.slots as SlotDefinition[];
-    const importedRules = data.rules as PageRule[];
+    const rawSlots = data.slots as SlotDefinition[];
+    const rawRules = data.rules as PageRule[];
 
     // Ruling 4 (2026-09-30): legacy export files are NO LONGER importable.
     // Validate the new `matchSettings` shape; a missing/invalid shape is rejected
@@ -115,13 +115,11 @@ export class ImportExportService {
     const importedMatchSettings = data.matchSettings;
     const importedVersion = (data.configVersion as number) ?? 0;
 
-    // B4: static regex safety check on every imported regex (never executed here).
-    // Reject tier = invalid syntax, too long, or catastrophic backtracking.
-    // Warn tier (broad match) stays importable — `valid` remains true for it.
-    const regexRejection = this.findUnsafeRegex(importedSlots, importedRules);
-    if (regexRejection) {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: regexRejection };
-    }
+    // D15: partition by domain constraints. A bad record is skipped + disclosed
+    // (no longer a whole-package rejection). Warn-tier regexes stay importable.
+    const partition = this.partitionRecords(rawSlots, rawRules);
+    const importedSlots = partition.slots;
+    const importedRules = partition.rules;
 
     // Get current state for conflict detection
     const currentSync = await this.repo.getSyncState();
@@ -153,9 +151,33 @@ export class ImportExportService {
       switchDirection: data.switchDirection === 'previous' ? 'previous' : 'next',
       autoBindGlobal: data.autoBindGlobal !== false,
       configVersion: importedVersion,
+      domainViolations: partition.rejected,
     };
 
     return { success: true, preview };
+  }
+
+  /**
+   * D15: split imported records into accepted / skipped-by-domain-constraint.
+   */
+  private partitionRecords(
+    slots: SlotDefinition[],
+    rules: PageRule[],
+  ): { slots: SlotDefinition[]; rules: PageRule[]; rejected: DomainRejection[] } {
+    const ruleInput: DomainRecord[] = rules.map((r) => ({ kind: 'rule', id: r.id, urlMatch: r.urlMatch }));
+    const slotInput: DomainRecord[] = slots.map((s) => ({ kind: 'slot', id: s.id, urlMatch: s.urlMatch }));
+
+    const rulePartition = partitionByDomainRules(ruleInput);
+    const slotPartition = partitionByDomainRules(slotInput);
+
+    const acceptedRuleIds = new Set(rulePartition.accepted.map((r) => r.id as string));
+    const acceptedSlotIds = new Set(slotPartition.accepted.map((s) => s.id as number));
+
+    return {
+      rules: rules.filter((r) => acceptedRuleIds.has(r.id)),
+      slots: slots.filter((s) => acceptedSlotIds.has(s.id)),
+      rejected: [...rulePartition.rejectedWithReason, ...slotPartition.rejectedWithReason],
+    };
   }
 
   // ─── Import Commit ─────────────────────────────────────────────────────
@@ -173,22 +195,23 @@ export class ImportExportService {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Cannot commit invalid preview' };
     }
 
-    // T31 (B4-3): re-run the regex safety gate HERE rather than trusting
-    // `preview.valid`. The preview is caller-supplied and may have been built by
-    // hand or mutated between PREVIEW and COMMIT, so the earlier check is only a
-    // UX guard — this is the enforcement point (closes the TOCTOU window).
-    const commitRejection = this.findUnsafeRegex(
+    // T31 (B4-3) / D15: re-partition HERE rather than trusting `preview.valid`.
+    // The preview is caller-supplied and may have been built by hand or mutated
+    // between PREVIEW and COMMIT, so the earlier check is only a UX guard — this
+    // is the enforcement point (closes the TOCTOU window). Unlike the old gate, a
+    // bad record is SKIPPED, not a whole-commit rejection.
+    const partition = this.partitionRecords(
       [...preview.newSlots, ...preview.slotConflicts.map((c) => c.imported)],
       preview.rules,
     );
-    if (commitRejection) {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: commitRejection };
-    }
+    const safeSlotIds = new Set(partition.slots.map((s) => s.id));
+    const safeRules = partition.rules;
 
     const result = await this.repo.writeSync(expectedVersion, (state) => {
       // Apply slot decisions
       for (const conflict of slotDecisions) {
         if (conflict.decision === 'import') {
+          if (!safeSlotIds.has(conflict.slotId)) continue; // D15: skip unsafe
           const idx = state.slots.findIndex((s) => s.id === conflict.slotId);
           if (idx >= 0) {
             state.slots[idx] = conflict.imported;
@@ -201,13 +224,14 @@ export class ImportExportService {
 
       // Add new (non-conflicting) slots
       for (const newSlot of preview.newSlots) {
+        if (!safeSlotIds.has(newSlot.id)) continue; // D15: skip unsafe
         if (!state.slots.find((s) => s.id === newSlot.id)) {
           state.slots.push(newSlot);
         }
       }
 
-      // Replace rules entirely with imported rules
-      state.rules = preview.rules;
+      // Replace rules entirely with the domain-safe imported rules
+      state.rules = safeRules;
 
       // Update global settings (tri-knob model)
       state.matchSettings = preview.matchSettings;
@@ -239,52 +263,6 @@ export class ImportExportService {
       (v.ruleCheckMode === 'match' || v.ruleCheckMode === 'no-match') &&
       (v.priority === 'tabId' || v.priority === 'rule-check' || v.priority === 'none')
     );
-  }
-
-  /**
-   * B4: Statically validate every imported regex definition and return a
-   * locating error message for the first unsafe one, or `null` when all are safe.
-   *
-   * `validateRegex` is the single entry point: `valid === false` is the reject
-   * tier (REGEX_TOO_LONG / REGEX_INVALID / catastrophic REGEX_RISK); the broad
-   * -match warning surfaces as `valid === true` + `error === 'REGEX_RISK'`.
-   * Patterns are never executed here, so preview itself cannot be ReDoS'd.
-   */
-  private findUnsafeRegex(slots: unknown[], rules: unknown[]): string | null {
-    const extractRegex = (entry: unknown): string | null => {
-      if (typeof entry !== 'object' || entry === null) return null;
-      const match = (entry as { urlMatch?: unknown }).urlMatch;
-      if (typeof match !== 'object' || match === null) return null;
-      const { type, value } = match as { type?: unknown; value?: unknown };
-      return type === 'regex' && typeof value === 'string' ? value : null;
-    };
-
-    const reason = (check: { message?: string; error?: string }): string =>
-      check.message ?? check.error ?? 'rejected';
-
-    for (const rule of rules) {
-      const pattern = extractRegex(rule);
-      if (pattern === null) continue;
-      const check = validateRegex(pattern);
-      if (!check.valid) {
-        const id = (rule as { id?: unknown }).id;
-        const label = typeof id === 'string' ? id : '(unknown)';
-        return `Rule "${label}" has an unsafe regex: ${reason(check)}`;
-      }
-    }
-
-    for (const slot of slots) {
-      const pattern = extractRegex(slot);
-      if (pattern === null) continue;
-      const check = validateRegex(pattern);
-      if (!check.valid) {
-        const id = (slot as { id?: unknown }).id;
-        const label = typeof id === 'number' ? String(id) : '(unknown)';
-        return `Slot ${label} has an unsafe regex: ${reason(check)}`;
-      }
-    }
-
-    return null;
   }
 
   /**

@@ -16,6 +16,7 @@ describe('T20: Import preview, diagnostics, unified feedback, tool entries', () 
     switchDirection: 'next',
     autoBindGlobal: true,
     configVersion: 3,
+    domainViolations: [],
   };
 
   describe('Happy path — import preview and confirm', () => {

@@ -21,6 +21,7 @@ if (rootElement) {
             switchDirection: 'next',
             autoBindGlobal: true,
             configVersion: 0,
+            domainViolations: [],
           }}
         onCommit={async () => {}}
         onCancel={() => window.close()}
