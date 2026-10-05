@@ -13,6 +13,7 @@
  */
 
 import type { StorageRepository } from './storage-repository';
+import { RecipeRenderer } from './recipe-renderer';
 import type { IconSource } from '@shared/types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -162,9 +163,20 @@ export type IconProcessResult =
 // ─── Icon Service ────────────────────────────────────────────────────────────
 
 export class IconService {
+  /**
+   * T12/R1: the SINGLE recipe renderer (`OffscreenCanvas` → PNG). Injectable so
+   * unit tests can supply a stub — jsdom has no `OffscreenCanvas`, so a real
+   * render cannot be asserted there (real pixels are covered by the F3 browser
+   * pass / the T23 spike).
+   */
+  private renderer: RecipeRenderer;
+
   constructor(
     private repo: StorageRepository,
-  ) {}
+    renderer?: RecipeRenderer,
+  ) {
+    this.renderer = renderer ?? new RecipeRenderer(repo);
+  }
 
   // ─── Validation ────────────────────────────────────────────────────────
 
@@ -403,7 +415,20 @@ export class IconService {
 
     switch (source.type) {
       case 'template':
-        return this.generateTemplateIcon(source.backgroundColor ?? '#666666', source.text ?? '?');
+        // T12/R1 + latent-defect fix: render the recipe to a PNG through the
+        // SINGLE background renderer. Previously this produced an SVG data URI,
+        // which the page-side delivery gate silently drops (the defect never
+        // surfaced only because `type:'template'` was never produced). The
+        // renderer degrades to `getPlaceholder()` on failure (never SVG-by-
+        // recipe, never a throw).
+        return this.renderer.renderToPng(
+          {
+            backgroundColor: source.backgroundColor,
+            text: source.text,
+            textColor: source.textColor,
+          },
+          () => this.getPlaceholder(),
+        );
 
       case 'upload':
       case 'url': {

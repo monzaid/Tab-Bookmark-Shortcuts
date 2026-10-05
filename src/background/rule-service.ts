@@ -93,7 +93,13 @@ export class RuleService {
     // 1. Validate the favicon protocol (T33 / B9-8). The compute layer skips
     //    unsafe values, but rejecting them at the WRITE layer stops the bad
     //    value from being persisted and re-surfacing on every read.
-    if (params.favicon && !isSafeFaviconProtocol(params.favicon.value)) {
+    //
+    //    T12/R1: exempt `type:'template'` — a recipe carries `value:''` (the
+    //    recipe fields are the truth, T7), so `isSafeFaviconProtocol('')` would
+    //    falsely reject it. Security equivalence: the recipe value never reaches
+    //    `link.href`; it is rendered to a PNG that then passes the gate, and the
+    //    delivery/chain layers remain guarded. Only the recipe branch is relaxed.
+    if (params.favicon && params.favicon.type !== 'template' && !isSafeFaviconProtocol(params.favicon.value)) {
       return {
         success: false,
         errorCode: 'RULE_INVALID_REGEX',
@@ -218,7 +224,12 @@ export class RuleService {
 
     // T33 (B9-8): a favicon arriving through update must clear the same
     // protocol gate as createRule, otherwise the write layer is bypassable.
-    if (updates.favicon && !isSafeFaviconProtocol(updates.favicon.value)) {
+    //
+    // T12/R1: the SAME `type:'template'` exemption as createRule (the edit-rule
+    // path carries recipes too — normalizeRuleDraft → resolveDraftFavicon). Only
+    // the recipe branch is relaxed; every other type keeps the protocol check,
+    // so the write layer is NOT bypassable.
+    if (updates.favicon && updates.favicon.type !== 'template' && !isSafeFaviconProtocol(updates.favicon.value)) {
       return {
         success: false,
         errorCode: 'RULE_INVALID_REGEX',

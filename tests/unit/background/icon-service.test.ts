@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { IconService, VALID_FORMATS, type IconProcessResult } from '@background/icon-service';
+import type { RecipeRenderer } from '@background/recipe-renderer';
 
 describe('T12: Icon processing — URL/upload/template and local cache', () => {
   const adapter = createMockAdapter();
@@ -71,15 +72,31 @@ describe('T12: Icon processing — URL/upload/template and local cache', () => {
       expect(dataUri).toContain('G'); // First letter
     });
 
-    it('should resolve template source for display', async () => {
-      const result = await service.resolveForDisplay({
+    it('T12/R1: resolves a template source to a PNG (single renderer), not SVG', async () => {
+      // R1 changed this branch: the recipe now renders to `data:image/png` via
+      // the background `OffscreenCanvas` renderer. jsdom has no OffscreenCanvas,
+      // so the injected stub supplies the PNG; the value must NOT be svg+xml
+      // (the page-side delivery gate drops svg+xml — the latent defect).
+      const svc = new IconService(repo, {
+        renderToPng: () => Promise.resolve('data:image/png;base64,STUB'),
+      } as unknown as RecipeRenderer);
+      const result = await svc.resolveForDisplay({
         type: 'template',
-        value: 'template-1',
+        value: '',
         backgroundColor: '#0071e3',
         text: 'Apple',
       });
-      expect(result).toContain('data:image/svg+xml');
-      expect(result).toContain('0071e3');
+      expect(result.startsWith('data:image/png')).toBe(true);
+      expect(result).not.toContain('svg+xml');
+    });
+
+    it('T12/R1: template render failure degrades to the placeholder, never throws', async () => {
+      const svc = new IconService(repo, {
+        renderToPng: (_r: unknown, fallback: () => string) => Promise.resolve(fallback()),
+      } as unknown as RecipeRenderer);
+      const result = await svc.resolveForDisplay({ type: 'template', value: '', text: 'X' });
+      expect(result).toContain('data:image/svg+xml'); // the EXISTING static placeholder
+      expect(result).toContain('e0e0e0');
     });
 
     it('should return placeholder for uncached url/upload source', async () => {

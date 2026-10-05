@@ -442,6 +442,23 @@ export class StorageRepository {
   }
 
   /**
+   * T12/R1: read a memoized recipe-render result from the SAME
+   * `iconResolutionCache` the `local-icon:` dereferencer uses (one cache, two
+   * key spaces — recipes are keyed `recipe:<sig>`).
+   *
+   * Returns `undefined` on a cold miss, `null` for "known-bad" (render failed —
+   * do not retry on every read), or the cached `data:image/png…` string.
+   */
+  getRecipeResolution(signature: string): string | null | undefined {
+    return this.iconResolutionCache.get(signature);
+  }
+
+  /** T12/R1: memoize a recipe render (or a `null` failure) against the signature. */
+  cacheRecipeResolution(signature: string, value: string | null): void {
+    this.iconResolutionCache.set(signature, value);
+  }
+
+  /**
    * Resolve a single `local-icon:<key>` reference, memoized (B7a / T10).
    *
    * Without the cache every `getSyncState()` re-issued one `storage.get` per

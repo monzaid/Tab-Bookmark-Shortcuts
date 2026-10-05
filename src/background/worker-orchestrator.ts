@@ -583,8 +583,16 @@ export class WorkerOrchestrator {
         // T37 (B9-10): reject an unsafe favicon at the WRITE layer. The compute
         // layer already filters before delivery (no XSS), but persisting a
         // `javascript:` value leaves dirty state that re-surfaces on every read.
+        //
+        // T12/R1: EXEMPT `type:'template'`. A recipe carries `value:''` (the
+        // recipe fields are the truth, T7), so the empty-string check would
+        // REJECT a valid recipe — a false positive. Security equivalence: a
+        // recipe `value` never reaches `link.href`; it must first be RENDERED to
+        // a PNG (T12 renderer) which then passes `isSafeFaviconProtocol`. The
+        // delivery layer (apply-fields.ts inline gate) and the chain layer stay
+        // guarded. Only the recipe branch is relaxed — nothing else.
         const overrideFavicon = request.payload.favicon;
-        if (overrideFavicon && !isSafeFaviconProtocol(overrideFavicon.value)) {
+        if (overrideFavicon && overrideFavicon.type !== 'template' && !isSafeFaviconProtocol(overrideFavicon.value)) {
           return {
             success: false,
             errorCode: 'INVALID_REQUEST',
@@ -652,8 +660,12 @@ export class WorkerOrchestrator {
         // T37 (B9-10): same write-layer gate as SET_TAB_OVERRIDE — a slot icon
         // flows into `link.href` via the slot tier, so it must not be persisted
         // unless it clears the allowlist.
+        //
+        // T12/R1: exempt `type:'template'` (recipe carries `value:''`; the
+        // rendered PNG is what passes the gate) — same security equivalence as
+        // SET_TAB_OVERRIDE above, and only for recipes.
         const markerIcon = request.payload.uiMarker.icon;
-        if (markerIcon && !isSafeFaviconProtocol(markerIcon.value)) {
+        if (markerIcon && markerIcon.type !== 'template' && !isSafeFaviconProtocol(markerIcon.value)) {
           return {
             success: false,
             errorCode: 'INVALID_REQUEST',
