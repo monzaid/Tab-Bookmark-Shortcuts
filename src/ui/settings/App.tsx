@@ -13,7 +13,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import { Button, Toast, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, DimensionPresence, DimensionMode } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, DimensionPresence, DimensionMode, ExportScope } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
 
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
@@ -2092,6 +2092,131 @@ function DashboardSection() {
 
 // ─── Import/Export Section (Problem 7) ──────────────────────────────────────
 
+/**
+ * D13: the shared download gesture. The filename convention is unchanged from
+ * the previous export path, and the download still goes through Blob +
+ * `URL.createObjectURL`.
+ */
+function downloadPackage(pkg: string): void {
+  const blob = new Blob([pkg], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `tab-bookmarks-config-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * T19 (Q2=B-2): the independent EXPORT section, inside the settings page next
+ * to the import one — NOT a new HTML page and NOT a new build entry.
+ *
+ * D1: four dimension checkboxes; an empty selection is BLOCKED (exporting
+ * nothing is not a legal export). D1/D13: export produces the package and shows
+ * a per-dimension summary FIRST; the download is a separate, explicit step.
+ */
+function ExportSection() {
+  const [checked, setChecked] = useState<Record<keyof DimensionPresence, boolean>>({
+    slots: false, rules: false, settings: false, shortcuts: false,
+  });
+  const [pkg, setPkg] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  const anyChecked = (Object.keys(checked) as Array<keyof DimensionPresence>).some((d) => checked[d]);
+  const scope: ExportScope = {
+    slots: checked.slots, rules: checked.rules, settings: checked.settings, shortcuts: checked.shortcuts,
+  };
+
+  const summary = (() => {
+    if (!pkg) return null;
+    try {
+      const parsed = JSON.parse(pkg) as { slots?: unknown[]; rules?: unknown[]; settings?: unknown; shortcuts?: unknown };
+      return {
+        slots: parsed.slots?.length ?? 0,
+        rules: parsed.rules?.length ?? 0,
+        settings: parsed.settings ? 1 : 0,
+        shortcuts: parsed.shortcuts ? 1 : 0,
+      };
+    } catch {
+      return null;
+    }
+  })();
+
+  const handleExport = async () => {
+    setExporting(true);
+    setPkg(null);
+    try {
+      const res = await sendMessage('EXPORT_PACKAGE', { scope });
+      const result = extractResult(res);
+      if (result?.success && result.package) setPkg(result.package as string);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <section data-testid="export-section" aria-label="Export">
+      <h3>Export</h3>
+      <p className="tbs-settings__hint">Choose what to include, then export a package.</p>
+      <ul className="tbs-settings__export-dims">
+        {DIMENSION_LABELS.map(({ dim, label }) => (
+          <li key={dim}>
+            <label>
+              <input
+                type="checkbox"
+                data-testid={`export-dim-${dim}`}
+                checked={checked[dim]}
+                onChange={(e) => {
+                  const next = e.currentTarget.checked;
+                  setChecked((prev) => ({ ...prev, [dim]: next }));
+                }}
+              />
+              {label}
+            </label>
+          </li>
+        ))}
+      </ul>
+
+      {!anyChecked && (
+        <p className="tbs-settings__hint" data-testid="export-empty-reason">
+          Select at least one dimension to export.
+        </p>
+      )}
+
+      <Button
+        size="md"
+        variant="primary"
+        data-testid="export-submit"
+        disabled={!anyChecked}
+        loading={exporting}
+        onClick={() => { void handleExport(); }}
+      >
+        Export
+      </Button>
+
+      {pkg && summary && (
+        <div
+          className="tbs-settings__export-summary"
+          data-testid="export-summary"
+          role="region"
+          aria-label="Export package summary"
+        >
+          <h4>Package summary</h4>
+          <ul>
+            <li>Slots: {summary.slots}</li>
+            <li>Rules: {summary.rules}</li>
+            <li>Settings: {summary.settings}</li>
+            <li>Shortcuts: {summary.shortcuts}</li>
+          </ul>
+          <Button size="sm" variant="secondary" data-testid="export-download" onClick={() => { downloadPackage(pkg); }}>
+            Download
+          </Button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** T18: the fixed four dimensions (D5), in the order the diff groups them. */
 const DIMENSION_LABELS: ReadonlyArray<{ dim: keyof DimensionPresence; label: string }> = [
   { dim: 'slots', label: 'Slots' },
@@ -2113,25 +2238,6 @@ function ImportExportSection() {
   const [confirming, setConfirming] = useState(false);
   const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const handleExport = async () => {
-    try {
-      const res = await sendMessage('EXPORT_CONFIG');
-      const result = extractResult(res);
-      if (result?.success && result.json) {
-        const blob = new Blob([result.json as string], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `tab-bookmarks-config-${new Date().toISOString().slice(0, 10)}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        setToast({ variant: 'success', message: 'Configuration exported' });
-      }
-    } catch {
-      setToast({ variant: 'error', message: 'Export failed' });
-    }
-  };
 
   const handleImportClick = () => {
     fileInputRef.current?.click();
@@ -2236,7 +2342,23 @@ function ImportExportSection() {
    * dialog open and applies nothing.
    */
   const handleExportBackup = () => {
-    void handleExport();
+    // A backup IS "export the current state" (A11) — no separate action. It
+    // downloads immediately; it does NOT touch the pending import.
+    void (async () => {
+      try {
+        const res = await sendMessage('EXPORT_PACKAGE', {
+          scope: { slots: true, rules: true, settings: true, shortcuts: true },
+        });
+        const result = extractResult(res);
+        if (result?.success && result.package) {
+          downloadPackage(result.package as string);
+        } else {
+          setToast({ variant: 'error', message: 'Backup failed' });
+        }
+      } catch {
+        setToast({ variant: 'error', message: 'Backup failed' });
+      }
+    })();
   };
 
   return (
@@ -2361,14 +2483,6 @@ function ImportExportSection() {
       >
         <p>{quantizedMessage}</p>
       </Dialog>
-
-      <h3>Export</h3>
-      <p className="tbs-settings__hint">
-        Export all slots, rules, and settings as a JSON backup file.
-      </p>
-      <Button size="md" variant="primary" onClick={() => void handleExport()} aria-label="Export configuration">
-        Export Configuration
-      </Button>
 
       {toast && (
         <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />
@@ -2712,7 +2826,12 @@ export function SettingsApp() {
               <RulesSection />
             )}
             {activeSection === 'dashboard' && <DashboardSection />}
-            {activeSection === 'import-export' && <ImportExportSection />}
+            {activeSection === 'import-export' && (
+              <>
+                <ImportExportSection />
+                <ExportSection />
+              </>
+            )}
             {activeSection === 'diagnostics' && <DiagnosticsSection />}
           </>
         )}
