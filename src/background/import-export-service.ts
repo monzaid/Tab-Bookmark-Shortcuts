@@ -19,7 +19,12 @@ import type {
   ImportPreview,
   ImportSlotConflict,
   ImportSlotDecision,
+  ImportIntent,
+  ImportApplyResult,
+  ImportRecordStatus,
 } from '@shared/types';
+import { applyIntent, computeDiff, findMatchOverlaps } from '@shared/import-diff';
+import { isExportPackage } from '@shared/export-package';
 import { partitionByDomainRules, type DomainRecord, type DomainRejection } from './domain-rules';
 import { iconToPortable, portableToIcon } from '@shared/export-package';
 
@@ -251,6 +256,89 @@ export class ImportExportService {
     }
 
     return { success: true, configVersion: result.configVersion };
+  }
+
+  // ─── Apply (server-authoritative) ──────────────────────────────────────
+
+  /**
+   * The ONLY writer (A11 / C4).
+   *
+   * APPLY receives only the FILE STRING + the user's INTENT and recomputes the
+   * result server-side — it never trusts a client-supplied preview (the old
+   * commit path's own comment admitted that preview "may have been built by hand
+   * or mutated"). The file string is the one INSPECT read, so there is no disk
+   * re-read and no fingerprint (D12): the computation is a pure function of
+   * `(file, intent, currentState)`.
+   *
+   * `expectedVersion` is the `configVersion` read at INSPECT time. It is passed
+   * to `writeSync`'s optimistic lock, so any write in between is genuinely
+   * refused with ZERO modification (F4 — previously the UI never sent one, so
+   * the lock always passed).
+   */
+  async applyImport(
+    file: string,
+    intent: ImportIntent,
+    expectedVersion: number,
+  ): Promise<
+    { success: true; configVersion: number; result: ImportApplyResult } |
+    { success: false; errorCode: string; message: string }
+  > {
+    // 1. Parse + structural guard. The strict D14 validator is a separate
+    //    concern; the shape guard is the minimum needed to recompute safely.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(file);
+    } catch {
+      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Invalid JSON format' };
+    }
+    if (!isExportPackage(parsed)) {
+      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Not a valid export package' };
+    }
+
+    // 2. Recompute the diff against the CURRENT state, from the file alone.
+    const current = await this.repo.getSyncState();
+    const diff = computeDiff(parsed, current, intent);
+
+    // 3. Derive the final state and the destructive summary.
+    const final = applyIntent(parsed, current, intent);
+    const overlaps = findMatchOverlaps(final);
+
+    // D15: records the domain constraints reject are skipped + disclosed.
+    const partition = this.partitionRecords(final.slots, final.rules);
+    const acceptedSlotIds = new Set(partition.slots.map((s) => s.id));
+    const acceptedRuleIds = new Set(partition.rules.map((r) => r.id));
+    const finalSafe = {
+      ...final,
+      slots: final.slots.filter((s) => acceptedSlotIds.has(s.id)),
+      rules: final.rules.filter((r) => acceptedRuleIds.has(r.id)),
+    };
+
+    // 4. ONE version-bound write. `writeSync` refuses a stale `expectedVersion`
+    //    with `CONFIG_CONFLICT` BEFORE mutating, so a drift leaves zero changes.
+    const write = await this.repo.writeSync(expectedVersion, () => finalSafe);
+    if (!write.success) {
+      return { success: false, errorCode: write.errorCode, message: write.message };
+    }
+
+    const counts = { added: 0, replaced: 0, kept: 0, deleted: 0, skipped: 0 };
+    for (const record of diff.records) {
+      counts[record.status as ImportRecordStatus] += 1;
+    }
+
+    return {
+      success: true,
+      configVersion: write.configVersion,
+      result: {
+        success: true,
+        configVersion: write.configVersion,
+        counts,
+        tolerant: [],
+        domainViolations: partition.rejected,
+        // Filled by the missing-icon producer (a downstream wiring task).
+        missingIcons: [],
+        overlaps,
+      },
+    };
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────
