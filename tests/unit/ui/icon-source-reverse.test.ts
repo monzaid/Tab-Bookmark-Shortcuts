@@ -13,6 +13,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { iconSourceToIconConfig, iconSourceToDraft } from '@ui/shared/icon-source';
+import { fromIconFieldValue } from '@ui/shared/icon-mode-adapter';
+import { resolveDraftFavicon } from '@ui/shared/rule-form-submit';
 import type { IconSource } from '@shared/types';
 
 const RECIPE: IconSource = {
@@ -44,10 +46,11 @@ describe('FIX-C: iconSourceToIconConfig', () => {
       .toEqual({ dataUri: 'data:image/png;base64,UP' });
   });
 
-  it('maps a URL (the previously missing branch)', () => {
-    // v1 had no `url` branch and silently returned {} — a url icon reopened blank.
-    expect(iconSourceToIconConfig({ type: 'url', value: 'https://x.example/i.png' }))
-      .toEqual({ url: 'https://x.example/i.png' });
+  it('gives a URL source no config (it is carried by `iconSourceToDraft`, not a config field)', () => {
+    // A url has no composer config; the REAL carrier is `iconSourceToDraft`'s
+    // `mode:'url'` branch (asserted below). Adding a config `url` field would be
+    // a field with no writer and no reader.
+    expect(iconSourceToIconConfig({ type: 'url', value: 'https://x.example/i.png' })).toEqual({});
   });
 });
 
@@ -64,8 +67,37 @@ describe('FIX-C: iconSourceToDraft', () => {
       .toEqual({ mode: 'upload', value: 'data:image/png;base64,UP' });
   });
 
-  it('a URL becomes mode:url', () => {
+  it('a URL becomes mode:url (the real carrier for a url source)', () => {
     expect(iconSourceToDraft({ type: 'url', value: 'https://x.example/i.png' }))
       .toEqual({ mode: 'url', value: 'https://x.example/i.png' });
+  });
+
+  it('a MATERIALIZED recipe is still a recipe through iconSourceToDraft', () => {
+    const draft = iconSourceToDraft(RECIPE_MATERIALIZED);
+    expect(draft.mode).toBe('custom');
+    expect(draft.iconConfig).toEqual({ bgColor: '#2563EB', text: 'A', textColor: '#FFFFFF' });
+  });
+});
+
+describe('FIX-C: seed → apply round-trip preserves the recipe (the defect this closes)', () => {
+  it('a materialized recipe re-persists as {type:"template", value:""} — never an upload', () => {
+    // seed (what the editor opens with)
+    const draft = iconSourceToDraft(RECIPE_MATERIALIZED);
+    // editor → draft model → the SHARED save converter
+    const { mode, iconConfig } = fromIconFieldValue(draft);
+    const persisted = resolveDraftFavicon({ iconMode: mode, iconConfig });
+
+    expect(persisted).toEqual(RECIPE); // type/value/fields ALL intact
+    expect(persisted!.type).toBe('template');
+    expect(persisted!.value).toBe('');
+    expect(persisted!.value).not.toContain('data:'); // the render did not leak
+  });
+
+  it('the OLD prefix-guessing seed would have produced an upload (control)', () => {
+    // Reproduce the removed logic to show what the fix prevented: the
+    // materialized value classified as a custom/upload with a dataUri.
+    const oldSeed = { mode: 'custom' as const, value: RECIPE_MATERIALIZED.value, iconConfig: { dataUri: RECIPE_MATERIALIZED.value } };
+    const persisted = resolveDraftFavicon({ iconMode: { kind: 'set', value: '' }, iconConfig: oldSeed.iconConfig });
+    expect(persisted!.type).toBe('upload'); // the regression the fix removes
   });
 });

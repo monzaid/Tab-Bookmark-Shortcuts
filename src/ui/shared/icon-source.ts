@@ -56,7 +56,8 @@ export function iconSourceToIconConfig(source: IconSource | null | undefined): I
     // would misclassify it as an upload and destroy the recipe on re-save.
     return { bgColor: source.backgroundColor, text: source.text, textColor: source.textColor };
   }
-  if (source.type === 'url') return { url: source.value };
+  // A `url` source has no `IconConfig` representation — it is carried by
+  // `iconSourceToDraft`'s `mode:'url'` branch instead of a config field.
   return {};
 }
 

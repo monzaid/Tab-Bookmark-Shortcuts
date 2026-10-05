@@ -101,8 +101,14 @@ describe('F3 — first open of the icon editor pre-loads the existing icon', () 
     });
 
     // The existing icon must be shown immediately — not a blank default.
-    const preview = screen.getByAltText('Icon preview');
-    expect(preview).toHaveAttribute('src', EXISTING_ICON);
+    // FIX-C: an uploaded icon now seeds the UPLOAD tab (source-aware), whose
+    // preview is the plain `<img>` inside `aria-label="Icon preview"` rather than
+    // the composite editor's `<img alt="Icon preview">`. Query by src so the
+    // assertion covers whichever preview shape the current mode uses.
+    await waitFor(() => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      expect(imgs.some((i) => i.getAttribute('src') === EXISTING_ICON)).toBe(true);
+    });
   });
 
   it('should pre-load the current-page favicon on the first open (current-page instance)', async () => {
@@ -125,7 +131,9 @@ describe('F3 — first open of the icon editor pre-loads the existing icon', () 
       expect(screen.getByRole('dialog')).toBeInTheDocument();
     });
 
-    const preview = screen.getByAltText('Icon preview');
-    expect(preview).toHaveAttribute('src', EXISTING_ICON);
+    await waitFor(() => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      expect(imgs.some((i) => i.getAttribute('src') === EXISTING_ICON)).toBe(true);
+    });
   });
 });

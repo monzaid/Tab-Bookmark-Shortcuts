@@ -131,15 +131,13 @@ function modesEqual(a: FieldMode, b: FieldMode): boolean {
 
 function iconConfigsEqual(a?: IconConfig, b?: IconConfig): boolean {
   if (!a || !b) return a === b;
-  // FIX-C: every field, including the reverse-converter's `url` carrier —
-  // a partial comparison would report a stale match once a field only one
-  // side sets differs.
+  // FIX-C: compare EVERY field — a partial comparison reported a stale match
+  // once a field only one side sets differed.
   return (
     a.dataUri === b.dataUri &&
     a.bgColor === b.bgColor &&
     a.text === b.text &&
-    a.textColor === b.textColor &&
-    a.url === b.url
+    a.textColor === b.textColor
   );
 }
 

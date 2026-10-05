@@ -25,7 +25,8 @@ import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
 import { resolveFieldChain } from '@shared/field-chain';
 import type { ChainResult, TierKey, TierOwner } from '@shared/field-chain';
 import { useJumpToRow, JUMP_HIGHLIGHT_CLASS, JUMP_HIGHLIGHT_MS } from '@ui/shared/use-jump-to-row';
-import { canonicalIconSource, iconSourceForOwner } from '@ui/shared/icon-source';
+import { canonicalIconSource, iconSourceForOwner, iconSourceToDraft } from '@ui/shared/icon-source';
+import { fromIconFieldValue } from '@ui/shared/icon-mode-adapter';
 import { UndoBar } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
@@ -1696,14 +1697,21 @@ function DashboardSection() {
 
   const openEdit = (entry: DashboardEntry) => {
     const t = entry.chain.title.winner.value;
-    const i = entry.chain.favicon.winner.value;
+    // FIX-C: seed from the SOURCE TYPE, never from the value's shape. A recipe's
+    // materialized value is a `data:` URI, so a prefix guess reopened it as an
+    // upload — and saving flipped `type:'template'` to `type:'upload'`.
+    const source = thisEntryIconSource(entry);
+    const icon = source
+      ? fromIconFieldValue(iconSourceToDraft(source))
+      : { mode: { kind: 'use-chain' } as FieldMode, iconConfig: undefined };
+
     setExpanded((prev) => new Set(prev).add(entry.id));
     setDrafts((prev) => {
       const next = new Map(prev);
       next.set(entry.id, {
         titleMode: t !== null ? { kind: 'set', value: t } : { kind: 'use-chain' },
-        iconMode: i !== null ? { kind: 'set', value: i.startsWith('data:') ? '' : i } : { kind: 'use-chain' },
-        iconConfig: i?.startsWith('data:') ? { dataUri: i } : undefined,
+        iconMode: icon.mode,
+        iconConfig: icon.iconConfig,
       });
       return next;
     });

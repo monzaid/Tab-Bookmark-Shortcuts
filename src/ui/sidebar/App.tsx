@@ -805,7 +805,7 @@ function SidebarUndoBar({ undo, onUndo, onExpire }: SidebarUndoAdapters) {
 import type { IconConfig } from '@ui/components/IconEditor';
 import { IconFieldEditor } from '@ui/shared/icon-field-editor';
 import type { IconFieldValue } from '@ui/shared/icon-field-editor';
-import { iconDraftToIconSource } from '@ui/shared/icon-source';
+import { iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft } from '@ui/shared/icon-source';
 import { wildcardToRegex } from '@shared/url-utils';
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import type { FieldMode } from '@ui/shared/field-editor';
@@ -830,7 +830,13 @@ interface IconEditorModalProps {
   onApply: (draft: IconFieldValue) => void;
   onCancel: () => void;
   onReset?: () => void;
-  initialIcon?: string;
+  /**
+   * FIX-C: prefer the actual `IconSource` so the seed is source-aware. A plain
+   * string is still accepted for surfaces whose tier has no stored source (the
+   * site tier) — it is then treated as url/upload by shape, which is all that is
+   * knowable there.
+   */
+  initialIcon?: IconSource | string;
   /**
    * Items 1.1 / 1.2 / 1.3: the LIVE chain for the target, so the picker's
    * `Use chain` tab shows real tier data and the masking summary has something
@@ -859,11 +865,13 @@ interface IconEditorModalProps {
  * layer's icon: a `data:` URI becomes the Custom Icon tab, anything else the
  * Icon URL tab, and the "none" case opens with both empty.
  */
-function seedIconFieldSource(initialIcon?: string): IconFieldValue {
+function seedIconFieldSource(initialIcon?: IconSource | string): IconFieldValue {
   if (!initialIcon) return { mode: 'custom', value: '', iconConfig: undefined };
-  if (initialIcon.startsWith('data:')) {
-    return { mode: 'custom', value: initialIcon, iconConfig: { dataUri: initialIcon } };
-  }
+  // FIX-C: an actual source is authoritative — dispatch on its `type`, never on
+  // the value's shape (a materialized recipe is a `data:` URI and would
+  // otherwise be misread as an upload).
+  if (typeof initialIcon !== 'string') return iconSourceToDraft(initialIcon);
+  // No source available (the site tier carries none): it can only be a URL.
   return { mode: 'url', value: initialIcon };
 }
 
@@ -2095,6 +2103,15 @@ export function SidebarApp() {
   const displayCurrentFavicon = faviconChain
     ? (faviconChain.winner.value ?? faviconChain.tiers.site.value ?? state.currentTabFavicon)
     : state.currentTabFavicon;
+  // FIX-C: the winning tier's STORED source, so the icon picker seeds a recipe
+  // as a recipe. Absent when the winner is the site tier (nothing stored).
+  const currentPageIconSource = faviconChain
+    ? iconSourceForOwner(faviconChain.nodes.find((n) => n.winner)?.owner, {
+        slots: state.sync?.slots ?? [],
+        rules: state.sync?.rules ?? [],
+        tabOverrides: state.local?.tabOverrides ?? [],
+      })
+    : null;
 
   // Built once, then conditionally wrapped in the source popover. The favicon is
   // already a focus stop (`role="button" tabIndex=0`), so its wrapper does not
@@ -2402,7 +2419,9 @@ export function SidebarApp() {
         onApply={handleIconApply}
         onCancel={() => { setShowIconEditor(false); }}
         onReset={handleCurrentIconReset}
-        initialIcon={displayCurrentFavicon || undefined}
+        // FIX-C: the winning tier's SOURCE (so a recipe reopens as a recipe); falls
+        // back to the display string when that tier stores no source (site).
+        initialIcon={currentPageIconSource ?? (displayCurrentFavicon || undefined)}
         // Item 1.1: the LIVE current-page chain — `override > slot > rule > site`
         // resolved for this tab, so `Use chain` shows real data (item 2.3).
         {...(faviconChain ? { chain: faviconChain } : {})}
@@ -2420,9 +2439,10 @@ export function SidebarApp() {
         onCancel={() => { setSlotIconEditorId(null); }}
         onReset={handleSlotIconReset}
         returnFocusRef={slotIconTriggerRef}
+        // FIX-C: the slot's own stored source (source-aware).
         initialIcon={(() => {
           const s = state.sync?.slots.find((sl) => sl.id === slotIconEditorId);
-          return s?.uiMarker.icon?.value || s?.faviconSnapshot || undefined;
+          return s?.uiMarker.icon ?? (s?.faviconSnapshot || undefined);
         })()}
         // The slot's own chain: its binding's tab, so the tiers are the ones the
         // bound page actually resolves to.
