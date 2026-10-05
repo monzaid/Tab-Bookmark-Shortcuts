@@ -167,6 +167,25 @@ export class StorageRepository {
     }
   }
 
+  /**
+   * FIX-B: the LOCAL twin of `stripDerivedRecipeValues`.
+   *
+   * A `tabOverride` lives in `LocalState`, and `writeLocal` re-reads through
+   * `getLocalState()` — which now materializes an override recipe into `value`.
+   * Persisting that object would promote the derived render to the durable
+   * truth, exactly the R2 hazard on the other storage area.
+   *
+   * Scope: ONLY `LocalState`. `pendingUndo` is a separate storage key (not part
+   * of `LocalState`), so it is deliberately outside this invariant.
+   */
+  private stripDerivedLocalRecipeValues(state: LocalState): void {
+    for (const override of state.tabOverrides) {
+      if (override.favicon?.type === 'template' && override.favicon.value !== '') {
+        override.favicon = { ...override.favicon, value: '' };
+      }
+    }
+  }
+
   // ─── Initialization ──────────────────────────────────────────────────────
 
   /**
@@ -273,7 +292,42 @@ export class StorageRepository {
     if (!this.localCache) {
       await this.hydrate();
     }
-    return { ...this.localCache! };
+    // FIX-B: materialize a `tabOverrides` recipe into `value`, mirroring R2 on
+    // the sync reads. The override is the HIGHEST priority tier, so without this
+    // an override recipe stayed `''` → the chain read `null` → the delivery fell
+    // back to `restore` and the current page's icon never changed.
+    return this.resolveLocalIconReferences({ ...this.localCache! });
+  }
+
+  /**
+   * FIX-B: local twin of `resolveIconReferences` — the read-time materialization
+   * for the ONE local record kind that carries an `IconSource`. Reuses the SAME
+   * `RecipeRenderer` (no second renderer) and the SAME memoization.
+   *
+   * Never yields SVG: on failure the value is left as-is (`''`), so the chain
+   * reads `null` and the delivery restores — the recipe fields stay editable.
+   */
+  private async resolveLocalIconReferences(state: LocalState): Promise<LocalState> {
+    const overrides = state.tabOverrides;
+    let changed = false;
+    const resolvedOverrides = [...overrides];
+
+    for (let i = 0; i < resolvedOverrides.length; i++) {
+      const override = resolvedOverrides[i];
+      if (override.favicon?.type !== 'template') continue;
+
+      const rendered = await this.recipeRenderer.renderForResolution({
+        backgroundColor: override.favicon.backgroundColor,
+        text: override.favicon.text,
+        textColor: override.favicon.textColor,
+      });
+      if (!rendered) continue; // leave `''` → the chain falls through
+
+      resolvedOverrides[i] = { ...override, favicon: { ...override.favicon, value: rendered } };
+      changed = true;
+    }
+
+    return changed ? { ...state, tabOverrides: resolvedOverrides } : state;
   }
 
   getConfigVersion(): number {
@@ -601,8 +655,12 @@ export class StorageRepository {
    */
   async writeLocal(updater: (current: LocalState) => LocalState): Promise<void> {
     const run = this.localWriteQueue.then(async () => {
+      // `getLocalState()` materializes override recipes (FIX-B); the object it
+      // returns must never be persisted with a derived render in `value`.
       const current = await this.getLocalState();
+      this.stripDerivedLocalRecipeValues(current);
       const updated = updater(current);
+      this.stripDerivedLocalRecipeValues(updated);
       await this.adapter.storage.set('local', { [LOCAL_KEY]: updated });
       this.localCache = updated;
     });
