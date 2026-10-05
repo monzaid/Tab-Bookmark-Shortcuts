@@ -62,6 +62,14 @@ export interface IconSource {
   backgroundColor?: string;
   /** Template only: display text */
   text?: string;
+  /**
+   * Template only: display text colour hex.
+   *
+   * T2/C1: a recipe (background + text + text colour) is the durable truth for
+   * a `type: 'template'` icon. Without this field a round-trip would silently
+   * fall back to `autoTextColor` and change the icon's appearance.
+   */
+  textColor?: string;
 }
 
 // ─── UI Marker (slot display customization) ──────────────────────────────────
@@ -236,6 +244,142 @@ export interface ImportPreview {
   switchDirection: SwitchDirection;
   autoBindGlobal: boolean;
   configVersion: number;
+  /**
+   * D15: records skipped because they violate a domain constraint. A bad record
+   * no longer rejects the whole package; it is disclosed here instead.
+   */
+  domainViolations: DomainViolation[];
+}
+
+// ─── Import / Export — Iteration types (T2) ──────────────────────────────────
+//
+// The four dimensions are FIXED (D5): slots / rules / settings / shortcuts.
+
+export interface ExportScope {
+  /** Dimension flags — `true` when the user selected that dimension (D1). */
+  slots?: boolean;
+  rules?: boolean;
+  settings?: boolean;
+  shortcuts?: boolean;
+  /** Per-record deselection within a selected dimension (D1 "展开到记录级"). */
+  excludedSlotIds?: number[];
+  excludedRuleIds?: string[];
+}
+
+/** How a dimension's records combine with the target machine (A1). */
+export type DimensionMode = 'incremental' | 'overwrite';
+
+/** A sparse per-record override of the dimension mode (A4). `keep`=leave target. */
+export interface ImportRecordOverride {
+  kind: 'slot' | 'rule';
+  id: number | string;
+  action: 'keep' | 'take';
+}
+
+export interface ImportIntent {
+  dimensionModes: {
+    slots: DimensionMode;
+    rules: DimensionMode;
+    settings: DimensionMode;
+    shortcuts: DimensionMode;
+  };
+  /** Sparse: only rows the user actually changed. */
+  recordOverrides?: ImportRecordOverride[];
+}
+
+/** Default import intent: incremental + no overrides (A1 — the safer default). */
+export function defaultImportIntent(): ImportIntent {
+  return {
+    dimensionModes: {
+      slots: 'incremental',
+      rules: 'incremental',
+      settings: 'incremental',
+      shortcuts: 'incremental',
+    },
+  };
+}
+
+/** Per-field change detail inside a record (A12). */
+export interface ImportFieldDiff {
+  field: 'title' | 'icon';
+  before: string | null;
+  after: string | null;
+  changed: boolean;
+}
+
+/** One record's outcome in the diff (A12). */
+export type ImportRecordStatus = 'added' | 'replaced' | 'kept' | 'deleted' | 'skipped';
+
+export interface ImportRecordDiff {
+  kind: 'slot' | 'rule';
+  id: number | string;
+  label: string;
+  status: ImportRecordStatus;
+  fields: ImportFieldDiff[];
+}
+
+/** Which dimensions the package actually carried (A2/A3 three-state). */
+export interface DimensionPresence {
+  slots: boolean;
+  rules: boolean;
+  settings: boolean;
+  shortcuts: boolean;
+}
+
+/** Record-level + field-level diff over the package against current state (A12). */
+export interface ImportDiff {
+  records: ImportRecordDiff[];
+  dimensions: DimensionPresence;
+}
+
+/** A forgiving-but-disclosed item (unknown field ignored, default filled). */
+export interface TolerantItem {
+  kind: string;
+  detail: string;
+}
+
+/** A record skipped because it violates a domain constraint (D15). */
+export interface DomainViolation {
+  kind: 'slot' | 'rule';
+  id: number | string;
+  reason: string;
+}
+
+/** A match overlap: two records share the exact same Match URL + Match Type (D10). */
+export interface MatchOverlap {
+  urlMatch: UrlMatchDefinition;
+  recordIds: Array<number | string>;
+}
+
+/** Read-only inspection result (D6/§6.2): what the package would do. */
+export interface ImportInspection {
+  diff: ImportDiff;
+  dimensions: DimensionPresence;
+  tolerant: TolerantItem[];
+  domainViolations: DomainViolation[];
+  overlaps: MatchOverlap[];
+  /** configVersion read at INSPECT time — APPLY must bind to this (C3/F4). */
+  configVersion: number;
+}
+
+/** Applied-result checklist (§4.3). */
+export interface ImportApplyResult {
+  success: boolean;
+  configVersion: number;
+  counts: { added: number; replaced: number; kept: number; deleted: number; skipped: number };
+  tolerant: TolerantItem[];
+  domainViolations: DomainViolation[];
+  missingIcons: Array<{ kind: 'slot' | 'rule'; id: number | string }>;
+  overlaps: MatchOverlap[];
+  /** Chrome/Edge: manual-set guidance for the shortcut dimension (D4). */
+  shortcutGuidance?: string;
+}
+
+export interface ExportPackageSummary {
+  slots: number;
+  rules: number;
+  settings: number;
+  shortcuts: number;
 }
 
 // ─── Sync Root State ─────────────────────────────────────────────────────────
