@@ -1269,23 +1269,20 @@ export function SidebarApp() {
       // Support both { result: { success, sync, local } } and { success, sync, local }
       const result = response?.result ?? response;
       if (result?.success && result.sync && result.local) {
-        let local = result.local;
-        // Problem 1: Also read tabOverride directly from storage.local for freshness
-        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-          try {
-            const stored = await chrome.storage.local.get('localState');
-            const storedLocal = stored?.localState as LocalState | undefined;
-            if (storedLocal?.tabOverrides) {
-              local = { ...local, tabOverrides: storedLocal.tabOverrides };
-            }
-          } catch {
-            // Fallback to background-provided state
-          }
-        }
+        // FIX-B: use the background's state VERBATIM. A former "read
+        // chrome.storage.local directly for freshness" block replaced
+        // `tabOverrides` with the PERSISTED records — whose recipe `value` is
+        // `''` (the durable form) — undoing the read-time materialization the
+        // repository just performed. The sidebar then showed a blank icon and
+        // could not seed the recipe back into the editor.
+        //
+        // The repository already guarantees freshness: `writeLocal` updates the
+        // cache and `storage.onChanged` invalidates it, so `getLocalState()`
+        // re-reads when needed. The raw read was redundant AND destructive.
         setState((prev) => ({
           ...prev,
           sync: result.sync!,
-          local,
+          local: result.local!,
           loading: false,
           error: null,
         }));

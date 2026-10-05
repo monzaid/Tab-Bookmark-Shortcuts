@@ -178,12 +178,20 @@ export class StorageRepository {
    * Scope: ONLY `LocalState`. `pendingUndo` is a separate storage key (not part
    * of `LocalState`), so it is deliberately outside this invariant.
    */
-  private stripDerivedLocalRecipeValues(state: LocalState): void {
-    for (const override of state.tabOverrides) {
+  private stripDerivedLocalRecipeValues(state: LocalState): LocalState {
+    // B6: RETURN a new state rather than mutating in place. `getLocalState()`
+    // shallow-copies the cache, so its `tabOverrides` array is SHARED with
+    // `localCache` — an in-place edit would silently pollute the cache. Callers
+    // must USE this return value (a discarded return would make this a no-op).
+    let changed = false;
+    const tabOverrides = state.tabOverrides.map((override) => {
       if (override.favicon?.type === 'template' && override.favicon.value !== '') {
-        override.favicon = { ...override.favicon, value: '' };
+        changed = true;
+        return { ...override, favicon: { ...override.favicon, value: '' } };
       }
-    }
+      return override;
+    });
+    return changed ? { ...state, tabOverrides } : state;
   }
 
   // ─── Initialization ──────────────────────────────────────────────────────
@@ -292,11 +300,26 @@ export class StorageRepository {
     if (!this.localCache) {
       await this.hydrate();
     }
+    // B6: snapshots must not share mutable ARRAYS with the cache. A shallow
+    // spread would leave `bindings` / `tabOverrides` as the cache's own arrays,
+    // so a caller editing a snapshot (or `writeLocal`'s updater) would corrupt
+    // `localCache`. The element objects are still shared — callers treat them as
+    // immutable and copy on write, which every local write already does.
+    const cache = this.localCache!;
+    const snapshot: LocalState = {
+      ...cache,
+      bindings: [...cache.bindings],
+      cycleCursors: [...cache.cycleCursors],
+      recoverySessions: [...cache.recoverySessions],
+      recoverySnapshots: [...cache.recoverySnapshots],
+      tabOverrides: [...cache.tabOverrides],
+      diagnostics: [...cache.diagnostics],
+    };
     // FIX-B: materialize a `tabOverrides` recipe into `value`, mirroring R2 on
     // the sync reads. The override is the HIGHEST priority tier, so without this
     // an override recipe stayed `''` → the chain read `null` → the delivery fell
     // back to `restore` and the current page's icon never changed.
-    return this.resolveLocalIconReferences({ ...this.localCache! });
+    return this.resolveLocalIconReferences(snapshot);
   }
 
   /**
@@ -657,10 +680,10 @@ export class StorageRepository {
     const run = this.localWriteQueue.then(async () => {
       // `getLocalState()` materializes override recipes (FIX-B); the object it
       // returns must never be persisted with a derived render in `value`.
-      const current = await this.getLocalState();
-      this.stripDerivedLocalRecipeValues(current);
-      const updated = updater(current);
-      this.stripDerivedLocalRecipeValues(updated);
+      // Both calls USE the returned (new) state — discarding it would be a
+      // silent no-op.
+      const current = this.stripDerivedLocalRecipeValues(await this.getLocalState());
+      const updated = this.stripDerivedLocalRecipeValues(updater(current));
       await this.adapter.storage.set('local', { [LOCAL_KEY]: updated });
       this.localCache = updated;
     });
