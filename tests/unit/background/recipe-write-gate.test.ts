@@ -91,6 +91,44 @@ describe('T12: write gates admit recipes (gap 1)', () => {
     expect(result.success).toBe(false);
   });
 
+  it('REJECTS a forged {type:"template", value:"https://…"} (shape validation)', async () => {
+    // The recipe exemption must not become a hole: a caller could otherwise skip
+    // the protocol check by claiming `type:'template'` while carrying a real
+    // value. `isFaviconWriteSafe` validates the recipe SHAPE instead.
+    const ruleService = new RuleService(adapter, repo);
+
+    const forged = await ruleService.createRule({
+      urlMatch: { type: 'exact', value: 'https://forged.example/page' },
+      priority: 0,
+      // The forged shape: claims template, but carries a live value.
+      favicon: { type: 'template', value: 'https://evil.example/x.png' } as unknown as IconSource,
+    });
+    expect(forged.success, 'a template claiming a non-empty value must be rejected').toBe(false);
+
+    const { isValidRecipe } = await import('@shared/url-utils');
+    expect(isValidRecipe({ type: 'template', value: 'https://evil.example/x.png', backgroundColor: '#000' })).toBe(false);
+    expect(isValidRecipe({ type: 'template', value: '', dataUri: 'data:image/png;base64,AA' })).toBe(false);
+    expect(isValidRecipe({ type: 'template', value: '' })).toBe(false); // no background
+    expect(isValidRecipe({ type: 'template', value: '', backgroundColor: '#2563EB' })).toBe(true);
+  });
+
+  it('still admits a real recipe and still rejects a non-recipe unsafe url', async () => {
+    const ruleService = new RuleService(adapter, repo);
+    const ok = await ruleService.createRule({
+      urlMatch: { type: 'exact', value: 'https://ok.example/page' },
+      priority: 0,
+      favicon: RECIPE,
+    });
+    expect(ok.success).toBe(true);
+
+    const bad = await ruleService.createRule({
+      urlMatch: { type: 'exact', value: 'https://bad.example/page' },
+      priority: 0,
+      favicon: { type: 'url', value: 'javascript:alert(1)' },
+    });
+    expect(bad.success).toBe(false);
+  });
+
   it('a rendered recipe passes isSafeFaviconProtocol (the equivalence premise)', async () => {
     const { isSafeFaviconProtocol } = await import('@shared/url-utils');
     // Use the IconService only to show the renderer contract exists; the

@@ -23,7 +23,7 @@ import {
   matchesUrl,
   detectRuleConflict,
   isProtectedUrl,
-  isSafeFaviconProtocol,
+  isFaviconWriteSafe,
   validateRegex,
   urlsMatch,
 } from '@shared/url-utils';
@@ -99,7 +99,7 @@ export class RuleService {
     //    falsely reject it. Security equivalence: the recipe value never reaches
     //    `link.href`; it is rendered to a PNG that then passes the gate, and the
     //    delivery/chain layers remain guarded. Only the recipe branch is relaxed.
-    if (params.favicon && params.favicon.type !== 'template' && !isSafeFaviconProtocol(params.favicon.value)) {
+    if (params.favicon && !isFaviconWriteSafe(params.favicon)) {
       return {
         success: false,
         errorCode: 'RULE_INVALID_REGEX',
@@ -229,7 +229,7 @@ export class RuleService {
     // path carries recipes too — normalizeRuleDraft → resolveDraftFavicon). Only
     // the recipe branch is relaxed; every other type keeps the protocol check,
     // so the write layer is NOT bypassable.
-    if (updates.favicon && updates.favicon.type !== 'template' && !isSafeFaviconProtocol(updates.favicon.value)) {
+    if (updates.favicon && !isFaviconWriteSafe(updates.favicon)) {
       return {
         success: false,
         errorCode: 'RULE_INVALID_REGEX',

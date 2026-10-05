@@ -183,6 +183,26 @@ describe('R2: read-time recipe materialization', () => {
     expect(stored.textColor).toBe('#FFFFFF');
   });
 
+  it('MEDIUM-A: a mutator that injects a materialized value is still stripped', async () => {
+    // `updateRuleById` spreads caller-supplied `updates` over the record, so a
+    // mutator can hand `mutateSync` a recipe whose value is a render. The strip
+    // must therefore run AFTER the mutator, not only before it.
+    repo.setRecipeRenderer(stubRenderer(() => Promise.resolve(PNG)));
+    await repo.initialize();
+
+    await repo.addRule({ ...rule(RECIPE), id: 'rule-1' });
+
+    await repo.updateRuleById('rule-1', {
+      favicon: { type: 'template', value: PNG, backgroundColor: '#2563EB', text: 'A', textColor: '#FFFFFF' },
+    });
+
+    const raw = adapter.state.syncStorage['syncState'] as SyncState;
+    const stored = raw.rules.find((r) => r.id === 'rule-1')!.favicon!;
+    expect(stored.value).toBe(''); // the injected render never reached storage
+    expect(stored.type).toBe('template');
+    expect(stored.textColor).toBe('#FFFFFF');
+  });
+
   it('does not disturb non-recipe icons', async () => {
     repo.setRecipeRenderer(stubRenderer(() => Promise.resolve(PNG)));
     seedRaw({ slots: [slot(1, { type: 'url', value: 'https://x.example/i.png' })] });

@@ -638,6 +638,60 @@ export function isSafeFaviconProtocol(value: string): boolean {
 }
 
 /**
+ * The write-gate predicate for a `type:'template'` recipe.
+ *
+ * A recipe is exempt from `isSafeFaviconProtocol` because its `value` is `''`
+ * (the recipe fields are the truth, T7/R2), which the protocol check would
+ * falsely reject. That exemption must NOT be a hole, so the shape is validated
+ * instead: a real recipe has no `value` and no `dataUri`, and carries at least
+ * a background — `{type:'template', value:'https://…'}` is exactly the shape a
+ * caller could smuggle through the exemption.
+ *
+ * Deliberately narrow: it validates the INVARIANT, not cosmetic tidiness. An
+ * absent `text` is legal (a bare colour swatch).
+ */
+export function isValidRecipe(source: {
+  type?: string;
+  value?: unknown;
+  backgroundColor?: unknown;
+  dataUri?: unknown;
+}): boolean {
+  if (source.type !== 'template') return false;
+  // The invariant the exemption depends on: no smuggled value / bitmap.
+  if (source.value !== '' && source.value !== undefined) return false;
+  if (source.dataUri !== undefined) return false;
+  // A recipe without a background has nothing to render.
+  if (typeof source.backgroundColor !== 'string' || source.backgroundColor.trim() === '') return false;
+  return true;
+}
+
+/**
+ * The single write-gate predicate for an `IconSource` (T12/R1 + T13 hardening).
+ *
+ * - a `type:'template'` recipe is admitted by its SHAPE (`isValidRecipe`) —
+ *   its `value` is `''`, which `isSafeFaviconProtocol` would falsely reject;
+ * - every other type keeps the exact protocol check.
+ *
+ * Centralising it keeps the four write gates from drifting apart.
+ */
+export function isFaviconWriteSafe(source: {
+  type: string;
+  value: string;
+  backgroundColor?: string;
+  dataUri?: unknown;
+}): boolean {
+  if (source.type === 'template') {
+    return isValidRecipe({
+      type: source.type,
+      value: source.value,
+      backgroundColor: source.backgroundColor,
+      dataUri: source.dataUri,
+    });
+  }
+  return isSafeFaviconProtocol(source.value);
+}
+
+/**
  * Check if a URL is a protected internal page.
  * Protected pages can be slot targets (switch) but NOT rule targets (rewrite).
  *

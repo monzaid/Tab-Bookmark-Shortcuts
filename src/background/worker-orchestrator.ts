@@ -23,7 +23,7 @@ import { DiagnosticsService, NotificationService, IncognitoService } from './dia
 import { SidebarAdapter } from './sidebar-adapter';
 import type { AnyRequest, ResponseBase } from '@shared/messages';
 import { openOrReusePage } from '@shared/open-page';
-import { isProtectedUrl, isSafeFaviconProtocol, matchesUrl, validateRegex } from '@shared/url-utils';
+import { isProtectedUrl, isFaviconWriteSafe, matchesUrl, validateRegex } from '@shared/url-utils';
 import { resolveFieldChain } from '@shared/field-chain';
 import { FieldDeliveryService } from './field-delivery-service';
 import { SiteSnapshotStore } from './site-snapshot-store';
@@ -592,7 +592,7 @@ export class WorkerOrchestrator {
         // delivery layer (apply-fields.ts inline gate) and the chain layer stay
         // guarded. Only the recipe branch is relaxed — nothing else.
         const overrideFavicon = request.payload.favicon;
-        if (overrideFavicon && overrideFavicon.type !== 'template' && !isSafeFaviconProtocol(overrideFavicon.value)) {
+        if (overrideFavicon && !isFaviconWriteSafe(overrideFavicon)) {
           return {
             success: false,
             errorCode: 'INVALID_REQUEST',
@@ -665,7 +665,7 @@ export class WorkerOrchestrator {
         // rendered PNG is what passes the gate) — same security equivalence as
         // SET_TAB_OVERRIDE above, and only for recipes.
         const markerIcon = request.payload.uiMarker.icon;
-        if (markerIcon && markerIcon.type !== 'template' && !isSafeFaviconProtocol(markerIcon.value)) {
+        if (markerIcon && !isFaviconWriteSafe(markerIcon)) {
           return {
             success: false,
             errorCode: 'INVALID_REQUEST',

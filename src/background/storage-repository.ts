@@ -741,6 +741,11 @@ export class StorageRepository {
       // R2: never let a read-time render become the durable truth (see below).
       this.stripDerivedRecipeValues(draft);
       mutator(draft);
+      // MEDIUM-A: strip AGAIN after the mutator. `writeSync` already does this,
+      // but `updateRuleById` spreads caller-supplied `updates` over the record,
+      // so a mutator could inject a materialized value. Stripping on both sides
+      // makes the invariant independent of "the mutator keeps type intact".
+      this.stripDerivedRecipeValues(draft);
       draft.configVersion = current.configVersion + 1;
 
       // Offload large icons (non-fatal)
