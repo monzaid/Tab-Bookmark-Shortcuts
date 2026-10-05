@@ -30,6 +30,18 @@ export interface MockAdapterState {
   executeScriptError?: { code: string; message: string };
   /** If set, tabs.sendMessage always throws this error (content-script unreachable) */
   sendMessageError?: { code: string; message: string };
+  /**
+   * T0: directed storage-write failure injection.
+   *
+   * `key` omitted = every write to `area` fails; `key` set = only a write whose
+   * item set contains that key fails. `remaining` omitted = persistent failure;
+   * a number = fail only that many more writes, then clear.
+   *
+   * Throws BEFORE mutating the store or broadcasting `onChanged`, so a failed
+   * write is a "clean failure" — the compensation path (T11/T16) gets an
+   * unambiguous rollback baseline.
+   */
+  failStorageSet?: { area: StorageArea; key?: string; remaining?: number };
 }
 
 export interface MockAdapter extends BrowserAdapter {
@@ -66,6 +78,18 @@ export interface MockAdapter extends BrowserAdapter {
     sender: unknown,
     sendResponse: (response?: unknown) => void,
   ): void;
+  /**
+   * T0: make the next `storage.set(area, …)` reject once.
+   * With `key`, only a write containing that key is affected.
+   */
+  failNextStorageSet(area: StorageArea, key?: string): void;
+  /**
+   * T0: make every `storage.set(area, …)` reject until `clearStorageFailures()`
+   * (or `reset()`). With `key`, only writes containing that key fail.
+   */
+  failStorageSet(area: StorageArea, key?: string): void;
+  /** T0: drop any injected storage failures. */
+  clearStorageFailures(): void;
 }
 
 export function createMockAdapter(initialState?: Partial<MockAdapterState>): MockAdapter {
@@ -104,6 +128,23 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
     }
   }
 
+  /**
+   * T0: directed storage-write failure. Returns true when this `storage.set`
+   * call must fail; decrements/clears a one-shot (`remaining`) injection.
+   * Never mutates the store — callers throw before any write or broadcast.
+   */
+  function checkStorageFailure(area: StorageArea, items: Record<string, unknown>): boolean {
+    const injection = state.failStorageSet;
+    if (!injection || injection.area !== area) return false;
+    if (injection.key !== undefined && !(injection.key in items)) return false;
+
+    if (injection.remaining !== undefined) {
+      injection.remaining -= 1;
+      if (injection.remaining <= 0) state.failStorageSet = undefined;
+    }
+    return true;
+  }
+
   const adapter: MockAdapter = {
     state,
     calls,
@@ -120,6 +161,7 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
       state.nextError = undefined;
       state.executeScriptError = undefined;
       state.sendMessageError = undefined;
+      state.failStorageSet = undefined;
       calls.length = 0;
       // Clear all event listeners to prevent cross-test contamination
       storageListeners.length = 0;
@@ -142,6 +184,18 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
 
     setCommands(commands: NormalizedCommand[]) {
       state.commands = commands;
+    },
+
+    failNextStorageSet(area: StorageArea, key?: string) {
+      state.failStorageSet = { area, key, remaining: 1 };
+    },
+
+    failStorageSet(area: StorageArea, key?: string) {
+      state.failStorageSet = { area, key };
+    },
+
+    clearStorageFailures() {
+      state.failStorageSet = undefined;
     },
 
     emitStorageChange(changes: Record<string, StorageChange>, area: string) {
@@ -350,6 +404,9 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
       },
       async set(area: StorageArea, items: Record<string, unknown>): Promise<void> {
         logCall('storage.set', area, items);
+        if (checkStorageFailure(area, items)) {
+          throw new AdapterError('BROWSER_API_ERROR', 'Injected storage.set failure');
+        }
         checkError();
         const store = area === 'sync' ? state.syncStorage : state.localStorage;
         const changes: Record<string, StorageChange> = {};
