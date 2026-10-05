@@ -805,7 +805,7 @@ function SidebarUndoBar({ undo, onUndo, onExpire }: SidebarUndoAdapters) {
 import type { IconConfig } from '@ui/components/IconEditor';
 import { IconFieldEditor } from '@ui/shared/icon-field-editor';
 import type { IconFieldValue } from '@ui/shared/icon-field-editor';
-import { iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft } from '@ui/shared/icon-source';
+import { canonicalIconSource, iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft } from '@ui/shared/icon-source';
 import { wildcardToRegex } from '@shared/url-utils';
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import type { FieldMode } from '@ui/shared/field-editor';
@@ -851,6 +851,13 @@ interface IconEditorModalProps {
   selfOwner?: TierOwner;
   /** The tab whose chain this is, so Page rows can name it (review item 5). */
   tabId?: number;
+  /**
+   * FIX-C (i): resolve a `Use chain` record's ORIGINAL `IconSource` from its
+   * owner, so applying a record copies the recipe rather than its derived
+   * render. Supplied by the caller, which holds the raw records; the modal has
+   * only the chain's value strings.
+   */
+  resolveSourceForOwner?: (owner: TierOwner) => IconSource | null;
   /** F4: durable trigger element to focus on close (menu items are unmounted). */
   returnFocusRef?: React.RefObject<HTMLElement | null>;
   /** N7: durable element to fall back to if the trigger is removed on close. */
@@ -886,6 +893,7 @@ function IconEditorModal({
   onClearTier,
   selfOwner,
   tabId,
+  resolveSourceForOwner,
   returnFocusRef,
   focusFallbackRef,
 }: IconEditorModalProps) {
@@ -994,7 +1002,15 @@ function IconEditorModal({
         tabId={tabId ?? null}
         // Items 2 / 6 / 8: applying a RECORD copies its value into THIS draft;
         // the user still presses Apply to write it.
-        onApplyTier={(_kind, tierValue) => {
+        onApplyTier={(_kind, tierValue, owner) => {
+          // FIX-C (i): prefer the record's ORIGINAL source so applying a recipe
+          // copies the recipe instead of its derived render (which would re-save
+          // as an upload and destroy it — C1).
+          const source = owner ? resolveSourceForOwner?.(owner) ?? null : null;
+          if (source) {
+            setSource(iconSourceToDraft(canonicalIconSource(source)));
+            return;
+          }
           setSource(tierValue.startsWith('data:')
             ? { mode: 'upload', value: tierValue }
             : { mode: 'url', value: tierValue });
@@ -2112,6 +2128,16 @@ export function SidebarApp() {
         tabOverrides: state.local?.tabOverrides ?? [],
       })
     : null;
+  /**
+   * FIX-C (i): the SAME owner→source resolution, exposed to the icon modal so a
+   * `Use chain` of a recipe record copies the recipe (not its render).
+   */
+  const resolveSourceForOwner = (owner: TierOwner): IconSource | null =>
+    iconSourceForOwner(owner, {
+      slots: state.sync?.slots ?? [],
+      rules: state.sync?.rules ?? [],
+      tabOverrides: state.local?.tabOverrides ?? [],
+    });
 
   // Built once, then conditionally wrapped in the source popover. The favicon is
   // already a focus stop (`role="button" tabIndex=0`), so its wrapper does not
@@ -2428,6 +2454,7 @@ export function SidebarApp() {
         // Item 1.3: clear the page layer this picker writes to.
         onClearLayer={() => { void handleCurrentIconReset(); }}
         onClearTier={(owner) => { void handleClearChainTier(owner, 'icon'); }}
+        resolveSourceForOwner={resolveSourceForOwner}
         {...(state.currentTabId !== null ? { selfOwner: { kind: 'override', tabId: state.currentTabId } } : {})}
         {...(state.currentTabId !== null ? { tabId: state.currentTabId } : {})}
       />
@@ -2449,6 +2476,7 @@ export function SidebarApp() {
         {...(slotIconChain ? { chain: slotIconChain } : {})}
         onClearLayer={() => { void handleSlotIconReset(); }}
         onClearTier={(owner) => { void handleClearChainTier(owner, 'icon'); }}
+        resolveSourceForOwner={resolveSourceForOwner}
         {...(slotIconEditorId !== null ? { selfOwner: { kind: 'slot', slotId: slotIconEditorId } } : {})}
         {...(() => {
           // The slot's chain belongs to its BOUND tab, so Page rows must name

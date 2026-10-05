@@ -1610,7 +1610,29 @@ function DashboardSection() {
    * ("Use" on a chain row). The value becomes an explicit `set` on the row's own
    * layer, exactly as typing it would.
    */
-  const applyTierValue = (entry: DashboardEntry, _kind: TierKey, value: string, field: 'title' | 'icon') => {
+  /**
+   * FIX-C (i): seed the icon draft for a `Use` of a chain RECORD.
+   *
+   * The record's `value` is only a string; for a recipe it is the DERIVED render
+   * (R2 materializes it at read time), so a prefix guess reopened the recipe as
+   * an upload and saving it destroyed the recipe (C1). The record's `owner` is
+   * supplied by `IconFieldEditor`, so the ORIGINAL source can be recovered.
+   */
+  const iconSeedForTier = (value: string, owner?: TierOwner | null) => {
+    const source = owner ? iconSourceForOwner(owner, sourceCtxRef.current) : null;
+    if (!source) {
+      // No stored source (the site tier carries none): the value's shape is all
+      // that is knowable.
+      return {
+        iconMode: { kind: 'set', value: value.startsWith('data:') ? '' : value } as FieldMode,
+        iconConfig: value.startsWith('data:') ? { dataUri: value } : undefined,
+      };
+    }
+    const seeded = fromIconFieldValue(iconSourceToDraft(canonicalIconSource(source)));
+    return { iconMode: seeded.mode, iconConfig: seeded.iconConfig };
+  };
+
+  const applyTierValue = (entry: DashboardEntry, _kind: TierKey, value: string, field: 'title' | 'icon', owner?: TierOwner | null) => {
     setDrafts((prev) => {
       const next = new Map(prev);
       const current = next.get(entry.id);
@@ -1618,11 +1640,7 @@ function DashboardSection() {
       if (field === 'title') {
         next.set(entry.id, { ...current, titleMode: { kind: 'set', value } });
       } else {
-        next.set(entry.id, {
-          ...current,
-          iconMode: { kind: 'set', value: value.startsWith('data:') ? '' : value },
-          iconConfig: value.startsWith('data:') ? { dataUri: value } : undefined,
-        });
+        next.set(entry.id, { ...current, ...iconSeedForTier(value, owner) });
       }
       return next;
     });
@@ -2019,7 +2037,7 @@ function DashboardSection() {
                       onJumpToOwner={jumpTo}
                       // Items 2 / 3 / 4 / 6 / 8: per-RECORD apply/clear inside
                       // `Use chain`; selecting a record previews its icon.
-                      onApplyTier={(_kind, value) => { applyTierValue(entry, _kind, value, 'icon'); }}
+                      onApplyTier={(_kind, value, owner) => { applyTierValue(entry, _kind, value, 'icon', owner); }}
                       onClearTier={(owner) => { void clearChainTier(owner, 'icon'); }}
                       previewOwner={previewOwner(entry, 'icon')}
                       onSelectPreview={(owner) => { selectPreview(entry, owner); }}
