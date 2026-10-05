@@ -10,14 +10,34 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react';
+import type { IconSource } from '@shared/types';
 import { Button } from './components';
 
 // ─── Snapshot model ──────────────────────────────────────────────────────────
 
 export type UndoLayerWrite =
-  | { kind: 'tab-override'; tabId: number; title?: string | null; favicon?: string | null }
-  | { kind: 'slot-marker'; slotId: number; customTitle?: string | null; iconValue?: string | null }
-  | { kind: 'rule'; ruleId: string; title?: string | null; favicon?: string | null };
+  | {
+      kind: 'tab-override';
+      tabId: number;
+      title?: string | null;
+      /**
+       * FIX-A: the ORIGINAL icon source, so the replay re-persists it VERBATIM.
+       *
+       * A string cannot carry a recipe: a recipe's value is a derived render
+       * (R2/FIX-B), so replaying it as `{type:'upload', value}` permanently
+       * flattened the recipe to a bitmap (C1/A6). `null` = "this layer had no
+       * icon" and is applied as an explicit clear.
+       */
+      favicon?: IconSource | null;
+    }
+  | {
+      kind: 'slot-marker';
+      slotId: number;
+      customTitle?: string | null;
+      /** FIX-A: see `tab-override.favicon`. */
+      icon?: IconSource | null;
+    }
+  | { kind: 'rule'; ruleId: string; title?: string | null; favicon?: IconSource | null };
 
 export interface UndoSnapshot {
   writes: UndoLayerWrite[];

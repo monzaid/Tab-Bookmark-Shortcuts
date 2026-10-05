@@ -9,11 +9,11 @@
  * - "Diagnostics": view/clear/export diagnostic entries
  */
 
-import { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
 import { Button, Toast, StatusBadge, Confirm } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, ImportPreview, ImportSlotConflict, DashboardRow } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, ImportPreview, ImportSlotConflict, DashboardRow } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
@@ -25,6 +25,7 @@ import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
 import { resolveFieldChain } from '@shared/field-chain';
 import type { ChainResult, TierKey, TierOwner } from '@shared/field-chain';
 import { useJumpToRow, JUMP_HIGHLIGHT_CLASS, JUMP_HIGHLIGHT_MS } from '@ui/shared/use-jump-to-row';
+import { iconSourceForOwner } from '@ui/shared/icon-source';
 import { UndoBar } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
@@ -1256,6 +1257,31 @@ function DashboardSection() {
   const [undoState, setUndoState] = useState<UndoState | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
+  /**
+   * FIX-A: the RAW records, so a Clear can snapshot the original `IconSource`.
+   * Held in a ref (not state): it is a lookup table for event handlers, never
+   * rendered, so it must not trigger re-renders.
+   */
+  const sourceCtxRef = useRef<{ slots: SlotDefinition[]; rules: PageRule[]; tabOverrides: TabOverride[] }>({
+    slots: [], rules: [], tabOverrides: [],
+  });
+
+  /**
+   * FIX-A: the ORIGINAL stored icon for a dashboard row.
+   *
+   * The chain's winner is reached through its OWNER (`winner` itself only names
+   * a tier), then the record is read from `sourceCtxRef` — the same
+   * owner→source resolution the source-aware seeding paths use.
+   */
+  const thisEntryIconSource = (entry: DashboardEntry): IconSource | null => {
+    const owner = entry.chain.favicon.nodes.find((n) => n.winner)?.owner;
+    if (owner) return iconSourceForOwner(owner, sourceCtxRef.current);
+    // Fallback for a row whose anchor names the record directly.
+    if (entry.tabId != null) return iconSourceForOwner({ kind: 'override', tabId: entry.tabId }, sourceCtxRef.current);
+    if (entry.slotId != null) return iconSourceForOwner({ kind: 'slot', slotId: entry.slotId }, sourceCtxRef.current);
+    if (entry.ruleId != null) return iconSourceForOwner({ kind: 'rule', ruleId: entry.ruleId }, sourceCtxRef.current);
+    return null;
+  };
 
   const sortedEntries = useMemo(() => {
     if (!sortKey) return entries;
@@ -1297,9 +1323,24 @@ function DashboardSection() {
 
   const load = useCallback(async () => {
     try {
-      const res = await sendMessage('GET_DASHBOARD');
+      // FIX-A: fetch the raw state too, so a Clear snapshot can capture the
+      // ORIGINAL `IconSource` (the dashboard chain only carries strings).
+      const [res, stateRes] = await Promise.all([
+        sendMessage('GET_DASHBOARD'),
+        sendMessage('GET_STATE'),
+      ]);
       const result = extractResult(res);
       if (!result?.success) { setLoadError(true); return; }
+
+      const stateResult = extractResult(stateRes);
+      const rawSync = (stateResult?.sync ?? {}) as { slots?: SlotDefinition[]; rules?: PageRule[] };
+      const rawLocal = (stateResult?.local ?? {}) as { tabOverrides?: TabOverride[] };
+      sourceCtxRef.current = {
+        slots: rawSync.slots ?? [],
+        rules: rawSync.rules ?? [],
+        tabOverrides: rawLocal.tabOverrides ?? [],
+      };
+
       const rows: DashboardEntry[] = (result.rows as DashboardRow[]).map((r) => ({
         id: r.id,
         kind: r.kind,
@@ -1494,6 +1535,11 @@ function DashboardSection() {
     const previous = field === 'title'
       ? entry.chain.title.winner.value
       : entry.chain.favicon.winner.value;
+    // FIX-A: snapshot the ORIGINAL `IconSource`, not the chain's (materialized)
+    // value string. Replaying a string forced `{type:'upload'}` and destroyed
+    // any recipe. `chain.nodes` carries the winner's owner; the raw source is
+    // then resolved from the store.
+    const previousIconSource = field === 'icon' ? thisEntryIconSource(entry) : null;
     try {
       // A `rule-hit` row can only express "unset this field at the Page level",
       // so it writes the same override shape as an `override` row (see
@@ -1514,9 +1560,9 @@ function DashboardSection() {
         message: field === 'title' ? `${entry.label} title cleared` : `${entry.label} icon cleared`,
         snapshot: {
           writes: (entry.kind === 'override' || entry.kind === 'rule-hit') && entry.tabId != null
-            ? [{ kind: 'tab-override', tabId: entry.tabId, ...(field === 'title' ? { title: previous } : { favicon: previous }) }]
+            ? [{ kind: 'tab-override', tabId: entry.tabId, ...(field === 'title' ? { title: previous } : { favicon: previousIconSource }) }]
             : entry.slotId != null
-              ? [{ kind: 'slot-marker', slotId: entry.slotId, ...(field === 'title' ? { customTitle: previous } : { iconValue: previous }) }]
+              ? [{ kind: 'slot-marker', slotId: entry.slotId, ...(field === 'title' ? { customTitle: previous } : { icon: previousIconSource }) }]
               : [],
           affectedTabIds: entry.tabId != null ? [entry.tabId] : [],
         },
@@ -1618,17 +1664,18 @@ function DashboardSection() {
     try {
       for (const write of snapshot.writes) {
         if (write.kind === 'tab-override') {
+          // FIX-A: replay the ORIGINAL source verbatim — never re-derive it.
           await sendMessage('SET_TAB_OVERRIDE', {
             tabId: write.tabId,
             ...(write.title !== undefined ? { title: write.title ?? '' } : {}),
-            ...(write.favicon !== undefined ? { favicon: write.favicon ? { type: 'upload', value: write.favicon } : null } : {}),
+            ...(write.favicon !== undefined ? { favicon: write.favicon } : {}),
           });
         } else if (write.kind === 'slot-marker') {
           await sendMessage('UPDATE_SLOT_UI_MARKER', {
             slotId: write.slotId,
             uiMarker: {
               ...(write.customTitle !== undefined ? { customTitle: write.customTitle ?? '' } : {}),
-              ...(write.iconValue !== undefined ? { icon: write.iconValue ? { type: 'upload', value: write.iconValue } : null } : {}),
+              ...(write.icon !== undefined ? { icon: write.icon } : {}),
             },
           });
         }
