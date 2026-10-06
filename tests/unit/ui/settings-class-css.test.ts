@@ -25,6 +25,20 @@ const CLASS_TOKEN = /tbs-settings__[a-zA-Z0-9_-]+/g;
 const DYNAMIC_CLASS_ALLOWLIST: readonly string[] = [];
 
 /**
+ * "Make this flex child fill the row" — asserted as the PROPERTY FAMILY, not one
+ * spelling, because `flex-basis:100%`, `flex:1 1 100%` and `width:100%` are all
+ * correct and naming one would red on a valid rewrite (a change detector).
+ *
+ * The leading `(?<![\w-])` is load-bearing, not decoration: without it the
+ * `width:100%` alternative also matches inside `min-width:100%` / `max-width:100%`,
+ * so a rule that does NOT fill the row would satisfy the assertion — a guard that
+ * cannot fail (the very shape this iteration keeps catching). Trailing `\b` is
+ * deliberately absent on the `flex-basis:`/`width:` alternatives: `100%` ends in
+ * `%`, after which a word boundary does not exist.
+ */
+const FULL_WIDTH = /(?<![\w-])(?:flex-basis:\s*100%|flex\s*:[^;]*\b100%|width:\s*100%)/;
+
+/**
  * Comments are stripped before matching. A `tbs-settings__foo` inside prose is
  * not a rendered class, so flagging it would be a false positive — the same
  * reason `layer-boundary.test.ts` strips comments. Over-stripping can only lose
@@ -193,13 +207,26 @@ describe('import fields expansion', () => {
     // detector, not an invariant guard). What must hold is the EFFECT.
     const panel = block(/\.tbs-settings__import-fields\s*\{([^}]*)\}/);
     expect(panel).not.toBe('');
-    expect(panel).toMatch(/flex-basis:\s*100%|flex\s*:[^;]*\b100%|width:\s*100%/);
+    expect(panel).toMatch(FULL_WIDTH);
     expect(panel).toMatch(/min-width:\s*0\b/);
 
     const list = block(/\.tbs-settings__import-fields\s+ul\s*\{([^}]*)\}/);
     expect(list).not.toBe('');
     expect(list).toMatch(/min-width:\s*0\b/);
     expect(list).toMatch(/overflow-wrap:\s*anywhere|word-break:\s*break-word/);
+  });
+
+  it('the full-width pattern accepts every spelling and is not fooled by min/max-width', () => {
+    // A case table for the pattern itself. Without it, dropping the lookbehind
+    // would leave the guard passing on rules that do NOT fill the row
+    // (`min-width:100%`), i.e. a guard that cannot fail. Each row is a claim
+    // about the pattern, not about the stylesheet.
+    for (const ok of ['flex-basis:100%', 'flex: 1 1 100%', 'width:100%']) {
+      expect(FULL_WIDTH.test(ok), `should match: ${ok}`).toBe(true);
+    }
+    for (const no of ['min-width:100%', 'max-width:100%', 'padding:0; min-width:100%', 'min-width:0']) {
+      expect(FULL_WIDTH.test(no), `should NOT match: ${no}`).toBe(false);
+    }
   });
 
   it('does not tint the record status as plain text (the status is a badge now)', () => {
