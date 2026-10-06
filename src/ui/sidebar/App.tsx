@@ -1227,6 +1227,14 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
     // iconSourceToDraft(...))` pair dropped the config, so a chain `Use` of an
     // UPLOAD record saved it as `type:'url'` (identity lost) — this uses the
     // config form, which `resolveDraftFavicon` reads back as `upload`.
+    //
+    // ⚠️ KNOWN VIEW QUIRK (not a defect of this path, and not asserted): when the
+    // draft ALREADY carries this same source (the prefill now seeds it), applying
+    // it changes nothing, and the picker's local tab can stay on `Use chain` even
+    // though the draft's mode is `set`. `useIconFieldState` only re-derives the
+    // picker when the parent VALUE changes — the tab is a local view, the mode is
+    // the contract. Previously the lossy pair changed the config's identity, which
+    // re-synced the tab BY ACCIDENT.
     const s = seedIconFrom(source, value);
     setIconMode(s.mode);
     setIconConfig(s.iconConfig);
@@ -1282,10 +1290,12 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         onResetTitleEdit={() => { setTitleMode(defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' }); }}
         // Same expression as `baselineIcon`, so Reset restores exactly the opened
         // draft. The editor's own ↺ also writes first (from its picker snapshot);
-        // THIS second write is authoritative and equals the baseline. Order
-        // matters: swapping the two would leave the round-tripped (normalized)
-        // value — a config-bearing draft's `value` becomes the dataUri — instead
-        // of the seeded shape.
+        // THIS second write is authoritative and equals the baseline. Both are
+        // computed from the same seed, so they agree even though
+        // `fromIconFieldValue(toIconFieldValue(x))` is NOT identity for
+        // config-carrying values (it normalises `value` to the dataUri). Swapping
+        // the two writes would only change the draft's DISPLAY cache — the
+        // persisted favicon is identical for every seed shape.
         onResetIconEdit={() => { setIconMode(initialIconSeed.mode); setIconConfig(initialIconSeed.iconConfig); }}
         onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
         onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
