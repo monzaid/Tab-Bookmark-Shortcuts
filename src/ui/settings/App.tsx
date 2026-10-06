@@ -2411,6 +2411,38 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
   };
 
   /**
+   * Read a chosen file and (re)build the inspection. `resetIntent` re-seeds the
+   * intent to the default; it is FALSE when re-inspecting after a version
+   * conflict, because the user's dimension/record choices must survive the
+   * refresh (only the state-derived numbers change, not their decisions).
+   */
+  const inspectFile = useCallback(async (text: string, opts: { resetIntent: boolean }) => {
+    const res = await sendMessage('IMPORT_INSPECT', { file: text });
+    const result = extractResult(res);
+    if (!result?.success || !result.inspection) {
+      setToast({ variant: 'error', message: (result?.message as string) || 'Invalid import file' });
+      return false;
+    }
+    setFile(text);
+    setInspection(result.inspection as ImportInspection);
+    setPkg(parseExportPackage(text));
+    if (opts.resetIntent) setIntent(defaultImportIntent());
+    // D7: the quantification needs the CURRENT state. A failure here is
+    // NON-fatal — `current` stays null and the copy reports "unknown"
+    // rather than the false claim "no records".
+    try {
+      const stateRes = await sendMessage('GET_STATE');
+      const stateResult = extractResult(stateRes);
+      if (stateResult?.success && stateResult.sync) {
+        setCurrent(stateResult.sync as SyncState);
+      }
+    } catch {
+      // keep `null` — the confirm dialog still opens, with unknown copy
+    }
+    return true;
+  }, []);
+
+  /**
    * D6/A11: choose a file → `IMPORT_INSPECT` (read-only). The INSPECTION is
    * intent-independent, so later mode/record changes only re-render — they never
    * re-inspect and never re-read the file.
@@ -2427,28 +2459,7 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
     setAppliedDiff(null);
     try {
       const text = typeof chosen.text === 'function' ? await chosen.text() : '';
-      const res = await sendMessage('IMPORT_INSPECT', { file: text });
-      const result = extractResult(res);
-      if (result?.success && result.inspection) {
-        setFile(text);
-        setInspection(result.inspection as ImportInspection);
-        setPkg(parseExportPackage(text));
-        setIntent(defaultImportIntent());
-        // D7: the quantification needs the CURRENT state. A failure here is
-        // NON-fatal — `current` stays null and the copy reports "unknown"
-        // rather than the false claim "no records".
-        try {
-          const stateRes = await sendMessage('GET_STATE');
-          const stateResult = extractResult(stateRes);
-          if (stateResult?.success && stateResult.sync) {
-            setCurrent(stateResult.sync as SyncState);
-          }
-        } catch {
-          // keep `null` — the confirm dialog still opens, with unknown copy
-        }
-      } else {
-        setToast({ variant: 'error', message: (result?.message as string) || 'Invalid import file' });
-      }
+      await inspectFile(text, { resetIntent: true });
     } catch {
       setToast({ variant: 'error', message: 'Failed to read the import file' });
     } finally {
@@ -2528,6 +2539,19 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
         setFile(null);
         setPkg(null);
         setCurrent(null);
+      } else if (result?.errorCode === 'CONFIG_CONFLICT') {
+        // F4: a stale `expectedVersion` is REFUSED before any mutation, so
+        // nothing was written. Re-inspect instead of leaving the user on a bare
+        // server string with no way forward: the draft is rebuilt against the
+        // NEW state and the user is told to look again. Deliberately NOT a
+        // silent retry with the latest version — that would write against a
+        // state the user never reviewed, which is the guarantee F4 exists for.
+        // The intent is preserved: only the state-derived numbers changed.
+        setToast({
+          variant: 'error',
+          message: 'The configuration changed since this file was checked. It has been re-checked — review the updated changes, then apply again.',
+        });
+        if (file) await inspectFile(file, { resetIntent: false });
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Import failed' });
       }

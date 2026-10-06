@@ -407,4 +407,41 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
       ).toBe(true);
     });
   });
+
+  it('a version conflict re-checks the file instead of dead-ending on a bare server string (F4)', async () => {
+    await openImportSection();
+    await selectFile();
+
+    // The state moved between INSPECT and APPLY, so the write is refused.
+    const base = mockSendMessage.getMockImplementation();
+    mockSendMessage.mockImplementation((msg: { action?: string }) => {
+      if (msg.action === 'IMPORT_APPLY') {
+        return Promise.resolve({
+          result: {
+            success: false,
+            errorCode: 'CONFIG_CONFLICT',
+            message: 'Version conflict: expected 141, current is 142',
+          },
+        });
+      }
+      return base ? base(msg) : Promise.resolve({ result: { success: true } });
+    });
+
+    mockSendMessage.mockClear();
+    const dialog = await openConfirmDialog();
+    fireEvent.click(within(dialog).getByRole('button', { name: /confirm import/i }));
+
+    // The draft is rebuilt against the NEW state — the user gets a way forward
+    // without having to reselect the file themselves.
+    await waitFor(() => {
+      const reChecks = mockSendMessage.mock.calls.filter(
+        (c) => (c[0] as { action?: string }).action === 'IMPORT_INSPECT',
+      );
+      expect(reChecks.length).toBeGreaterThanOrEqual(1);
+    });
+    expect(screen.getByTestId('import-diff')).toBeTruthy();
+    expect(screen.getByText(/re-checked/i)).toBeTruthy();
+    // The raw backend string must NOT be what the user reads.
+    expect(screen.queryByText(/Version conflict: expected/i)).toBeNull();
+  });
 });
