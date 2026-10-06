@@ -643,6 +643,24 @@
 /* The Fields panel is the 5th flex child of a record row. Without a basis it
    shared the line, so expanding it changed its own width and re-wrapped the row;
    `flex-basis: 100%` gives it its own row so the row's other items never move. */
+/* 7a: the settings dimension's value comparison (no status badges — settings
+   records have no diff status). */
+.tbs-settings__import-settings-values {
+  margin-top: var(--space-xs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.tbs-settings__import-settings-values ul {
+  list-style: none;
+  padding: 0 0 0 var(--space-lg);
+  margin: var(--space-xxs) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  overflow-wrap: anywhere;
+}
+
 .tbs-settings__import-fields {
   flex-basis: 100%;
   min-width: 0;

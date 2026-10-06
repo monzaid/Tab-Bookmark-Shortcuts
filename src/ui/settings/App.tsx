@@ -2173,7 +2173,13 @@ function ExportSection() {
    * import section uses (one source of truth, one fetch per surface). `null`
    * means the read failed — expansion is then simply not offered.
    */
-  const [records, setRecords] = useState<{ slots: SlotDefinition[]; rules: PageRule[] } | null>(null);
+  const [records, setRecords] = useState<{
+    slots: SlotDefinition[];
+    rules: PageRule[];
+    matchSettings: MatchRuleSettings;
+    switchDirection: SwitchDirection;
+    autoBindGlobal: boolean;
+  } | null>(null);
   const [pkg, setPkg] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
@@ -2183,9 +2189,21 @@ function ExportSection() {
         const res = await sendMessage('GET_STATE');
         const result = extractResult(res);
         const sync = result?.success
-          ? (result.sync as { slots?: SlotDefinition[]; rules?: PageRule[] } | undefined)
+          ? (result.sync as {
+              slots?: SlotDefinition[];
+              rules?: PageRule[];
+              matchSettings?: MatchRuleSettings;
+              switchDirection?: SwitchDirection;
+              autoBindGlobal?: boolean;
+            } | undefined)
           : undefined;
-        setRecords({ slots: sync?.slots ?? [], rules: sync?.rules ?? [] });
+        setRecords({
+          slots: sync?.slots ?? [],
+          rules: sync?.rules ?? [],
+          matchSettings: sync?.matchSettings ?? DEFAULT_MATCH_SETTINGS,
+          switchDirection: sync?.switchDirection ?? 'next',
+          autoBindGlobal: sync?.autoBindGlobal ?? true,
+        });
       } catch {
         setRecords(null);
       }
@@ -2309,6 +2327,33 @@ function ExportSection() {
         </details>
       )}
 
+      {/* T19-C / 7a: the settings dimension has VALUES too — expand to see what
+          would be carried (the current machine's globals + each slot's strategy). */}
+      {checked.settings && records !== null && (
+        <details className="tbs-settings__export-records" data-testid="export-records-settings">
+          <summary>Settings</summary>
+          <ul data-testid="export-settings-values">
+            <li data-testid="export-setting-match-settings">
+              Match settings: {matchSettingsSummary(records.matchSettings)}
+            </li>
+            <li data-testid="export-setting-switch-direction">Switch direction: {records.switchDirection}</li>
+            <li data-testid="export-setting-auto-bind">Auto-bind: {String(records.autoBindGlobal)}</li>
+            {records.slots.length > 0 && (
+              <li data-testid="export-setting-slot-strategies">
+                Per-slot strategies:
+                <ul>
+                  {bySlotId(records.slots).map((slot) => (
+                    <li key={slot.id} data-testid={`export-slot-strategy-${String(slot.id)}`}>
+                      {`Slot ${String(slot.id)}: ${strategyText(slot.strategy)}`}
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            )}
+          </ul>
+        </details>
+      )}
+
       {!anyChecked && (
         <p className="tbs-settings__hint" data-testid="export-empty-reason">
           Select at least one dimension to export.
@@ -2412,6 +2457,84 @@ function slotLabel(id: number, title: string | null | undefined): string {
  */
 function bySlotId<T extends { id: number | string }>(rows: readonly T[]): T[] {
   return [...rows].sort((a, b) => Number(a.id) - Number(b.id));
+}
+
+/** A compact, human summary of a match-settings triple (never `[object Object]`). */
+function matchSettingsSummary(s: MatchRuleSettings): string {
+  return `Tab ID ${s.tabIdMode}, Rule check ${s.ruleCheckMode}, Priority ${s.priority}`;
+}
+
+/**
+ * A per-slot strategy as text. `undefined` is NOT an explicit `'inherit'`: absent
+ * means the package carries no strategy for that slot (the target is left alone),
+ * while an explicit `'inherit'` resets the target to inherit. `strict` alone does
+ * not flag a missed index (`noUncheckedIndexedAccess` is off), so callers must
+ * test membership explicitly instead of trusting a falsy index read.
+ */
+function strategyText(v: 'inherit' | MatchRuleSettings | undefined): string {
+  if (v === undefined) return 'inherit (by default)';
+  if (v === 'inherit') return 'inherit';
+  return matchSettingsSummary(v);
+}
+
+/** `label: current → file`, or `label: unchanged` when equal (the field-row vocabulary). */
+function valueDiffLine(label: string, current: string, file: string): string {
+  return current === file ? `${label}: unchanged` : `${label}: ${current} → ${file}`;
+}
+
+/**
+ * The settings dimension's VALUE comparison (7a). Values only — settings records
+ * have no diff status, so no badge is invented. Takes non-null arguments so the
+ * per-slot map never reads `pkg`/`current` through a closure (which would not be
+ * narrowed by TypeScript).
+ */
+function ImportSettingsValues({
+  pkgSettings,
+  current,
+}: {
+  pkgSettings: NonNullable<ExportPackage['settings']>;
+  current: SyncState;
+}) {
+  return (
+    <div className="tbs-settings__import-settings-values" data-testid="import-settings-values">
+      <ul>
+        <li data-testid="import-setting-match-settings">
+          {valueDiffLine(
+            'Match settings',
+            matchSettingsSummary(current.matchSettings),
+            matchSettingsSummary(pkgSettings.matchSettings),
+          )}
+        </li>
+        <li data-testid="import-setting-switch-direction">
+          {valueDiffLine('Switch direction', current.switchDirection, pkgSettings.switchDirection)}
+        </li>
+        <li data-testid="import-setting-auto-bind">
+          {valueDiffLine('Auto-bind', String(current.autoBindGlobal), String(pkgSettings.autoBindGlobal))}
+        </li>
+        {/* Per-slot strategy: join the file's Record (EXPLICIT overrides only)
+            against the target's slot. Membership is tested explicitly — a falsy
+            index read cannot tell "absent" from an explicit value
+            (`strict` alone does not, since `noUncheckedIndexedAccess` is off). */}
+        {current.slots.length > 0 && (
+          <li data-testid="import-setting-slot-strategies">
+            Per-slot strategies:
+            <ul>
+              {bySlotId(current.slots).map((slot) => {
+                const fromFile = Object.prototype.hasOwnProperty.call(pkgSettings.slotStrategies, slot.id)
+                  ? pkgSettings.slotStrategies[slot.id]
+                  : undefined;
+                return (
+                  <li key={slot.id} data-testid={`import-slot-strategy-${String(slot.id)}`}>
+                    {`Slot ${String(slot.id)}: ${strategyText(slot.strategy)} → ${strategyText(fromFile)}`}
+                  </li>
+                );
+              })}
+            </ul>
+          </li>
+        )}
+      </ul>
+    </div>
+  );
 }
 
 function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot' | 'rule', id: number | string) => void }) {
@@ -2700,6 +2823,9 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
                         <option value="overwrite">Overwrite</option>
                       </select>
                     </label>
+                    {dim === 'settings' && pkg?.settings && current && (
+                      <ImportSettingsValues pkgSettings={pkg.settings} current={current} />
+                    )}
                     {isRecordDimension && shown.length > 0 && (
                       <ul className="tbs-settings__import-records">
                         {shown.map((r) => (

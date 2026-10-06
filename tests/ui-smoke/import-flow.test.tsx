@@ -429,6 +429,48 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(icon).not.toMatch(/unchanged|None/);
   });
 
+  it('shows the Settings VALUES (globals + per-slot strategy), absent ≠ explicit inherit', async () => {
+    // The settings dimension carried values all along; this surfaces them. The
+    // contract that matters: a slot the FILE did not carry a strategy for reads
+    // `inherit (by default)` — that is NOT the same as an explicit `'inherit'`,
+    // which would reset the target. Both must be distinguishable.
+    const withSettings: ExportPackage = {
+      ...PKG,
+      scope: { slots: true, rules: true, settings: true },
+      settings: {
+        matchSettings: { tabIdMode: 'no-exists', ruleCheckMode: 'no-match', priority: 'none' },
+        switchDirection: 'previous',
+        autoBindGlobal: false,
+        // slot 2 has an explicit strategy; slot 1 (target-only) is ABSENT.
+        slotStrategies: { 2: 'inherit' },
+      },
+    };
+    const base = defaultImportIntent();
+    const current: SyncState = {
+      ...CURRENT,
+      matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' },
+      switchDirection: 'next',
+      autoBindGlobal: true,
+    };
+    await openImportSection(
+      makeInspection(withSettings, current, 5, base),
+      current,
+      JSON.stringify(withSettings),
+    );
+    await selectFile();
+
+    const box = screen.getByTestId('import-settings-values');
+    // Globals compare current → file.
+    expect(box.textContent).toMatch(/Match settings: .*exists.*→.*no-exists/);
+    expect(box.textContent).toMatch(/Switch direction: next → previous/);
+    expect(box.textContent).toMatch(/Auto-bind: true → false/);
+
+    // ABSENT (slot 1) vs EXPLICIT inherit (slot 2) — the two must differ.
+    expect(screen.getByTestId('import-slot-strategy-1').textContent).toMatch(/inherit \(by default\)/);
+    expect(screen.getByTestId('import-slot-strategy-2').textContent).toMatch(/inherit$/);
+    expect(screen.getByTestId('import-slot-strategy-2').textContent).not.toMatch(/by default/);
+  });
+
   it('a dimension the package did NOT carry has no selector (A2)', async () => {
     await openImportSection(SLOTS_ONLY_INSPECTION);
     await selectFile();

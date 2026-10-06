@@ -178,6 +178,22 @@ describe('T19 — independent export section', () => {
     expect(sentScope.excludedSlotIds).toContain(1);
   });
 
+  it('expanding the settings dimension shows the values it would carry (7a)', async () => {
+    await openExportSection();
+
+    fireEvent.click(screen.getByTestId('export-dim-settings'));
+
+    const details = await screen.findByTestId('export-records-settings');
+    (details as HTMLDetailsElement).open = true;
+
+    const box = screen.getByTestId('export-settings-values');
+    expect(box.textContent).toMatch(/Match settings: Tab ID exists, Rule check match, Priority tabId/);
+    expect(box.textContent).toMatch(/Switch direction: next/);
+    expect(box.textContent).toMatch(/Auto-bind: true/);
+    // Per-slot strategy from the machine's own slot (mock slot 1 = 'inherit').
+    expect(screen.getByTestId('export-slot-strategy-1').textContent).toBe('Slot 1: inherit');
+  });
+
   it('shows the slot NUMBER before the title, and never repeats it (T19-C label)', async () => {
     await openExportSection('S1');
     fireEvent.click(screen.getByTestId('export-dim-slots'));
