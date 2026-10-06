@@ -2395,10 +2395,15 @@ function slotRowLabel(id: number, label: string): string {
   return label === base ? base : `${base} — ${label}`;
 }
 
-/** The same identity for the export list, which holds a title rather than a label. */
+/**
+ * The same identity for the export list, which holds a title rather than a label.
+ * Uses the SAME exact-equality rule as {@link slotRowLabel}: a falsy check alone
+ * would still repeat the placeholder when a title happens to equal it, and two
+ * rules for one "do not repeat the number" rule can drift apart.
+ */
 function slotLabel(id: number, title: string | null | undefined): string {
   const base = slotPlaceholder(id);
-  return title ? `${base} — ${title}` : base;
+  return !title || title === base ? base : `${base} — ${title}`;
 }
 
 /**

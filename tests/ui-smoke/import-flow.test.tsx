@@ -481,6 +481,23 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(Array.from(rows).map((el) => el.textContent)).toEqual(['Slot 1', 'Slot 2']);
   });
 
+  it('an ADDED slot with no title shows its number once (the third fallback branch)', async () => {
+    // "File-has, target-missing" is the third place the diff falls back to
+    // `Slot N` (the file side has no title). The target has no slot 7 at all, so
+    // the record is `added` and the row's identity comes entirely from the number.
+    const target: SyncState = { ...CURRENT, slots: [] };
+    const file: ExportPackage = {
+      ...PKG,
+      slots: [{ id: 7, urlMatch: exact('https://s7.example/'), titleSnapshot: '', faviconSnapshot: '', marker: {} }],
+    };
+    await openImportSection(makeInspection(file, target));
+    await selectFile();
+
+    const row = screen.getByTestId('import-dim-slots')
+      .querySelector('ul.tbs-settings__import-records > li > span:first-child');
+    expect(row?.textContent).toBe('Slot 7');
+  });
+
   it('a version conflict re-checks the file instead of dead-ending on a bare server string (F4)', async () => {
     await openImportSection();
     await selectFile();

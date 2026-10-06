@@ -46,7 +46,7 @@ vi.stubGlobal('URL', {
   revokeObjectURL: vi.fn(),
 });
 
-function installMock() {
+function installMock(slotTitle = 'S1') {
   mockSendMessage.mockImplementation((msg: { action?: string }) => {
     if (msg.action === 'EXPORT_PACKAGE') {
       return Promise.resolve({ result: { success: true, package: PACKAGE_JSON } });
@@ -65,7 +65,7 @@ function installMock() {
           // T19-C needs real records to expand; the summary comes from the
           // EXPORT_PACKAGE payload, so the counts here are independent.
           slots: [
-            { id: 1, urlMatch: { type: 'exact', value: 'https://s1.example/' }, strategy: 'inherit', uiMarker: {}, titleSnapshot: 'S1', faviconSnapshot: '', createdAt: '', updatedAt: '' },
+            { id: 1, urlMatch: { type: 'exact', value: 'https://s1.example/' }, strategy: 'inherit', uiMarker: {}, titleSnapshot: slotTitle, faviconSnapshot: '', createdAt: '', updatedAt: '' },
           ],
           rules: [
             { id: 'r1', urlMatch: { type: 'exact', value: 'https://a.example/' }, priority: 0, createdAt: '', updatedAt: '' },
@@ -80,15 +80,16 @@ function installMock() {
   });
 }
 
-async function openExportSection() {
-  installMock();
+async function openExportSection(slotTitle = 'S1') {
+  installMock(slotTitle);
   const { SettingsApp } = await import('@ui/settings/App');
-  render(<SettingsApp />);
+  const view = render(<SettingsApp />);
   const nav = await screen.findByRole('button', { name: 'Import / Export' });
   fireEvent.click(nav);
   // Two headings match /export/i ("Import / Export" + "Export"), so wait on the
   // section's own control instead of an ambiguous role query.
   await screen.findByTestId('export-dim-slots');
+  return view;
 }
 
 describe('T19 — independent export section', () => {
@@ -175,5 +176,35 @@ describe('T19 — independent export section', () => {
       .payload.scope;
     expect(sentScope.slots).toBe(true);
     expect(sentScope.excludedSlotIds).toContain(1);
+  });
+
+  it('shows the slot NUMBER before the title, and never repeats it (T19-C label)', async () => {
+    await openExportSection('S1');
+    fireEvent.click(screen.getByTestId('export-dim-slots'));
+    const details = await screen.findByTestId('export-records-slots');
+    (details as HTMLDetailsElement).open = true;
+    const row = await screen.findByTestId('export-record-slot-1');
+    expect(row.closest('label')?.textContent).toBe('Slot 1 — S1');
+  });
+
+  it('does not repeat the number when a title already IS the placeholder', async () => {
+    // The export label helper only skipped a FALSY title, so a title that happens
+    // to equal the placeholder produced "Slot 1 — Slot 1". It now uses the same
+    // exact-equality rule as the import row.
+    await openExportSection('Slot 1');
+    fireEvent.click(screen.getByTestId('export-dim-slots'));
+    const details = await screen.findByTestId('export-records-slots');
+    (details as HTMLDetailsElement).open = true;
+    const row = await screen.findByTestId('export-record-slot-1');
+    expect(row.closest('label')?.textContent).toBe('Slot 1');
+  });
+
+  it('shows the bare number for an untitled slot', async () => {
+    await openExportSection('');
+    fireEvent.click(screen.getByTestId('export-dim-slots'));
+    const details = await screen.findByTestId('export-records-slots');
+    (details as HTMLDetailsElement).open = true;
+    const row = await screen.findByTestId('export-record-slot-1');
+    expect(row.closest('label')?.textContent).toBe('Slot 1');
   });
 });
