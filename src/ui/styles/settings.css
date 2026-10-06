@@ -500,6 +500,71 @@
   margin-bottom: var(--space-md);
 }
 
+/* T22: the single-page diff surface (D6). Records the dimensions, their mode
+   selector and the per-record Keep/Take rows as ONE bordered block, so the diff
+   reads as a unit rather than a run of loose headings. */
+.tbs-settings__import-diff {
+  margin-top: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/* One dimension group. Separated by a rule so the heading does not run into the
+   records of the previous group. */
+.tbs-settings__import-dim {
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.tbs-settings__import-dim:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.tbs-settings__import-dim h3 {
+  margin: 0 0 var(--space-xs);
+  font-size: var(--font-size-md);
+}
+
+/* Per-record diff rows: label + status on the left, the actions on the right. */
+.tbs-settings__import-records {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-xs) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.tbs-settings__import-records > li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.tbs-settings__import-records > li > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tbs-settings__import-records > li > span:nth-child(2) {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+/* Cancel / Apply row. */
+.tbs-settings__import-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+
 .tbs-settings__import-fields {
   margin-top: var(--space-xxs);
   font-size: var(--font-size-sm);
@@ -529,6 +594,14 @@
   gap: var(--space-md);
   margin-bottom: var(--space-md);
   color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+/* The shortcut guidance line sits apart from the counts, as an aid rather than
+   part of the tally. */
+.tbs-settings__result-shortcut {
+  margin: var(--space-xs) 0 var(--space-md);
+  color: var(--color-text-tertiary);
   font-size: var(--font-size-sm);
 }
 

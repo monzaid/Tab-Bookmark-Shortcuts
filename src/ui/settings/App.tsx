@@ -2600,20 +2600,27 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
                         {records.map((r) => (
                           <li key={`${r.kind}-${String(r.id)}`}>
                             <span>{r.label}</span> <span>{r.status}</span>
-                            <button
+                            {/* Reuse the shared Button so the actions match every
+                                other button on the page; the `aria-label`s are the
+                                test anchors and stay EXACTLY as before. */}
+                            <Button
                               type="button"
+                              size="sm"
+                              variant="secondary"
                               aria-label={`Keep ${r.label}`}
                               onClick={() => { setRecordAction(r.kind, r.id, 'keep'); }}
                             >
                               Keep
-                            </button>
-                            <button
+                            </Button>
+                            <Button
                               type="button"
+                              size="sm"
+                              variant="secondary"
                               aria-label={`Take ${r.label}`}
                               onClick={() => { setRecordAction(r.kind, r.id, 'take'); }}
                             >
                               Take
-                            </button>
+                            </Button>
                             {/* A12: record level by default, field level on
                                 demand. The values are DECODED (import-field-format)
                                 — raw diff signatures never reach the DOM (D9). */}
