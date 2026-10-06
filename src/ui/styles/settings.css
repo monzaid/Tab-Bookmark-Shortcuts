@@ -58,6 +58,9 @@
 
 .tbs-settings__content {
   flex: 1;
+  /* A flex item defaults to `min-width: auto`, which refuses to shrink below its
+     content — a wide table then overflows instead of scrolling. */
+  min-width: 0;
   overflow-y: auto;
   padding: var(--space-xxl) var(--space-xxl);
 }
@@ -335,6 +338,18 @@
   background: var(--color-bg);
 }
 
+/* The per-rule enable checkbox lives inside a `<label>` that carries the
+   tooltip; the wrapper must not add layout of its own. */
+.tbs-settings__toggle {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.tbs-settings__toggle input {
+  cursor: inherit;
+}
+
 /* ─── Conflict Banner ─────────────────────────────────────────────────────── */
 
 .tbs-settings__conflict-banner {
@@ -413,6 +428,50 @@
   flex-wrap: wrap;
 }
 
+/* A sticky action bar shown only while rows are selected (batch operations).
+   Mirrors the toolbar's rhythm but stays visible: it is a MODE indicator. */
+.tbs-settings__batch-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+}
+
+.tbs-settings__batch-bar > span:first-child {
+  font-weight: 600;
+  margin-right: auto;
+}
+
+/* The `G1` summary sentence when rows exist but none can be applied here. It is
+   a status, not a warning — same rhythm as `__hint`, no danger colour. */
+.tbs-settings__summary {
+  margin: 0 0 var(--space-lg);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* P11 loading state: centred MUTED text, no layout shift when it is replaced. */
+.tbs-settings__loading {
+  padding: var(--space-xxl);
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+/* P11 failure state: an explicit error panel (the list is NOT rendered). */
+.tbs-settings__error {
+  padding: var(--space-md) var(--space-lg);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-md);
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
 .tbs-settings__search {
   flex: 1;
   min-width: 160px;
@@ -482,11 +541,13 @@
 
 /* ─── Import/Export Section ───────────────────────────────────────────────── */
 
+/* A file PICKER, not a drop target: the dashed outline is the universal "drop
+   here" cue, and there is no drag handler, so it would promise an interaction
+   that does not exist. Solid border + left alignment match the other panels. */
 .tbs-settings__import-zone {
-  border: 2px dashed var(--color-border-strong);
+  border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-lg);
-  padding: var(--space-xxl);
-  text-align: center;
+  padding: var(--space-xl);
   margin-bottom: var(--space-lg);
   transition: border-color var(--duration-fast) var(--easing);
 }

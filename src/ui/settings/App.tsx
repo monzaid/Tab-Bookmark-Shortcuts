@@ -2564,6 +2564,15 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
         </Button>
       </div>
 
+      {/* Reading a file is async (file → text → INSPECT). Without this the pane
+          stays blank after "Choose File to Import" and the action looks dead,
+          so announce it in the same `role="status"` vocabulary as the load. */}
+      {importing && inspection === null && (
+        <p className="tbs-settings__loading" role="status" aria-busy="true">
+          Reading package…
+        </p>
+      )}
+
       {/* D6: single page — dimension groups, diff and the confirm dialog are all
           reachable without stepping through a wizard. */}
       {inspection && (
