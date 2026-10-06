@@ -241,15 +241,17 @@ describe('import fields expansion', () => {
   });
 
   it('documents what the full-width pattern does NOT claim to cover', () => {
-    // KNOWN LIMITS — the pattern matches TEXT, not the CSS property model, and
-    // these do not match. Neither is worth a rewrite: two of them are exotic
-    // spellings and the third is a weaker-but-legal value. Pinning them as
-    // failing makes the limit a checked fact, so a later change to the pattern
-    // confronts it instead of silently "fixing" it by accident.
-    //   - `inline-size:100%`   the logical equivalent of `width` (not matched)
-    //   - `width : 100%`       a space before the colon (not matched)
-    //   - `flex:0 1 100%`      a legal value that permits shrinking (matched,
-    //                          but weaker than the canonical `1 1 100%`)
+    // KNOWN LIMITS — the pattern matches TEXT, not the CSS property model.
+    //   GROUP A — legal spellings it does NOT match (a rewrite could add them):
+    //     - `inline-size:100%`   the logical equivalent of `width`
+    //     - `width : 100%`       a space before the colon
+    //   GROUP B — a legal spelling it DOES match, differing from the canonical
+    //     `flex:1 1 100%` in ONE dimension: `flex-grow` (0 vs 1). Both permit
+    //     shrinking (`flex-shrink:1`), and in this row neither grows — the panel
+    //     already owns its line — so the two spellings look identical here:
+    //     - `flex:0 1 100%`
+    // Both groups are pinned as checked facts, so a later change to the pattern
+    // confronts the limit instead of silently "fixing" it by accident.
     // RED HERE IS NOT NECESSARILY A REGRESSION: tightening the pattern (e.g. to
     // reject `flex:0 1 100%`, or to accept `inline-size`) is a legitimate
     // improvement and will turn this case red on purpose. Update the row that
