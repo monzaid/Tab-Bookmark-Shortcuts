@@ -78,6 +78,33 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+/**
+ * Readiness for the SLOT-ROW entry: the row (and its menu) renders only once
+ * `state.sync.slots` has loaded — the same data that entry reads.
+ */
+async function awaitSlotRowSynced() {
+  await screen.findByRole('button', { name: 'More options for slot 5' });
+}
+
+/**
+ * Readiness for the CURRENT-PAGE (`＋`) entry: the chain's WINNER title must be
+ * on screen. `displayCurrentTitle` alone is not enough — before sync loads it
+ * falls back to `state.currentTabTitle` (the raw tab title), and `chrome.tabs.query`
+ * answers immediately in these tests, so "something non-empty is shown" would let
+ * the click through early. 'Rule R Title' can only come from the rule tier.
+ */
+async function awaitEntryBSynced() {
+  await waitFor(() => { expect(screen.getByText('Rule R Title')).toBeInTheDocument(); });
+  expect(screen.queryByText('Site Title')).toBeNull();
+}
+
+const PNG = 'data:image/png;base64,U0xPVFJFTkRFUg==';
+/** A rule whose icon is a RECIPE (its value is the materialized PNG, R2). */
+const RULE_RECIPE = {
+  ...RULE_R,
+  favicon: { type: 'template', value: PNG, backgroundColor: '#2563EB', text: 'A', textColor: '#FFFFFF' },
+};
+
 describe('T14: sidebar create-rule modal', () => {
   it('reuses the shared field set and has no mode checkbox', async () => {
     mockSendMessage.mockResolvedValue(stateWith([]));
@@ -174,7 +201,7 @@ describe('T14: sidebar create-rule modal', () => {
       const list = within(dialog).getByRole('tablist', { name: 'Icon source' });
       return Array.from(list.querySelectorAll('[role="tab"]'))
         .filter((t) => t.getAttribute('aria-selected') === 'true')
-        .map((t) => t.textContent?.trim());
+        .map((t) => t.textContent.trim());
     };
     await waitFor(() => { expect(selectedTabs()).toEqual(['Custom Icon']); });
     expect(within(dialog).getByLabelText('Custom background color')).toHaveValue('#2563eb');
@@ -302,5 +329,90 @@ describe('T14: sidebar create-rule modal', () => {
     });
     const call = mockSendMessage.mock.calls.find((c) => (c[0] as { action?: string }).action === 'CREATE_RULE');
     expect((call?.[0] as { payload?: { favicon?: { type?: string } } }).payload?.favicon?.type).toBe('upload');
+  });
+
+  /**
+   * Restored (the deleted rev473 case, re-anchored on the CURRENT-PAGE entry):
+   * applying a chain RECORD via `Use` must keep it a recipe — this is the
+   * "order" invariant (source BEFORE the value's shape). Entry B is used so the
+   * current-page path (`iconSource: currentPageIconSource`) is covered too.
+   */
+  it('apply on a chain record keeps the RECIPE (a Use never flattens it to an upload) — entry B', async () => {
+    mockSendMessage.mockResolvedValue(stateWith([RULE_RECIPE], []));
+    render(<SidebarApp />);
+    await awaitEntryBSynced();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add to global rules' }));
+    const dlg = () => screen.getByRole('dialog', { name: /New Global Page Rule/ });
+
+    // `Use chain` tab → the rule row's `Use`.
+    fireEvent.click(within(within(dlg()).getByRole('tablist', { name: 'Icon source' })).getByRole('tab', { name: /Use chain/i }));
+    fireEvent.click(await within(dlg()).findByRole('button', { name: /Apply the .* to this field/i }));
+
+    // STRUCTURAL, not a tab read: the persisted payload must keep the RECIPE.
+    // (A tab read is a weaker proxy — the picker's local value can lag the
+    // parent pair during the tab→apply sequence, which is exactly what made this
+    // case flaky. The contract under test is the SAVED type.)
+    await waitFor(() => { expect(within(dlg()).getByRole('button', { name: 'Save' })).toBeEnabled(); });
+    fireEvent.click(within(dlg()).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockSendMessage.mock.calls.map((c) => (c[0] as { action?: string }).action)).toContain('CREATE_RULE');
+    });
+    const call = mockSendMessage.mock.calls.find((c) => (c[0] as { action?: string }).action === 'CREATE_RULE');
+    const favicon = (call?.[0] as { payload?: { favicon?: { type?: string; backgroundColor?: string } } }).payload?.favicon;
+    expect(favicon?.type).toBe('template');
+    expect(favicon?.backgroundColor).toBe('#2563EB');
+  });
+
+  /**
+   * RED-8 (open + recipe on the CURRENT-PAGE entry): opening `＋` must prefill
+   * from the winning rule's SOURCE, so the modal opens on `Custom` with the
+   * recipe's fields — the entry-B counterpart of RED-1.
+   */
+  it('RED-8 opening from the CURRENT PAGE prefills the winning recipe (entry B)', async () => {
+    mockSendMessage.mockResolvedValue(stateWith([RULE_RECIPE], []));
+    render(<SidebarApp />);
+    await awaitEntryBSynced();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add to global rules' }));
+    const dlg = () => screen.getByRole('dialog', { name: /New Global Page Rule/ });
+
+    const selectedTabs = () => {
+      const list = within(dlg()).getByRole('tablist', { name: 'Icon source' });
+      return Array.from(list.querySelectorAll('[role="tab"]'))
+        .filter((t) => t.getAttribute('aria-selected') === 'true')
+        .map((t) => t.textContent.trim());
+    };
+    await waitFor(() => { expect(selectedTabs()).toEqual(['Custom Icon']); });
+    expect(within(dlg()).getByLabelText('Custom background color')).toHaveValue('#2563eb');
+    expect(within(dlg()).getByLabelText('Icon text or emoji')).toHaveValue('A');
+  });
+
+  /**
+   * RED-7: an OPEN modal must not be re-seeded by later page-state changes — the
+   * prefill props are live page state, so a deps-driven effect silently wiped
+   * edits the user had already made. The edit here is a deterministic `typeUrl`,
+   * and the prop change is a second entry that sets `rulePrefill` (which flips
+   * `defaultUrl`), so the case does not depend on timers or storage events.
+   */
+  it('RED-7 keeps the user\'s draft when page props change while the modal is open', async () => {
+    mockSendMessage.mockResolvedValue(stateWith([], [SLOT_S]));
+    render(<SidebarApp />);
+    await awaitSlotRowSynced();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add to global rules' }));
+    const dlg = () => screen.getByRole('dialog', { name: /New Global Page Rule/ });
+    const urlBox = () => within(dlg()).getByRole('textbox', { name: /Match URL/ });
+    await waitFor(() => { expect(urlBox()).toBeInTheDocument(); });
+
+    fireEvent.change(urlBox(), { target: { value: 'https://typed.example/' } });
+    expect(urlBox()).toHaveValue('https://typed.example/');
+
+    // Prop change while open: the slot's menu sets `rulePrefill` → `defaultUrl`.
+    fireEvent.click(screen.getByRole('button', { name: 'More options for slot 5' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Add to Global Rules' }));
+
+    expect(urlBox()).toHaveValue('https://typed.example/');
   });
 });

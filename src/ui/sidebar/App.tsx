@@ -1127,9 +1127,22 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // P4: the modal stays mounted (so `Dialog` can restore focus to its trigger
-  // on close), therefore the prefill has to be re-seeded on every open.
+  // on close), therefore the prefill has to be re-seeded on every open — ONCE.
+  //
+  // The props below are LIVE page state (`defaultUrl` falls back to
+  // `state.currentTabUrl`, the icon to the current favicon), so a plain
+  // deps-driven effect re-seeded on EVERY bg refresh, silently discarding edits
+  // the user had already made in the open modal. Gating on "already seeded this
+  // open" is what makes the intent above true: seed at open, then leave the
+  // user's draft alone until the modal closes.
+  const seededForOpenRef = useRef(false);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      seededForOpenRef.current = false; // next open seeds again
+      return;
+    }
+    if (seededForOpenRef.current) return; // mid-session prop churn must not reset
+    seededForOpenRef.current = true;
     setUrl(defaultUrl);
     setMatchType(defaultMatchType ?? 'exact');
     setTitleMode(defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' });

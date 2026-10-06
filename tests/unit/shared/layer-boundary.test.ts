@@ -1,8 +1,8 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-/** Recursive `.ts`/`.tsx` walker (skips nothing else here — `src/shared` is leaf). */
+/** Recursive `.ts`/`.tsx` walker. */
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
@@ -17,28 +17,105 @@ function walk(dir: string, out: string[] = []): string[] {
 
 /**
  * Layer boundary: `src/shared/**` is the LEAF every other layer depends on
- * (`@background`, `@content`, `@ui`, `@adapters`). Importing `@ui` from it would
- * be a dependency inversion — the first of its kind.
+ * (`@background`, `@content`, `@ui`, `@adapters`). Nothing under it may resolve
+ * OUTSIDE itself — an aliased or relative escape is a dependency inversion.
  *
- * No tooling enforces this (the eslint config has no boundary/no-restricted-imports
- * rule), so this guard is the table, not the memory — the same shape as the
- * `no-cjk-in-ui` guard.
+ * Enforcement is an ALLOWLIST, not a list of forbidden prefixes: every module
+ * specifier must be RELATIVE and must RESOLVE to a path still under
+ * `src/shared`. Enumerating "statement shape × forbidden prefix" can never be
+ * complete (it misses new aliases and third-party packages); asserting the
+ * boundary PROPERTY is.
  *
- * Only the `@shared → @ui` direction is forbidden: `@ui → @shared` is the normal,
- * intended direction and is deliberately NOT asserted here.
+ * No tooling enforces this (the eslint config has no boundary rule), so this
+ * guard is the table, not the memory.
  */
+const SHARED_ROOT = resolve(process.cwd(), 'src/shared');
+
+const SPECIFIER = /(?:from|import|require)\s*\(?\s*['"]([^"']+)['"]/g;
+
+/**
+ * Strip comments FIRST. `field-chain.ts` contains prose like
+ * `from 'the site value is an empty string'`, which the specifier pattern would
+ * otherwise read as an import (a REAL false positive today). Over-stripping only
+ * reduces matches inside comments and can never hide a real import, so the
+ * direction of error is safe.
+ */
+function stripComments(s: string): string {
+  return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+/** Specifiers in `source` (a file at `filePath`) that leave `src/shared`. */
+function specifierOffenders(source: string, filePath: string): string[] {
+  const out: string[] = [];
+  for (const [, spec] of stripComments(source).matchAll(SPECIFIER)) {
+    // (1) MUST be relative: a bare specifier (`zod`, `@ui/x`) resolves against
+    // node_modules/aliases, never inside shared, so `resolve()` alone would
+    // wrongly place `'zod'` under shared.
+    // (2) MUST stay under shared: `../ui/x` is relative but escapes.
+    const resolved = resolve(dirname(filePath), spec);
+    const inside = resolved === SHARED_ROOT || resolved.startsWith(SHARED_ROOT + sep);
+    if (!spec.startsWith('.') || !inside) {
+      out.push(`${relative(process.cwd(), filePath)}: ${spec}`);
+    }
+  }
+  return out;
+}
+
+function offendersIn(files: string[]): string[] {
+  return files.flatMap((f) => specifierOffenders(readFileSync(f, 'utf8'), f));
+}
+
 describe('layer boundary', () => {
-  it('has zero `@ui` imports anywhere in src/shared', () => {
-    const files = walk(resolve(process.cwd(), 'src/shared'));
+  it('has zero specifiers resolving outside src/shared', () => {
+    const files = walk(SHARED_ROOT);
 
     // Non-empty assertion: a renamed dir or a wrong root would otherwise make the
     // offender scan vacuously pass (finding "nothing" in "nowhere").
     expect(files.length).toBeGreaterThan(0);
 
-    // Match IMPORT statements only, not the `@ui` token in prose/comments.
-    const uiImport = /(?:^|\n)\s*import\b[^\n]*from\s+['"]@ui\/|import\(\s*['"]@ui\/|from\s+['"]\.\.[/\\]ui[/\\]/;
-    const offenders = files.filter((f) => uiImport.test(readFileSync(f, 'utf8')));
+    expect(offendersIn(files)).toEqual([]);
+  });
 
-    expect(offenders).toEqual([]);
+  /**
+   * The scan above only proves "the repo is clean right now". This case table
+   * proves the DETECTOR can actually discriminate — otherwise the guard could be
+   * vacuous (the "table, not the memory" discipline).
+   */
+  it('flags every resolution form that leaves src/shared, and nothing else', () => {
+    const fakeFile = join(SHARED_ROOT, 'probe.ts');
+    const flagged = (s: string) => specifierOffenders(s, fakeFile).length > 0;
+
+    const MUST_FLAG = [
+      "import { A } from '@ui/x';",
+      "import {\n  A,\n} from '@ui/x';",
+      "export { A } from '@ui/x';",
+      "export * from '@ui/x';",
+      "import '@ui/x';",
+      "const m = await import('@ui/x');",
+      "const m = require('@ui/x');",
+      "import { A } from '../ui/x';",
+      "import { A } from '@background/x';",
+      "import { A } from '@adapters/x';",
+      "import { z } from 'zod';", // third-party: the old denylist missed it
+      "import { A } from '@ui/NEW_ALIAS/x';", // a future alias: no list to update
+    ];
+    const MUST_NOT_FLAG = [
+      '// see @ui/x for details',
+      "const t = '@ui'",
+      "// copied from '@ui/x' long ago",
+      "/* copied from '@ui/x' */",
+      "// from 'the site value is an empty string'", // real repo false positive
+      "import { A } from './x';",
+      "import {\n  A,\n} from './x';",
+      "export { A } from './x';",
+      "export * from './x';",
+      "import './x';",
+      "const m = await import('./x');",
+      "const m = require('./x');",
+      "import type { A } from './x';",
+    ];
+
+    for (const s of MUST_FLAG) expect(flagged(s), `MUST_FLAG: ${s}`).toBe(true);
+    for (const s of MUST_NOT_FLAG) expect(flagged(s), `MUST_NOT_FLAG: ${s}`).toBe(false);
   });
 });
