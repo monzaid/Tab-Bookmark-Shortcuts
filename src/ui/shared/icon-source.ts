@@ -105,7 +105,7 @@ export function iconSourceToFieldSeed(source: IconSource): {
   // the rendered PNG in `value`), so canonicalise before deciding the shape.
   const canonical = canonicalIconSource(source);
   if (canonical.type === 'template' || canonical.type === 'upload') {
-    return { mode: { kind: 'set', value: '' }, iconConfig: iconSourceToIconConfig(canonical) }; // probe
+    return { mode: { kind: 'set', value: '' }, iconConfig: iconSourceToIconConfig(canonical) };
   }
   // `url`: no config carrier — the text field holds the value.
   return { mode: { kind: 'set', value: canonical.value } };
