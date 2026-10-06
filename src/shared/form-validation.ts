@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Shared form validation (E1 / E1-a / CT4-bis).
  *
  * A single pure module that reuses the background validation primitives, so the
@@ -40,7 +40,7 @@ export interface RuleFormInput {
   iconMode: 'url' | 'custom' | 'use-chain';
   iconValue: string;
   /** Rendered data URI for a custom icon (already contains the `data:` prefix). */
-  iconConfig?: { dataUri: string };
+  iconConfig?: { dataUri?: string; bgColor?: string; text?: string; textColor?: string };
 }
 
 export interface FieldEditorsInput {
@@ -48,7 +48,7 @@ export interface FieldEditorsInput {
   titleValue: string;
   iconMode: 'url' | 'custom' | 'use-chain';
   iconValue: string;
-  iconConfig?: { dataUri: string };
+  iconConfig?: { dataUri?: string; bgColor?: string; text?: string; textColor?: string };
 }
 
 /** E2-c: the single conflict copy both surfaces share. */
@@ -111,15 +111,26 @@ function validateMatchUrl(matchType: 'exact' | 'regex', url: string): Validation
 }
 
 /** Resolve the value a custom icon config would render to. */
-function customIconValue(iconConfig?: { dataUri: string }): string {
+function customIconValue(iconConfig?: { dataUri?: string }): string {
   return iconConfig?.dataUri ?? '';
+}
+
+/**
+ * Is this a REAL composite icon? The SAME judgement `resolveDraftFavicon`
+ * persists with: a rendered `dataUri`, OR actual recipe content. Without the
+ * second half a recipe (which has no `dataUri` — its fields are the truth, C1)
+ * would be judged empty and blocked, even though it persists as a template.
+ */
+function hasCompositeIconContent(iconConfig?: { dataUri?: string; bgColor?: string; text?: string; textColor?: string }): boolean {
+  if (customIconValue(iconConfig).trim()) return true;
+  return iconConfig !== undefined && (iconConfig.bgColor !== undefined || (iconConfig.text ?? '') !== '');
 }
 
 /** Validate the icon field shared by both surfaces. */
 function validateIcon(
   iconMode: 'url' | 'custom' | 'use-chain',
   iconValue: string,
-  iconConfig?: { dataUri: string },
+  iconConfig?: { dataUri?: string; bgColor?: string; text?: string; textColor?: string },
 ): ValidationIssue[] {
   if (iconMode === 'use-chain') return [];
 
@@ -136,10 +147,13 @@ function validateIcon(
 
   // custom
   const rendered = customIconValue(iconConfig);
-  if (!rendered.trim()) {
+  if (!hasCompositeIconContent(iconConfig)) {
     return [{ field: 'icon', message: MESSAGES.emptyIconCustom, severity: 'block' }];
   }
-  if (!isSafeFaviconProtocol(rendered)) {
+  // Only a RENDERED composite has a URI to vet. A recipe carries no `dataUri`
+  // (its fields are the truth, C1), so it has nothing to check here — running
+  // the protocol gate on '' would block every recipe as "unsafe".
+  if (rendered.trim() && !isSafeFaviconProtocol(rendered)) {
     return [{ field: 'icon', message: MESSAGES.unsafeIcon, severity: 'block' }];
   }
   return [];

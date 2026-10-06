@@ -13,7 +13,7 @@ import {
   validateRuleForm,
 } from '@shared/form-validation';
 import type { RuleFormInput } from '@shared/form-validation';
-import { toValidationInput, validateRuleDraft } from '@ui/shared/rule-form-submit';
+import { resolveDraftFavicon, toValidationInput, validateRuleDraft } from '@ui/shared/rule-form-submit';
 import { MAX_REGEX_LENGTH } from '@shared/url-utils';
 
 function form(overrides: Partial<RuleFormInput>): RuleFormInput {
@@ -152,6 +152,21 @@ describe('rule-form-submit — the draft mapper classifies icon CONFIGS (defect 
   });
 
   
+
+  it('a RECIPE draft (config with no data URI) is valid and persists as a template', () => {
+    const recipe = draft({ iconConfig: { bgColor: '#2563EB', text: 'A', textColor: '#FFFFFF' } });
+    expect(toValidationInput(recipe).iconMode).toBe('custom');
+    // The mapper must forward the WHOLE config: narrowing it to `dataUri` made
+    // the recipe look empty and blocked the save.
+    expect(toValidationInput(recipe).iconConfig).toEqual({ bgColor: '#2563EB', text: 'A', textColor: '#FFFFFF' });
+    expect(validateRuleDraft(recipe).valid).toBe(true);
+    // …and it persists as a recipe, not an upload (the reason the guard exists).
+    expect(resolveDraftFavicon(recipe)?.type).toBe('template');
+  });
+
+  it('an EMPTY composite config still blocks (the guard is not weakened)', () => {
+    expect(validateRuleDraft(draft({ iconConfig: {} })).valid).toBe(false);
+  });
 
   it('a plain draft without a config still validates as `url` (unchanged)', () => {
     expect(toValidationInput(draft({ iconMode: { kind: 'set', value: 'https://cdn/x.png' } })).iconMode).toBe('url');

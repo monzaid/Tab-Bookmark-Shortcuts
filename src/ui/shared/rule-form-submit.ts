@@ -49,7 +49,10 @@ export function toValidationInput(value: RuleDraftValue): RuleFormInput {
 // upload's `{kind:'set', value:''}` that made the whole draft unsaveable.
     iconMode: value.iconMode.kind === 'set' ? (value.iconConfig ? 'custom' : 'url') : 'use-chain',
     iconValue: value.iconMode.kind === 'set' ? value.iconMode.value : '',
-    ...(value.iconConfig ? { iconConfig: { dataUri: value.iconConfig.dataUri ?? '' } } : {}),
+    // Pass the config through UNCHANGED. Narrowing it to `dataUri` dropped a
+// recipe's fields (bgColor/text/textColor), so the validator saw an empty
+// "rendered" value and blocked an otherwise-valid recipe draft.
+    ...(value.iconConfig ? { iconConfig: value.iconConfig } : {}),
   };
 }
 
