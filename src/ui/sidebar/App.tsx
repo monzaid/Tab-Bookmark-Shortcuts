@@ -1296,8 +1296,8 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         // config-carrying values (it normalises `value` to the dataUri). Swapping
         // the two writes would only change the draft's DISPLAY cache — the
         // persisted favicon is identical for every seed shape, because the write
-        // path reads `iconConfig` whenever one exists and never the normalised
-        // `value`.
+        // path reads `iconConfig` FIRST and only an EMPTY config (no `dataUri`,
+        // no `bgColor`, no `text`) falls through to the normalised `value`.
         onResetIconEdit={() => { setIconMode(initialIconSeed.mode); setIconConfig(initialIconSeed.iconConfig); }}
         onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
         onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
