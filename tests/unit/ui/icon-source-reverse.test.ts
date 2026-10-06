@@ -126,6 +126,10 @@ describe('FIX-C (i): `Use chain` of a recipe RECORD stays a recipe', () => {
     expect(draft.iconConfig?.dataUri).toBeUndefined(); // never an upload
   });
 
+  // NOTE: this is the ONLY owner for which no source is recoverable — it carries
+  // a captured snapshot STRING, not a record. That is why the new-rule modal is
+  // allowed a `value.startsWith('data:')` guess for it and nowhere else
+  // (see `applyChainValueToDraft`; the lock test lives in sidebar-modality).
   it('a `site` owner has no stored source (falls back to the value shape)', () => {
     expect(iconSourceForOwner({ kind: 'site' }, ctx as never)).toBeNull();
   });
