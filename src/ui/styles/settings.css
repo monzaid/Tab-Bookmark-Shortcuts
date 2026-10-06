@@ -515,6 +515,50 @@
   gap: var(--space-xxs);
 }
 
+/* T22: the APPLY result list (§4.3). */
+.tbs-settings__import-result {
+  margin-top: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.tbs-settings__result-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.tbs-settings__result-records,
+.tbs-settings__result-violations ul,
+.tbs-settings__result-missing ul,
+.tbs-settings__result-overlaps ul,
+.tbs-settings__result-tolerant ul {
+  list-style: none;
+  padding: 0 0 0 var(--space-lg);
+  margin: var(--space-xs) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.tbs-settings__result-missing li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* D15: the unsafe-skipped group is a safety disclosure — make it stand out. */
+.tbs-settings__result-violations {
+  margin: var(--space-md) 0;
+  padding: var(--space-sm) var(--space-md);
+  border-left: 3px solid var(--color-danger);
+  background: var(--color-danger-subtle, var(--color-bg-subtle, transparent));
+}
+
 .tbs-settings__export-dims {
   list-style: none;
   padding: 0;

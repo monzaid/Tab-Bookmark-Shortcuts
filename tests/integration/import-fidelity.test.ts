@@ -1,4 +1,4 @@
-/**
+﻿/**
  * T9 — fidelity guard for the "keep existing" path (F2).
  *
  * F2 is one of the iteration's two SILENT DATA-CORRUPTION defects: the old
@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { ImportExportService } from '@background/import-export-service';
+import { IconService } from '@background/icon-service';
 import { defaultImportIntent } from '@shared/types';
 import type { ExportPackage } from '@shared/export-package';
 import type { PageRule, MatchRuleSettings } from '@shared/types';
@@ -57,7 +58,7 @@ describe('T9: the keep-existing path preserves target records byte-for-byte (F2)
     adapter.reset();
     repo = new StorageRepository(adapter);
     await repo.initialize();
-    service = new ImportExportService(repo);
+    service = new ImportExportService(repo, new IconService(repo));
   });
 
   it('a package carrying NO rules leaves every target rule untouched', async () => {

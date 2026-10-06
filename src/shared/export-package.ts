@@ -97,6 +97,24 @@ export interface ExportPackage {
   shortcuts?: PortableShortcuts;
 }
 
+/**
+ * C8: the DECLARED field names of the package shapes above.
+ *
+ * This table exists so the "unknown extra field" tolerant reader has ONE source
+ * of truth. It is deliberately in this file, ADJACENT to the interfaces it
+ * mirrors — TypeScript erases types at runtime, so a runtime allowlist cannot be
+ * derived from them; keeping it here is the closest thing to a single owner.
+ *
+ * ⚠️ CHANGE A SHAPE ABOVE ⇒ CHANGE THIS TABLE. A drift makes the tolerant
+ * reader either mis-report a known field or silently accept a renamed one.
+ */
+export const PACKAGE_FIELD_ALLOWLIST = {
+  root: ['schemaVersion', 'generator', 'exportedAt', 'scope', 'slots', 'rules', 'settings', 'shortcuts'],
+  slot: ['id', 'urlMatch', 'autoBindOverride', 'marker', 'titleSnapshot', 'faviconSnapshot'],
+  rule: ['id', 'urlMatch', 'priority', 'title', 'favicon', 'enabled'],
+  icon: ['kind', 'url', 'ref', 'bgColor', 'text', 'textColor'],
+} as const;
+
 /** A partial config derived from a package, ready to be merged by the service. */
 export interface SyncPatch {
   slots?: SlotDefinition[];

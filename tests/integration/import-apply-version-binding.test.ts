@@ -1,4 +1,4 @@
-/**
+﻿/**
  * T10 — server-authoritative APPLY bound to the preview's `configVersion` (F4).
  *
  * The design splits INSPECT (read-only, pure over the FILE) from APPLY (the only
@@ -16,6 +16,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { ImportExportService } from '@background/import-export-service';
+import { IconService } from '@background/icon-service';
 import { defaultImportIntent } from '@shared/types';
 import type { ExportPackage } from '@shared/export-package';
 import type { PageRule, ImportIntent } from '@shared/types';
@@ -53,7 +54,7 @@ describe('T10: APPLY is server-authoritative and bound to the preview version', 
     adapter.reset();
     repo = new StorageRepository(adapter);
     await repo.initialize();
-    service = new ImportExportService(repo);
+    service = new ImportExportService(repo, new IconService(repo));
   });
 
   it('a stale configVersion is refused with ZERO modification (F4)', async () => {

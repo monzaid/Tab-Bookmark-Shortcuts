@@ -24,17 +24,44 @@ import type {
   ImportInspection,
   ImportApplyResult,
   ImportRecordStatus,
+  TolerantItem,
+  IconSource,
 } from '@shared/types';
 import { defaultImportIntent } from '@shared/types';
 import { applyIntent, computeDiff, findMatchOverlaps } from '@shared/import-diff';
-import { isExportPackage, syncStateToPackage } from '@shared/export-package';
+import { isExportPackage, syncStateToPackage, PACKAGE_FIELD_ALLOWLIST } from '@shared/export-package';
 import { partitionByDomainRules, type DomainRecord, type DomainRejection } from './domain-rules';
 import { iconToPortable, portableToIcon } from '@shared/export-package';
+
+// ─── Narrow collaborator seams (no adapter/service coupling) ─────────────────
+
+/**
+ * T22: the missing-icon judgement, narrowed to the ONE method needed.
+ *
+ * A structural type (not `IconService`) so this module stays free of a service
+ * dependency, and so a test can supply a stub. `IconService` satisfies it.
+ */
+export interface MissingIconProbe {
+  isMissingIcon(source: IconSource | undefined | null): Promise<boolean>;
+}
+
+/** T22: platform capability + guidance produced by APPLY (D4). */
+export interface ImportApplyOptions {
+  /**
+   * `false` ⇒ the shortcut dimension cannot be applied programmatically and the
+   * result carries manual-set-up guidance. `undefined` = capability unknown
+   * (no guidance) — the pre-T22 behaviour.
+   */
+  commandsUpdateSupported?: boolean;
+}
 
 // ─── Import/Export Service ───────────────────────────────────────────────────
 
 export class ImportExportService {
-  constructor(private repo: StorageRepository) {}
+  constructor(
+    private repo: StorageRepository,
+    private icons: MissingIconProbe,
+  ) {}
 
   // ─── Export ────────────────────────────────────────────────────────────
 
@@ -138,7 +165,7 @@ export class ImportExportService {
       inspection: {
         diff,
         dimensions: diff.dimensions,
-        tolerant: [],
+        tolerant: this.collectTolerant(parsed),
         domainViolations: partition.rejected,
         overlaps: findMatchOverlaps(final),
         configVersion: current.configVersion,
@@ -352,6 +379,7 @@ export class ImportExportService {
     file: string,
     intent: ImportIntent,
     expectedVersion: number,
+    options: ImportApplyOptions = {},
   ): Promise<
     { success: true; configVersion: number; result: ImportApplyResult } |
     { success: false; errorCode: string; message: string }
@@ -420,6 +448,31 @@ export class ImportExportService {
       counts[record.status as ImportRecordStatus] += 1;
     }
 
+    // C11/D9: the missing-icon list is an APPLY PRODUCT — a one-shot disclosure,
+    // never read-side state. Judged against `finalSafe` (the records actually
+    // written, D15-filtered); records the intent DELETED are absent from `final`
+    // by construction, so they cannot appear here.
+    const missingIcons: Array<{ kind: 'slot' | 'rule'; id: number | string }> = [];
+    for (const slot of finalSafe.slots) {
+      if (await this.icons.isMissingIcon(slot.uiMarker.icon)) {
+        missingIcons.push({ kind: 'slot', id: slot.id });
+      }
+    }
+    for (const rule of finalSafe.rules) {
+      if (await this.icons.isMissingIcon(rule.favicon)) {
+        missingIcons.push({ kind: 'rule', id: rule.id });
+      }
+    }
+
+    // D4 派生 2: a platform without `commands.update` cannot be applied
+    // programmatically, so the result carries manual set-up guidance — but ONLY
+    // when the package actually carried the shortcut dimension (otherwise the
+    // notice would be noise on every import).
+    const shortcutGuidance =
+      options.commandsUpdateSupported === false && parsed.shortcuts !== undefined
+        ? 'The shortcuts in this import must be set manually at chrome://extensions/shortcuts'
+        : undefined;
+
     return {
       success: true,
       configVersion: write.configVersion,
@@ -427,16 +480,57 @@ export class ImportExportService {
         success: true,
         configVersion: write.configVersion,
         counts,
-        tolerant: [],
+        tolerant: this.collectTolerant(parsed),
         domainViolations: partition.rejected,
-        // Filled by the missing-icon producer (a downstream wiring task).
-        missingIcons: [],
+        missingIcons,
         overlaps,
+        ...(shortcutGuidance !== undefined ? { shortcutGuidance } : {}),
       },
     };
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────
+
+  /**
+   * C8: the TOLERANT half of validation — a well-formed package may carry extra
+   * fields the receiver does not know. They are IGNORED (not fatal) but each one
+   * is disclosed, so "I made a decision for you" becomes "here is what I did".
+   *
+   * Scope is deliberately the DECLARED field names (the allowlist in
+   * `export-package.ts`, adjacent to the shapes) at the package root and on each
+   * `slots[]` / `rules[]` item. `urlMatch` / `marker` interiors are NOT walked —
+   * a bounded, predictable report, not a schema walker.
+   */
+  private collectTolerant(parsed: unknown): TolerantItem[] {
+    const items: TolerantItem[] = [];
+    if (!parsed || typeof parsed !== 'object') return items;
+    const root = parsed as Record<string, unknown>;
+
+    const unknownKeys = (obj: Record<string, unknown>, allowed: readonly string[]): string[] =>
+      Object.keys(obj).filter((k) => !allowed.includes(k));
+
+    for (const key of unknownKeys(root, PACKAGE_FIELD_ALLOWLIST.root)) {
+      items.push({ kind: 'unknown-field', detail: key });
+    }
+
+    const walk = (
+      list: unknown,
+      allowed: readonly string[],
+      dimension: 'slots' | 'rules',
+    ): void => {
+      if (!Array.isArray(list)) return;
+      list.forEach((entry, index) => {
+        if (!entry || typeof entry !== 'object') return;
+        for (const key of unknownKeys(entry as Record<string, unknown>, allowed)) {
+          items.push({ kind: 'unknown-field', detail: `${dimension}[${String(index)}].${key}` });
+        }
+      });
+    };
+
+    walk(root.slots, PACKAGE_FIELD_ALLOWLIST.slot, 'slots');
+    walk(root.rules, PACKAGE_FIELD_ALLOWLIST.rule, 'rules');
+    return items;
+  }
 
   /**
    * Shape guard for the new `matchSettings` field. Returns false for anything

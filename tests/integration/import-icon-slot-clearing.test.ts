@@ -1,4 +1,4 @@
-/**
+﻿/**
  * T11 / C10 — a REPLACED record must not keep its target-machine icon blob.
  *
  * §3.7: the reference key is derived from the record id (`icon:slot-3`). If the
@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { ImportExportService } from '@background/import-export-service';
+import { IconService } from '@background/icon-service';
 import { defaultImportIntent } from '@shared/types';
 import type { ExportPackage } from '@shared/export-package';
 import type { SlotDefinition, SyncState } from '@shared/types';
@@ -92,7 +93,7 @@ describe('T11: replaced records lose their icon slot; kept records do not', () =
     adapter.reset();
     repo = new StorageRepository(adapter);
     await repo.initialize();
-    service = new ImportExportService(repo);
+    service = new ImportExportService(repo, new IconService(repo));
   });
 
   it('clears the icon key of a REPLACED slot (so it lands in "missing")', async () => {

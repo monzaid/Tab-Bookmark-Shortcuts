@@ -13,9 +13,9 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import { Button, Toast, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, DimensionPresence, DimensionMode, ExportScope, SyncState } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportApplyResult, ImportDiff, DimensionPresence, DimensionMode, ExportScope, SyncState } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
-import { applyIntent, quantifyDeletions } from '@shared/import-diff';
+import { applyIntent, computeDiff, quantifyDeletions } from '@shared/import-diff';
 import { isExportPackage } from '@shared/export-package';
 import type { ExportPackage } from '@shared/export-package';
 
@@ -90,6 +90,18 @@ function extractResult(res: unknown): Record<string, unknown> | null {
   if (!res || typeof res !== 'object') return null;
   const r = res as Record<string, unknown>;
   return (r.result as Record<string, unknown>) ?? r;
+}
+
+/**
+ * T22: the APPLY result lands at `result.result` (the service returns
+ * `{ success, configVersion, result: ImportApplyResult }`), so unwrap one more
+ * level than `extractResult` does.
+ */
+function extractApplyResult(res: unknown): ImportApplyResult | null {
+  const outer = extractResult(res);
+  const inner = outer?.result;
+  if (inner && typeof inner === 'object') return inner as ImportApplyResult;
+  return null;
 }
 
 /**
@@ -382,7 +394,8 @@ function StrategySection({
             const override = slot?.autoBindOverride;
             const autoBindValue = override === undefined ? 'follow' : override ? 'on' : 'off';
             return (
-              <tr key={slotId}>
+              // T22/D9: the missing-icon repair entry reveals this exact row.
+              <tr key={slotId} data-testid={`slot-row-${String(slotId)}`}>
                 <td>Slot {slotId}</td>
                 <td>
                   <select
@@ -1081,7 +1094,8 @@ function RulesSection() {
         <tbody>
           {filteredRules.map((rule) => (
             <Fragment key={rule.id}>
-              <tr className={rule.enabled === false ? 'tbs-settings__row--disabled' : ''}>
+              {/* T22/D9: the missing-icon repair entry reveals this exact row. */}
+              <tr className={rule.enabled === false ? 'tbs-settings__row--disabled' : ''} data-testid={`rule-row-${rule.id}`}>
                 <td>
                   <input
                     type="checkbox"
@@ -2340,7 +2354,7 @@ const DIMENSION_LABELS: ReadonlyArray<{ dim: keyof DimensionPresence; label: str
   { dim: 'shortcuts', label: 'Shortcuts' },
 ];
 
-function ImportExportSection() {
+function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot' | 'rule', id: number | string) => void }) {
   const [importing, setImporting] = useState(false);
   /**
    * The file string READ AT INSPECT. APPLY sends THIS exact string (D12:
@@ -2359,6 +2373,12 @@ function ImportExportSection() {
    */
   const [current, setCurrent] = useState<SyncState | null>(null);
   const [intent, setIntent] = useState<ImportIntent>(() => defaultImportIntent());
+  /**
+   * T22: the APPLY result (C11 one-shot list) + the pre-apply diff snapshot used
+   * for the per-record success rows. Both are cleared by every new file/cancel.
+   */
+  const [applyResult, setApplyResult] = useState<ImportApplyResult | null>(null);
+  const [appliedDiff, setAppliedDiff] = useState<ImportDiff | null>(null);
   /** The quantized confirmation is CONSTANT (D7) — opened by Apply, always. */
   const [confirming, setConfirming] = useState(false);
   const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
@@ -2381,6 +2401,8 @@ function ImportExportSection() {
     setFile(null);
     setPkg(null);
     setCurrent(null);
+    setApplyResult(null);
+    setAppliedDiff(null);
     try {
       const text = typeof chosen.text === 'function' ? await chosen.text() : '';
       const res = await sendMessage('IMPORT_INSPECT', { file: text });
@@ -2468,11 +2490,18 @@ function ImportExportSection() {
     setConfirming(false);
     setImporting(true);
     try {
+      // T22: snapshot the diff the user is about to apply, using the SAME pure
+      // function and the SAME `(pkg, current, intent)` the D7 count used. Taken
+      // BEFORE the write (the write clears replaced records' icon slots).
+      const snapshotDiff =
+        pkg && current ? computeDiff(pkg, current, intent) : null;
       // D12: the SAME string read at INSPECT; C3/F4: bind to the INSPECT version.
       const res = await sendMessage('IMPORT_APPLY', { file, intent }, inspection.configVersion);
       const result = extractResult(res);
       if (result?.success) {
         setToast({ variant: 'success', message: 'Import applied' });
+        setApplyResult(extractApplyResult(res));
+        setAppliedDiff(snapshotDiff);
         setInspection(null);
         setFile(null);
         setPkg(null);
@@ -2608,7 +2637,7 @@ function ImportExportSection() {
           })}
 
           <div className="tbs-settings__import-actions">
-            <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); setPkg(null); setCurrent(null); }}>Cancel</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); setPkg(null); setCurrent(null); setApplyResult(null); setAppliedDiff(null); }}>Cancel</Button>
             <Button
               size="sm"
               variant="primary"
@@ -2620,6 +2649,105 @@ function ImportExportSection() {
             </Button>
           </div>
         </div>
+      )}
+
+      {/* T22 (§4.3): the result list after APPLY. Each group renders ONLY when
+          it has content — an empty shell would be noise. D15: the domain
+          violations group is SEPARATE from the tolerant group and has no
+          dismiss affordance (it is a safety disclosure, not a choice). */}
+      {applyResult && (
+        <section className="tbs-settings__import-result" data-testid="import-result" aria-label="Import result">
+          <h3>Import result</h3>
+
+          <div className="tbs-settings__result-counts" data-testid="import-result-counts">
+            {(['added', 'replaced', 'kept', 'deleted', 'skipped'] as const).map((key) => (
+              <span key={key} data-testid={`import-result-count-${key}`}>
+                {key}: {applyResult.counts[key]}
+              </span>
+            ))}
+          </div>
+
+          {appliedDiff && appliedDiff.records.length > 0 && (
+            <ul className="tbs-settings__result-records">
+              {appliedDiff.records.map((r) => (
+                <li key={`${r.kind}-${String(r.id)}`} data-testid={`import-result-record-${r.kind}-${String(r.id)}`}>
+                  {r.label} <span>{r.status}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {applyResult.tolerant.length > 0 && (
+            <details className="tbs-settings__result-tolerant" data-testid="import-tolerant">
+              <summary data-testid="import-tolerant-summary">
+                {applyResult.tolerant.length} fields in this package will be ignored or defaulted (expand to view)
+              </summary>
+              <ul>
+                {applyResult.tolerant.map((t, i) => (
+                  <li key={`${t.detail}-${String(i)}`} data-testid={`import-tolerant-item-${String(i)}`}>
+                    {t.detail}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          {applyResult.domainViolations.length > 0 && (
+            <div className="tbs-settings__result-violations" data-testid="import-violations" role="alert">
+              <h4>Records skipped (unsafe)</h4>
+              <ul>
+                {applyResult.domainViolations.map((v) => (
+                  <li key={`${v.kind}-${String(v.id)}`} data-testid={`import-violation-${v.kind}-${String(v.id)}`}>
+                    {v.kind} {String(v.id)}: {v.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {applyResult.missingIcons.length > 0 && (
+            <div className="tbs-settings__result-missing" data-testid="import-missing-icons">
+              <h4>{applyResult.missingIcons.length} icons need to be re-selected</h4>
+              <ul>
+                {applyResult.missingIcons.map((m) => (
+                  <li key={`${m.kind}-${String(m.id)}`}>
+                    {m.kind} {String(m.id)}
+                    {/* D9: repair = go to the record's own home surface; the
+                        record's EXISTING editor does the edit. No new component,
+                        and NO state is persisted (C9: no "needs re-selection" marker). */}
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      data-testid={`import-missing-repair-${m.kind}-${String(m.id)}`}
+                      onClick={() => { onJumpToRecord(m.kind, m.id); }}
+                    >
+                      Re-select icon
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {applyResult.overlaps.length > 0 && (
+            <div className="tbs-settings__result-overlaps" data-testid="import-overlaps">
+              <h4>{applyResult.overlaps.length} match overlaps after import (same Match URL + Match Type)</h4>
+              <ul>
+                {applyResult.overlaps.map((o, i) => (
+                  <li key={`${o.urlMatch.value}-${String(i)}`} data-testid={`import-overlap-${String(i)}`}>
+                    {o.urlMatch.value} — {o.recordIds.map(String).join(', ')}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {applyResult.shortcutGuidance && (
+            <p className="tbs-settings__result-shortcut" data-testid="import-shortcut-guidance">
+              {applyResult.shortcutGuidance}
+            </p>
+          )}
+        </section>
       )}
 
       {/* D7: the quantized confirmation is CONSTANT — opened by Apply, even with
@@ -2781,6 +2909,30 @@ export function SettingsApp() {
   // P11: top-level three-state — loading / failed / loaded
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** T22/D9: a record the result list asked to reveal (repair entry target). */
+  const [importFocus, setImportFocus] = useState<{ kind: 'slot' | 'rule'; id: number | string } | null>(null);
+
+  /**
+   * T22/D9: reveal the record the missing-icon entry points at. Reuses the
+   * app's ONE jump visual language (`JUMP_HIGHLIGHT_CLASS`); it reads the live
+   * DOM so the record simply has to be rendered by the surface we switched to.
+   * No write, no persisted marker (C9).
+   */
+  useEffect(() => {
+    if (!importFocus) return;
+    const selector = importFocus.kind === 'slot'
+      ? `[data-testid="slot-row-${String(importFocus.id)}"]`
+      : `[data-testid="rule-row-${String(importFocus.id)}"]`;
+    const el = document.querySelector<HTMLElement>(selector);
+    if (!el) return; // surface not rendered yet; a later render re-runs this
+    // jsdom has no layout engine; a missing scroll must never cost the
+    // highlight (the cue is the point) — mirror the dashboard's approach.
+    if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+    el.classList.add(JUMP_HIGHLIGHT_CLASS);
+    const timer = setTimeout(() => { el.classList.remove(JUMP_HIGHLIGHT_CLASS); }, JUMP_HIGHLIGHT_MS);
+    setImportFocus(null);
+    return () => { clearTimeout(timer); };
+  }, [importFocus]);
 
   // Load state
   const loadState = useCallback(async () => {
@@ -2995,7 +3147,16 @@ export function SettingsApp() {
             {activeSection === 'dashboard' && <DashboardSection />}
             {activeSection === 'import-export' && (
               <>
-                <ImportExportSection />
+                {/* D9: the missing-icon repair entry sends the user to the
+                    record's OWN surface (slot table / rules table) — that
+                    surface's existing editor does the edit. Nothing is
+                    persisted here (C9: no "needs re-selection" marker). */}
+                <ImportExportSection
+                  onJumpToRecord={(kind, id) => {
+                    setActiveSection(kind === 'slot' ? 'slots' : 'rules');
+                    setImportFocus({ kind, id });
+                  }}
+                />
                 <ExportSection />
               </>
             )}

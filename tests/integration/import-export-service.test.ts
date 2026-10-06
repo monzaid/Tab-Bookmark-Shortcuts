@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+﻿import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { ImportExportService } from '@background/import-export-service';
+import { IconService } from '@background/icon-service';
 import type { SlotDefinition, ImportSlotConflict, MatchRuleSettings } from '@shared/types';
 
 const SETTINGS_B: MatchRuleSettings = { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' };
@@ -17,7 +18,7 @@ describe('T13: JSON import/export, merge preview, single commit', () => {
     adapter.reset();
     repo = new StorageRepository(adapter);
     await repo.initialize();
-    service = new ImportExportService(repo);
+    service = new ImportExportService(repo, new IconService(repo));
   });
 
   const makeSlot = (id: number, url: string): SlotDefinition => ({

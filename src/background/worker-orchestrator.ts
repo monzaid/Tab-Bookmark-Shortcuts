@@ -152,7 +152,7 @@ export class WorkerOrchestrator {
     this.recoveryService = new RecoveryService(adapter, this.repo);
     this.ruleService = new RuleService(adapter, this.repo);
     this.iconService = new IconService(this.repo);
-    this.importExportService = new ImportExportService(this.repo);
+    this.importExportService = new ImportExportService(this.repo, this.iconService);
     this.diagnostics = new DiagnosticsService(adapter, this.repo);
     this.notifications = new NotificationService(adapter);
     this.incognito = new IncognitoService(adapter);
@@ -817,6 +817,9 @@ export class WorkerOrchestrator {
           request.payload.file,
           request.payload.intent,
           expectedVersion,
+          // D4: pass the platform capability so APPLY can emit manual-set-up
+          // guidance for the shortcut dimension (Chrome/Edge).
+          { commandsUpdateSupported: this.adapter.commands.updateSupported() },
         );
       }
 
