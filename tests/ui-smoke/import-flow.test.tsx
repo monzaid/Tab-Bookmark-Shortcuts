@@ -342,16 +342,30 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await openImportSection();
     await selectFile();
 
+    // Re-arm the check: the default accepts every row, so on its own this loop
+    // would only ever see `checked === true` and lose its power to catch a
+    // second, drifting boolean. Declining one both-sides row puts an unchecked
+    // row BACK in the set, so the loop must still hold in both directions.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Take S2' }));
+
     const rows = Array.from(
       screen.getByTestId('import-diff').querySelectorAll('ul.tbs-settings__import-records > li'),
     );
     expect(rows.length).toBeGreaterThan(0);
 
+    // Neither direction may be vacuous: there IS an unchecked-and-kept row and
+    // there ARE checked rows, and each row's box still equals its own status.
+    let unchecked = 0;
+    let checked = 0;
     for (const row of rows) {
       const box = row.querySelector('input[type="checkbox"]') as HTMLInputElement;
       const status = row.querySelector('.tbs-status-badge__label')?.textContent ?? '';
       expect(box.checked, `${status} row`).toBe(status !== 'kept');
+      if (box.checked) checked += 1;
+      else unchecked += 1;
     }
+    expect(unchecked).toBeGreaterThan(0);
+    expect(checked).toBeGreaterThan(0);
   });
 
   it('a declined file-missing row stays declined when the mode switches to overwrite (one source)', async () => {

@@ -250,7 +250,7 @@ export interface ImportIntent {
     settings: DimensionMode;
     shortcuts: DimensionMode;
   };
-  /** Sparse: only rows the user actually changed. */
+  /** Seeded at file-open for every non-`added` row, then edited per row (A4). */
   recordOverrides?: ImportRecordOverride[];
 }
 

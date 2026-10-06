@@ -2422,11 +2422,8 @@ const RECORD_BADGE: Record<ImportRecordStatus, StatusBadgeProps['status']> = {
 };
 
 /**
- * The one plain default intent (incremental, no overrides).
- *
- * A VALUE, not a call: `resetIntent` runs inside a state updater, and an updater
- * must be pure — `defaultImportIntent()` mints a fresh object per call, so using
- * it in the `prev === DEFAULT_INTENT` identity check would never match.
+ * The one plain default intent (incremental, no overrides). A VALUE, not a call,
+ * so the per-open derivation can name it without minting a throwaway object.
  */
 const DEFAULT_INTENT: ImportIntent = defaultImportIntent();
 
@@ -2438,10 +2435,14 @@ const DEFAULT_INTENT: ImportIntent = defaultImportIntent();
  * Applicability is decided by the diff against the LIVE state: `added` cannot
  * honour `keep` (the file's own records are always applied), so it gets no
  * override. Without a usable current state there is no diff to read this from,
- * so the plain {@link DEFAULT_INTENT} stands.
+ * so the plain default (no overrides) stands.
+ *
+ * The fallback returns a FRESH object rather than the shared {@link DEFAULT_INTENT}
+ * constant: the intent lives in state and callers edit it, so handing out one
+ * module-level instance invites an in-place edit that would leak across renders.
  */
 function defaultIntentFor(pkg: ExportPackage | null, current: SyncState | null): ImportIntent {
-  if (!pkg || !current) return DEFAULT_INTENT;
+  if (!pkg || !current) return defaultImportIntent();
   const diff = computeDiff(pkg, current, DEFAULT_INTENT);
   const allTake: ImportRecordOverride[] = diff.records
     .filter((r) => r.status !== 'added')
