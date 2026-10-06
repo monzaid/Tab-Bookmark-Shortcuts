@@ -15,8 +15,10 @@
  *
  * Behaviour is otherwise the SAME as the regex it replaces: a line comment keeps
  * its trailing newline, a block comment is removed whole (inner newlines
- * included) - so the stripped text differs only where a comment delimiter sat
- * inside a string.
+ * included) - so for valid source the stripped text differs only where a comment
+ * delimiter sat inside a string. (An unterminated block comment also differs -
+ * this machine drops the rest, the regex left it - but such source cannot
+ * compile, so it is outside what the guards are ever handed.)
  */
 
 /** Strip comments, string-aware. See the header note for why it is a machine. */
