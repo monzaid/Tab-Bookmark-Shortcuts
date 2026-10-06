@@ -170,7 +170,15 @@ function makeFile(text: string): File {
  */
 let failStateRead = false;
 
-function installMock(inspection: ImportInspection = DEFAULT_INSPECTION) {
+/**
+ * The text the file input yields. Defaults to the shared package; a case that
+ * injects an inspection built from a DIFFERENT package must set this too, or the
+ * UI's own recompute (from the file) and the injected inspection would disagree —
+ * in production both derive from the same file text.
+ */
+let fileText = FILE_TEXT;
+
+function installMock(inspection: ImportInspection = DEFAULT_INSPECTION, current: SyncState = CURRENT) {
   mockSendMessage.mockImplementation((msg: { action?: string }) => {
     if (msg.action === 'IMPORT_INSPECT') {
       return Promise.resolve({ result: { success: true, inspection } });
@@ -187,7 +195,7 @@ function installMock(inspection: ImportInspection = DEFAULT_INSPECTION) {
     return Promise.resolve({
       result: {
         success: true,
-        sync: { ...CURRENT },
+        sync: { ...current },
         local: {
           bindings: [], cycleCursors: [], lastSuccessSlotId: null,
           recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [],
@@ -197,8 +205,19 @@ function installMock(inspection: ImportInspection = DEFAULT_INSPECTION) {
   });
 }
 
-async function openImportSection(inspection: ImportInspection = DEFAULT_INSPECTION) {
-  installMock(inspection);
+/**
+ * `current` is the machine state GET_STATE reports. The inspector diffs the SAME
+ * state in production (an inspection is intent-independent and computed against
+ * the live state), so a case that diffs a different basis must pass it here too —
+ * otherwise the UI's own recompute and the injected inspection would disagree.
+ */
+async function openImportSection(
+  inspection: ImportInspection = DEFAULT_INSPECTION,
+  current: SyncState = CURRENT,
+  pkgText: string = FILE_TEXT,
+) {
+  fileText = pkgText;
+  installMock(inspection, current);
   const { SettingsApp } = await import('@ui/settings/App');
   render(<SettingsApp />);
   const nav = await screen.findByRole('button', { name: 'Import / Export' });
@@ -208,7 +227,7 @@ async function openImportSection(inspection: ImportInspection = DEFAULT_INSPECTI
 
 async function selectFile() {
   const input = screen.getByTestId('import-file-input');
-  fireEvent.change(input, { target: { files: [makeFile(FILE_TEXT)] } });
+  fireEvent.change(input, { target: { files: [makeFile(fileText)] } });
   await screen.findByTestId('import-diff');
 }
 
@@ -292,10 +311,64 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
 
     // Slot 1 is file-missing; incremental keeps it unless explicitly taken.
     expect(screen.getByTestId('import-mode-slots')).toHaveValue('incremental');
-    fireEvent.click(screen.getByRole('button', { name: 'Take S1' }));
+    // The accept control is a checkbox whose checked state VIEWS the row status;
+    // slot 1 is `kept` under incremental, so its box starts unchecked.
+    const keepS1 = screen.getByRole('checkbox', { name: 'Take S1' });
+    expect(keepS1).not.toBeChecked();
+    fireEvent.click(keepS1);
 
     const dialog = await openConfirmDialog();
     expect(dialog.textContent).toMatch(/delete 1 slots/i);
+  });
+
+  it('keeps the checkbox, the status badge and the delete count in lockstep (one source)', async () => {
+    // The checkbox is a VIEW of the live row status, not a second boolean. This
+    // walks EVERY record row and asserts checked ⟺ status !== 'kept', so a
+    // regression that reintroduced an independent flag would drift and red here.
+    await openImportSection();
+    await selectFile();
+
+    const rows = Array.from(
+      screen.getByTestId('import-diff').querySelectorAll('ul.tbs-settings__import-records > li'),
+    );
+    expect(rows.length).toBeGreaterThan(0);
+
+    for (const row of rows) {
+      const box = row.querySelector('input[type="checkbox"]') as HTMLInputElement;
+      const status = row.querySelector('.tbs-status-badge__label')?.textContent ?? '';
+      expect(box.checked, `${status} row`).toBe(status !== 'kept');
+    }
+  });
+
+  it('switching a dimension to overwrite CHECKS its file-missing rows and warns — one source', async () => {
+    // The trap this guards: `take` is not "no override". Under incremental a
+    // file-missing row is UNCHECKED and uncounted; switching to overwrite makes
+    // it `deleted` ⇒ the box is checked AND the count includes it. The box is a
+    // view of the status, so the two cannot disagree.
+    await openImportSection();
+    await selectFile();
+
+    const keepS1 = screen.getByRole('checkbox', { name: 'Take S1' });
+    expect(keepS1).not.toBeChecked(); // incremental: file-missing is kept
+
+    fireEvent.change(screen.getByTestId('import-mode-slots'), { target: { value: 'overwrite' } });
+    expect(screen.getByRole('checkbox', { name: 'Take S1' })).toBeChecked();
+
+    const dialog = await openConfirmDialog();
+    expect(dialog.textContent).toMatch(/delete 2 slots/i);
+  });
+
+  it('a file-only row is accepted and cannot be declined (added is always applied)', async () => {
+    // `added` cannot honour `keep`: the package's own records are always applied,
+    // so the control is checked and DISABLED rather than a dead toggle.
+    await openImportSection();
+    await selectFile();
+
+    // r4 has no title, so its accessible name is the match URL (as the Keep/Take
+    // buttons always were); query by the row's own testid to stay unambiguous.
+    const added = screen.getByTestId('import-record-rule-r4');
+    expect(added).toBeChecked();
+    expect(added).toBeDisabled();
   });
 
   it('T20a: a record row expands to field-level lines, decoded not raw (A12/D9)', async () => {
@@ -341,8 +414,12 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
       ...base,
       dimensionModes: { ...base.dimensionModes, slots: 'overwrite' as const },
     };
-    await openImportSection(makeInspection(PKG, CURRENT, 5, overwriteSlots));
+    await openImportSection(makeInspection(PKG, CURRENT, 5, overwriteSlots), CURRENT);
     await selectFile();
+    // The UI recomputes the diff under its OWN intent, so set the mode to
+    // overwrite too — otherwise the live view (incremental ⇒ kept) would differ
+    // from the injected inspection. In production both come from the user's mode.
+    fireEvent.change(screen.getByTestId('import-mode-slots'), { target: { value: 'overwrite' } });
 
     const title = screen.getByTestId('import-field-slot-1-title').textContent;
     expect(title).toBe('Title: removed (S1)');
@@ -434,7 +511,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
       ...PKG,
       slots: [{ id: 7, urlMatch: exact('https://moved.example/'), titleSnapshot: 'S7', faviconSnapshot: '', marker: {} }],
     };
-    await openImportSection(makeInspection(file, target));
+    await openImportSection(makeInspection(file, target), target, JSON.stringify(file));
     await selectFile();
 
     const text = screen.getByTestId('import-fields-slot-7').textContent;
@@ -449,7 +526,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
       ...PKG,
       slots: [...(PKG.slots ?? [])].reverse(),
     };
-    await openImportSection(makeInspection(reversed, CURRENT));
+    await openImportSection(makeInspection(reversed, CURRENT), CURRENT, JSON.stringify(reversed));
     await selectFile();
 
     const rows = screen.getByTestId('import-dim-slots')
@@ -472,7 +549,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
       ...PKG,
       slots: [{ ...FILE_SLOT_2, titleSnapshot: '' }],
     };
-    await openImportSection(makeInspection(untitledPkg, untitled));
+    await openImportSection(makeInspection(untitledPkg, untitled), untitled, JSON.stringify(untitledPkg));
     await selectFile();
 
     const slots = screen.getByTestId('import-dim-slots');
@@ -490,7 +567,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
       ...PKG,
       slots: [{ id: 7, urlMatch: exact('https://s7.example/'), titleSnapshot: '', faviconSnapshot: '', marker: {} }],
     };
-    await openImportSection(makeInspection(file, target));
+    await openImportSection(makeInspection(file, target), target, JSON.stringify(file));
     await selectFile();
 
     const row = screen.getByTestId('import-dim-slots')

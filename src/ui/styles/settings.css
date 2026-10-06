@@ -562,8 +562,8 @@
 }
 
 /* T22: the single-page diff surface (D6). Records the dimensions, their mode
-   selector and the per-record Keep/Take rows as ONE bordered block, so the diff
-   reads as a unit rather than a run of loose headings. */
+   selector and the per-record keep/take checkboxes as ONE bordered block, so the
+   diff reads as a unit rather than a run of loose headings. */
 .tbs-settings__import-diff {
   margin-top: var(--space-lg);
   padding: var(--space-md);
@@ -611,6 +611,21 @@
 .tbs-settings__import-records > li > span:first-child {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* The per-record accept control: a checkbox that VIEWS the row status. */
+.tbs-settings__import-take {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.tbs-settings__import-take:has(input:disabled) {
+  cursor: default;
+  opacity: 0.7;
 }
 
 /* No `> li > span:nth-child(2)` colour rule here: the status is a StatusBadge

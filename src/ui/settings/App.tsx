@@ -2537,6 +2537,16 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
     return quantifyDeletions(applyIntent(pkg, current, intent), current);
   }, [pkg, current, intent]);
 
+  /**
+   * The LIVE diff — recomputed under the user's CURRENT intent, the same call
+   * APPLY performs. The inspection's own diff is intent-independent (default
+   * intent), so reading it after a mode/record change would describe a different
+   * outcome than the write. Before `current` loads there is nothing to recompute
+   * against, so the inspection's diff is used as-is.
+   */
+  const liveDiff: ImportDiff | undefined =
+    current && pkg ? computeDiff(pkg, current, intent) : inspection?.diff;
+
   /** D7/A9: the confirmation copy is CONSTANT (even at 0 deletions). */
   const quantizedMessage = (() => {
     if (deletionCounts === null) {
@@ -2659,7 +2669,8 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
       {inspection && (
         <div className="tbs-settings__import-diff" data-testid="import-diff" role="region" aria-label="Import diff">
           {DIMENSION_LABELS.map(({ dim, label }) => {
-            const records = inspection.diff.records.filter((r) =>
+            // Live records (status under the CURRENT intent) — see `liveDiff`.
+            const records = (liveDiff?.records ?? []).filter((r) =>
               dim === 'slots' ? r.kind === 'slot' : dim === 'rules' ? r.kind === 'rule' : false,
             );
             // Display order only: slots are a numbered 1–10 set, so showing them
@@ -2700,27 +2711,31 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
                               {r.kind === 'slot' ? slotRowLabel(Number(r.id), r.label) : r.label}
                             </span>
                             <StatusBadge status={RECORD_BADGE[r.status]} label={r.status} />
-                            {/* Reuse the shared Button so the actions match every
-                                other button on the page; the `aria-label`s are the
-                                test anchors and stay EXACTLY as before. */}
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="secondary"
-                              aria-label={`Keep ${r.label}`}
-                              onClick={() => { setRecordAction(r.kind, r.id, 'keep'); }}
-                            >
-                              Keep
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="secondary"
-                              aria-label={`Take ${r.label}`}
-                              onClick={() => { setRecordAction(r.kind, r.id, 'take'); }}
-                            >
+                            {/* A4 checkpoint: the checkbox is a VIEW of the live
+                                row status, not a second boolean that could drift
+                                from it — checked ⟺ `status !== 'kept'`, and
+                                toggling writes a sparse keep/take override, after
+                                which the diff is recomputed and the view follows.
+                                The accessible name stays `Take <label>` (the test
+                                anchor); the label text is fixed for all rows. */}
+                            <label className="tbs-settings__import-take">
+                              <input
+                                type="checkbox"
+                                data-testid={`import-record-${r.kind}-${String(r.id)}`}
+                                checked={r.status !== 'kept'}
+                                aria-label={`Take ${r.label}`}
+                                // `added` cannot be declined yet: the incoming
+                                // package's own records are always applied, so a
+                                // `keep` override would be a control that lies.
+                                // Disabled + explained until the diff honours it.
+                                disabled={r.status === 'added'}
+                                title={r.status === 'added' ? 'New records from the file are always applied' : undefined}
+                                onChange={(e) => {
+                                  setRecordAction(r.kind, r.id, e.currentTarget.checked ? 'take' : 'keep');
+                                }}
+                              />
                               Take
-                            </Button>
+                            </label>
                             {/* A12: record level by default, field level on
                                 demand. The values are DECODED (import-field-format)
                                 — raw diff signatures never reach the DOM (D9). */}
