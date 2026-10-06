@@ -18,6 +18,27 @@ import type { ExportPackage, PortableSettings, PortableSlotDef } from '@shared/e
  * Added in the same change: the Ruling-4 settings guard, asserted on BOTH new
  * entry points (INSPECT and APPLY parse the file independently, so covering one
  * would leave the other writable).
+ *
+ * REMOVED-CASE MAPPING (the suite is smaller by design — each legacy case either
+ * moved or became obsolete; none was dropped for convenience):
+ *   generatePreview: malformed JSON       → `structural gate` here
+ *   generatePreview: unknown version /
+ *                    missing slots array  → `structural gate` here (schemaVersion gate)
+ *   generatePreview: T1 RED ④ (settings) → `Ruling 4 …` here (DUAL-PATH) +
+ *                                          worker-import-export-rejection.test.ts
+ *   generatePreview: dangerous regex (D15)→ `D15 …` here; also import-apply-result /
+ *                                          import-icon-slot-clearing
+ *   generatePreview: read-only             → `inspect writes nothing …` here
+ *   exportConfig: excludes local data      → STRUCTURAL, not a test: the package
+ *                                            schema (`PortableSlotDef`/`PortableRule`)
+ *                                            has no local fields and
+ *                                            `syncStateToPackage` reads `SyncState`
+ *                                            only — nothing to assert per-case
+ *   commitImport: per-slot decision /
+ *                 keep-existing / bulk   → OBSOLETE: the intent + per-record
+ *                                          override model replaced slot decisions
+ *                                          (import-diff unit + import-flow ui-smoke)
+ *   commitImport: stale version (TOCTOU)   → import-apply-version-binding.test.ts
  */
 
 const SETTINGS_A: MatchRuleSettings = { tabIdMode: 'exists', ruleCheckMode: 'no-match', priority: 'tabId' };
