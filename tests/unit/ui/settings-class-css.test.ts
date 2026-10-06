@@ -15,7 +15,6 @@ import { describe, expect, it } from 'vitest';
  */
 const UI_ROOT = resolve(process.cwd(), 'src/ui');
 const CSS_DIR = resolve(process.cwd(), 'src/ui/styles');
-const APP = resolve(UI_ROOT, 'settings/App.tsx');
 const CLASS_TOKEN = /tbs-settings__[a-zA-Z0-9_-]+/g;
 
 /**
@@ -58,14 +57,20 @@ function stylesheets(): string {
     .join('\n');
 }
 
-/** Classes used in `source` that no stylesheet defines. */
+/**
+ * Classes used in `source` that no stylesheet defines. Comments are stripped on
+ * BOTH sides: a mention in prose is not a usage, and — just as importantly — a
+ * selector written inside a CSS comment is not a DEFINITION. Stripping only the
+ * source would let a commented-out selector satisfy a class that no rule styles.
+ */
 function undefinedClasses(source: string, css: string): string[] {
   const used = new Set([...stripComments(source).matchAll(CLASS_TOKEN)].map((m) => m[0]));
+  const defined = stripComments(css);
   return [...used].filter((c) => {
     if (DYNAMIC_CLASS_ALLOWLIST.includes(c)) return false;
     // The trailing guard keeps `__import-dim` from being satisfied by
     // `__import-dim-something`; a class is defined only by its OWN selector.
-    return !new RegExp(`${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-zA-Z0-9_-])`).test(css);
+    return !new RegExp(`${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-zA-Z0-9_-])`).test(defined);
   });
 }
 
@@ -134,6 +139,14 @@ describe('settings classes ↔ stylesheets', () => {
 
     for (const c of MUST_FLAG) expect(undefinedClasses(c, css), `MUST_FLAG: ${c}`).toEqual([c]);
     for (const c of MUST_NOT_FLAG) expect(undefinedClasses(c, css), `MUST_NOT_FLAG: ${c}`).toEqual([]);
+
+    // A class only "defined" inside a CSS comment is NOT defined: the source
+    // strips comments, so the stylesheet must strip them too, or a commented-out
+    // selector would read as a definition and the class would render unstyled.
+    const commented = `/* .tbs-settings__commented-out-only { color: red; } */\n`;
+    expect(undefinedClasses('tbs-settings__commented-out-only', commented)).toEqual([
+      'tbs-settings__commented-out-only',
+    ]);
   });
 });
 
@@ -146,7 +159,13 @@ describe('affordance matches behaviour', () => {
    */
   it('does not style the import zone as a drop target unless a drop handler exists', () => {
     const dropCue = importZoneIsDropCue(stylesheets());
-    const hasDropHandler = /onDrop|onDragOver/.test(stripComments(readFileSync(APP, 'utf8')));
+    // The handler is looked for in EVERY source under src/ui, not just App.tsx:
+    // reading one file would make the guard silently blind if the import zone is
+    // ever moved — the same "scope narrower than the claim" bug this file already
+    // fixed for the class scan.
+    const hasDropHandler = walk(UI_ROOT)
+      .filter((f) => /\.tsx?$/.test(f))
+      .some((f) => /onDrop|onDragOver/.test(stripComments(readFileSync(f, 'utf8'))));
     expect(dropCue && !hasDropHandler).toBe(false);
   });
 });
