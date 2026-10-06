@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Portable export package — independent transfer schema + bidirectional mapping.
  *
  * A14: the package deliberately does NOT mirror `SyncState`. It carries only
@@ -98,21 +98,37 @@ export interface ExportPackage {
 }
 
 /**
- * C8: the DECLARED field names of the package shapes above.
+ * C8: the DECLARED field names of the package shapes above — the key sets the
+ * "unknown extra field" tolerant reader compares against.
  *
- * This table exists so the "unknown extra field" tolerant reader has ONE source
- * of truth. It is deliberately in this file, ADJACENT to the interfaces it
- * mirrors — TypeScript erases types at runtime, so a runtime allowlist cannot be
- * derived from them; keeping it here is the closest thing to a single owner.
+ * Kept in this file, ADJACENT to the interfaces it mirrors, because a runtime
+ * key list cannot be derived from a type (types are erased). The key sets are
+ * therefore spelled out as `as const satisfies Record<keyof T, true>`: the
+ * mapped type is EXHAUSTIVE, so ADDING A FIELD to any shape above without
+ * mirroring it here is a COMPILE error, not a silent gap.
  *
- * ⚠️ CHANGE A SHAPE ABOVE ⇒ CHANGE THIS TABLE. A drift makes the tolerant
- * reader either mis-report a known field or silently accept a renamed one.
+ * Scope is deliberate: only the package root and each `slots[]` / `rules[]`
+ * item are walked. Deeper interiors (`urlMatch`, `marker`, `icon`) are NOT
+ * inspected — a bounded report, not a schema walker.
  */
+const ROOT_KEYS = {
+  schemaVersion: true, generator: true, exportedAt: true, scope: true,
+  slots: true, rules: true, settings: true, shortcuts: true,
+} as const satisfies Record<keyof ExportPackage, true>;
+
+const SLOT_KEYS = {
+  id: true, urlMatch: true, autoBindOverride: true, marker: true,
+  titleSnapshot: true, faviconSnapshot: true,
+} as const satisfies Record<keyof PortableSlotDef, true>;
+
+const RULE_KEYS = {
+  id: true, urlMatch: true, priority: true, title: true, favicon: true, enabled: true,
+} as const satisfies Record<keyof PortableRule, true>;
+
 export const PACKAGE_FIELD_ALLOWLIST = {
-  root: ['schemaVersion', 'generator', 'exportedAt', 'scope', 'slots', 'rules', 'settings', 'shortcuts'],
-  slot: ['id', 'urlMatch', 'autoBindOverride', 'marker', 'titleSnapshot', 'faviconSnapshot'],
-  rule: ['id', 'urlMatch', 'priority', 'title', 'favicon', 'enabled'],
-  icon: ['kind', 'url', 'ref', 'bgColor', 'text', 'textColor'],
+  root: Object.keys(ROOT_KEYS),
+  slot: Object.keys(SLOT_KEYS),
+  rule: Object.keys(RULE_KEYS),
 } as const;
 
 /** A partial config derived from a package, ready to be merged by the service. */

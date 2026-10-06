@@ -113,6 +113,42 @@ describe('T22 — APPLY result: missing icons (C11/D9)', () => {
     expect(result.result.missingIcons).toHaveLength(0);
   });
 
+  it('T22 judgment: reports a REPLACED record even when the target has its OWN blob (write-after probe)', async () => {
+    // The one case that discriminates "probe after the write" from "probe before":
+    // the target machine DOES have a blob for the same key, but the import
+    // REPLACES the record, so that blob is cleared (C10) and the carried file
+    // reference no longer resolves. A pre-write probe would find the stale blob
+    // and wrongly report nothing.
+    const ref = 'local-icon:icon:rule-R';
+    await repo.addRule({
+      id: 'rule-R',
+      urlMatch: exact('https://a.example/'),
+      priority: 0,
+      title: 'OLD', // differs from the package title ⇒ `replaced`, not `kept`
+      favicon: { type: 'upload', value: ref },
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    // The target's OWN blob, under the key the reference resolves to
+    // (`reference.slice(LOCAL_ICON_REF_PREFIX.length)`).
+    adapter.state.localStorage['icon:rule-R'] = 'data:image/png;base64,TARGETOWN';
+
+    const result = await service.applyImport(
+      pkgString({
+        rules: [rule('rule-R', 'https://a.example/', {
+          title: 'NEW',
+          favicon: { kind: 'local-ref', ref },
+        })],
+      }),
+      defaultImportIntent(),
+      repo.getConfigVersion(),
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    expect(result.result.missingIcons).toContainEqual({ kind: 'rule', id: 'rule-R' });
+  });
+
   it('does NOT report a record the intent DELETED (it no longer exists)', async () => {
     await repo.addRule(storedRefRule('rule-1', ICON_REF));
     const base = defaultImportIntent();
@@ -242,6 +278,27 @@ describe('T22 — tolerant reader: unknown extra fields (C8)', () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.result.tolerant).toHaveLength(0);
+  });
+
+  it('T22 §4: INSPECT and APPLY report the SAME tolerant list, in the same order', async () => {
+    // Both landings call the one `collectTolerant`; this compares their REAL
+    // outputs so a future edit to only one of them cannot pass silently.
+    const file = JSON.stringify({
+      schemaVersion: 1,
+      generator: { name: 'test', version: '1' },
+      exportedAt: '2026-10-05T00:00:00.000Z',
+      scope: {},
+      futureTopLevel: true,
+      rules: [{ id: 'r1', urlMatch: exact('https://a.example/'), priority: 0, mystery: 1 }],
+    });
+
+    const inspected = await service.inspect(file);
+    const applied = await service.applyImport(file, defaultImportIntent(), repo.getConfigVersion());
+    expect(inspected.success).toBe(true);
+    expect(applied.success).toBe(true);
+    if (!inspected.success || !applied.success) return;
+
+    expect(applied.result.tolerant).toEqual(inspected.inspection.tolerant);
   });
 
   it('also discloses unknown fields at INSPECT time (pre-check, C8)', async () => {
