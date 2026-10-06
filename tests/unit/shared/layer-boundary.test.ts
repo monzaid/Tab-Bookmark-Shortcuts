@@ -119,3 +119,56 @@ describe('layer boundary', () => {
     for (const s of MUST_NOT_FLAG) expect(flagged(s), `MUST_NOT_FLAG: ${s}`).toBe(false);
   });
 });
+
+const SRC_ROOT = resolve(process.cwd(), 'src');
+const TOKEN_OWNER = resolve(SRC_ROOT, 'shared/icon-ref.ts');
+
+describe('local-icon token ownership', () => {
+  /**
+   * The prefix literal has exactly ONE owner. Consumers must import the constant;
+   * a re-spelled literal (in any quote form) is what this guard exists for — it
+   * would let one side drift when the prefix changes.
+   *
+   * The pattern is deliberately the BARE `local-icon`, so every form is caught
+   * (`'…'`, `"…"`, a template literal, and `'local-icon:foo'`). A future
+   * `'local-icon-v2:'` also matches — that is CORRECT: a new variant should come
+   * from the owner (as a new constant) rather than a second literal.
+   */
+  it('keeps the local-icon token in its single owner', () => {
+    const files = walk(SRC_ROOT);
+
+    // Non-empty assertion: without it a renamed root would pass vacuously.
+    expect(files.length).toBeGreaterThan(0);
+
+    const offenders = files
+      .filter((f) => resolve(f) !== TOKEN_OWNER)
+      .filter((f) => /local-icon/.test(stripComments(readFileSync(f, 'utf8'))));
+
+    expect(offenders).toEqual([]);
+  });
+
+  /**
+   * Proves the detector can discriminate — a bare literal with no comment
+   * stripping would flag `icon-ref.ts`'s own prose (and `recipe-renderer.ts`'s).
+   */
+  it('flags every spelling of the token, and ignores prose', () => {
+    const flagged = (s: string) => /local-icon/.test(stripComments(s));
+
+    const MUST_FLAG = [
+      "const X = 'local-icon:';",
+      'const X = "local-icon:";',
+      'const X = `local-icon:`;',
+      "const X = 'local-icon:foo';",
+      "const X = 'local-icon-v2:';",
+    ];
+    const MUST_NOT_FLAG = [
+      '// it never matched `local-icon:` so it stayed unknown',
+      '/* local-icon: handled by the owner */',
+      "const ref = 'local-ref';",
+      "const kind = 'local-ref' as IconValueKind;",
+    ];
+
+    for (const s of MUST_FLAG) expect(flagged(s), `MUST_FLAG: ${s}`).toBe(true);
+    for (const s of MUST_NOT_FLAG) expect(flagged(s), `MUST_NOT_FLAG: ${s}`).toBe(false);
+  });
+});

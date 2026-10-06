@@ -1280,7 +1280,13 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         // the prefill (a recipe's fields went blank). Mirrors `seedIconFrom`.
         baselineIcon={initialIconSeed}
         onResetTitleEdit={() => { setTitleMode(defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' }); }}
-        onResetIconEdit={() => { const s = seedIconFrom(defaultIconSource, defaultIcon); setIconMode(s.mode); setIconConfig(s.iconConfig); }}
+        // Same expression as `baselineIcon`, so Reset restores exactly the opened
+        // draft. The editor's own ↺ also writes first (from its picker snapshot);
+        // THIS second write is authoritative and equals the baseline. Order
+        // matters: swapping the two would leave the round-tripped (normalized)
+        // value — a config-bearing draft's `value` becomes the dataUri — instead
+        // of the seeded shape.
+        onResetIconEdit={() => { setIconMode(initialIconSeed.mode); setIconConfig(initialIconSeed.iconConfig); }}
         onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
         onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
         submitMode={{ kind: 'immediate' }}

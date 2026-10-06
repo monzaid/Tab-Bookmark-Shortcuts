@@ -27,6 +27,9 @@ import type {
 } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 import { urlsMatch } from '@shared/url-utils';
+// The prefix has exactly ONE owner (`icon-ref.ts`); this alias keeps the local
+// name while importing the constant, so the literal is never re-spelled here.
+import { LOCAL_ICON_REF_PREFIX as ICON_REF_PREFIX } from '@shared/icon-ref';
 import { RecipeRenderer } from './recipe-renderer';
 
 // ─── Storage Keys ────────────────────────────────────────────────────────────
@@ -66,7 +69,6 @@ export interface PendingUndoSnapshot {
 
 /** Threshold (bytes) above which data URI icons are offloaded to local storage */
 export const ICON_OFFLOAD_THRESHOLD = 6 * 1024; // 6KB
-const ICON_REF_PREFIX = 'local-icon:';
 const ICON_STORAGE_PREFIX = 'icon:';
 
 /** Delay between retry attempts for transient storage failures */
