@@ -101,13 +101,18 @@ export function iconSourceToFieldSeed(source: IconSource): {
   mode: { kind: 'set'; value: string } | { kind: 'use-chain' };
   iconConfig?: IconConfig;
 } {
-  // A source read through the repository may be MATERIALIZED (a recipe carries
-  // the rendered PNG in `value`), so canonicalise before deciding the shape.
+  // Defensive canonicalisation: `canonicalIconSource` only clears a `template`'s
+  // materialized `value` and never its `type`, and neither branch below reads a
+  // template's `value` — `iconSourceToIconConfig` ignores it. So today this is a
+  // no-op for all three types. It is kept so the ONE branch that DOES read
+  // `.value` (a bare `url`) cannot later start leaking a render.
   const canonical = canonicalIconSource(source);
   if (canonical.type === 'template' || canonical.type === 'upload') {
     return { mode: { kind: 'set', value: '' }, iconConfig: iconSourceToIconConfig(canonical) };
   }
-  // `url`: no config carrier — the text field holds the value.
+  // `url`: no config carrier and `FieldMode` has no `url` variant, so the text
+  // field is the only carrier. Deliberately no `iconConfig` at all: an empty
+  // config object would make the adapter render "Custom" while storage says url.
   return { mode: { kind: 'set', value: canonical.value } };
 }
 
