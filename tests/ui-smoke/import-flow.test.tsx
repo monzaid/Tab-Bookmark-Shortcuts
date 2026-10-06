@@ -465,11 +465,14 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(icon).not.toMatch(/unchanged|None/);
   });
 
-  it('shows the Settings VALUES (globals + per-slot strategy), absent ≠ explicit inherit', async () => {
+  it('shows the Settings VALUES — three strategy states, all distinguishable', async () => {
     // The settings dimension carried values all along; this surfaces them. The
-    // contract that matters: a slot the FILE did not carry a strategy for reads
-    // `inherit (by default)` — that is NOT the same as an explicit `'inherit'`,
-    // which would reset the target. Both must be distinguishable.
+    // per-slot strategy has THREE states that must not collapse into one another:
+    //   absent (the file carries nothing for the slot) ⇒ `inherit (by default)`
+    //   explicit 'inherit'                            ⇒ `inherit`
+    //   an explicit MatchRuleSettings object          ⇒ a summary
+    // Absent is NOT explicit inherit (that resets the target); an object must not
+    // degrade to `inherit`.
     const withSettings: ExportPackage = {
       ...PKG,
       scope: { slots: true, rules: true, settings: true },
@@ -477,8 +480,11 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
         matchSettings: { tabIdMode: 'no-exists', ruleCheckMode: 'no-match', priority: 'none' },
         switchDirection: 'previous',
         autoBindGlobal: false,
-        // slot 2 has an explicit strategy; slot 1 (target-only) is ABSENT.
-        slotStrategies: { 2: 'inherit' },
+        // 1 = absent (target-only) · 2 = explicit 'inherit' · 3 = explicit object.
+        slotStrategies: {
+          2: 'inherit',
+          3: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' },
+        },
       },
     };
     const base = defaultImportIntent();
@@ -501,10 +507,14 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(box.textContent).toMatch(/Switch direction: next → previous/);
     expect(box.textContent).toMatch(/Auto-bind: true → false/);
 
-    // ABSENT (slot 1) vs EXPLICIT inherit (slot 2) — the two must differ.
+    // ABSENT (slot 1) vs EXPLICIT inherit (slot 2) vs OBJECT (slot 3) — all three
+    // must be distinguishable.
     expect(screen.getByTestId('import-slot-strategy-1').textContent).toMatch(/inherit \(by default\)/);
     expect(screen.getByTestId('import-slot-strategy-2').textContent).toMatch(/inherit$/);
     expect(screen.getByTestId('import-slot-strategy-2').textContent).not.toMatch(/by default/);
+    const slot3 = screen.getByTestId('import-slot-strategy-3').textContent ?? '';
+    expect(slot3).toMatch(/Tab ID exists, Rule check match, Priority tabId/);
+    expect(slot3).not.toMatch(/inherit/); // an object must NOT degrade to `inherit`
   });
 
   it('a dimension the package did NOT carry has no selector (A2)', async () => {
