@@ -26,6 +26,7 @@ import type {
   PageRule,
   ImportIntent,
   ImportDiff,
+  MatchRuleSettings,
   UrlMatchDefinition,
 } from '@shared/types';
 import type { ExportPackage, PortableSlotDef, PortableRule } from '@shared/export-package';
@@ -292,6 +293,39 @@ describe('T8: applyIntent — produces the final state, both sides decided by di
     const untouched = applyIntent(FILE, CURRENT, defaultImportIntent());
     expect(untouched.matchSettings).toEqual(CURRENT.matchSettings);
     expect(untouched.switchDirection).toBe(CURRENT.switchDirection);
+  });
+
+  it('does not write a settings strategy through a slot it shares with the input', () => {
+    // A slot's `strategy` lives in the settings dimension and is applied to any
+    // slot still present. A both-sides slot is REPLACED (a fresh object) before
+    // settings run, so only a SURVIVOR (file-missing, kept) still shares its
+    // object with `current` — that survivor is the one vector for a write-through,
+    // so the fixture must contain one or this case could not fail.
+    const strategy: MatchRuleSettings = {
+      tabIdMode: 'exists',
+      ruleCheckMode: 'match',
+      priority: 'tabId',
+    };
+    const withSettings = pkg({
+      settings: {
+        matchSettings: { ...DEFAULT_MATCH_SETTINGS },
+        switchDirection: 'next',
+        autoBindGlobal: false,
+        slotStrategies: { 1: strategy },
+      },
+    });
+    const current = sync([slot(1), slot(2)], []);
+    const before = JSON.stringify(current);
+
+    const final = applyIntent(withSettings, current, defaultImportIntent());
+
+    // The VECTOR is real: slot 1 survives, so the settings pass does reach it.
+    expect(final.slots.some((s) => s.id === 1)).toBe(true);
+    // Invariance (the file's own docstring promises "never mutate an input"):
+    // the caller's state must come back byte-for-byte identical.
+    expect(JSON.stringify(current)).toBe(before);
+    // …and the outcome still carries the strategy (replace, don't skip).
+    expect(final.slots.find((s) => s.id === 1)?.strategy).toEqual(strategy);
   });
 });
 

@@ -461,9 +461,16 @@ export function applyIntent(
     // here even for slots the file did not carry (settings is a global axis).
     // Iterating the record's entries (rather than indexing by slot id) is what
     // keeps the lookup honestly partial — a missing key has nothing to apply.
+    //
+    // REPLACE the element, never write through it: `final.slots` is a SHALLOW
+    // copy of `current.slots`, so a surviving slot is the SAME object as the
+    // caller's. `slot.strategy = strategy` would mutate the input `current` —
+    // the mutation this file's own header promises never happens — and, in the
+    // UI, write it straight into React state. A fresh object keeps the input
+    // byte-for-byte intact while still carrying the new strategy.
     for (const [id, strategy] of Object.entries(patch.settings.slotStrategies)) {
-      const slot = final.slots.find((s) => s.id === Number(id));
-      if (slot) slot.strategy = strategy;
+      const idx = final.slots.findIndex((s) => s.id === Number(id));
+      if (idx >= 0) final.slots[idx] = { ...final.slots[idx], strategy };
     }
   }
 
