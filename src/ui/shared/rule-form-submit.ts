@@ -43,7 +43,11 @@ export function toValidationInput(value: RuleDraftValue): RuleFormInput {
     url: value.url,
     titleMode: value.titleMode.kind === 'set' ? 'set' : 'use-chain',
     titleValue: value.titleMode.kind === 'set' ? value.titleMode.value : '',
-    iconMode: value.iconMode.kind === 'set' ? 'url' : 'use-chain',
+    // A draft carrying an icon CONFIG is a composite icon (upload data URI or
+// recipe), not a URL: mapping it to 'url' sent an empty value to the URL
+// validator and blocked the save outright ("Enter an icon URL…") — and for an
+// upload's `{kind:'set', value:''}` that made the whole draft unsaveable.
+    iconMode: value.iconMode.kind === 'set' ? (value.iconConfig ? 'custom' : 'url') : 'use-chain',
     iconValue: value.iconMode.kind === 'set' ? value.iconMode.value : '',
     ...(value.iconConfig ? { iconConfig: { dataUri: value.iconConfig.dataUri ?? '' } } : {}),
   };

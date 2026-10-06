@@ -13,6 +13,7 @@ import {
   validateRuleForm,
 } from '@shared/form-validation';
 import type { RuleFormInput } from '@shared/form-validation';
+import { toValidationInput, validateRuleDraft } from '@ui/shared/rule-form-submit';
 import { MAX_REGEX_LENGTH } from '@shared/url-utils';
 
 function form(overrides: Partial<RuleFormInput>): RuleFormInput {
@@ -119,6 +120,46 @@ describe('form-validation — CT4-bis: declared-but-empty values block', () => {
     const result = validateRuleForm(form({ titleMode: 'use-chain', iconMode: 'use-chain' }));
     expect(result.valid).toBe(true);
     expect(result.errors).toEqual([]);
+  });
+});
+
+describe('rule-form-submit — the draft mapper classifies icon CONFIGS (defect B)', () => {
+  /**
+   * `toValidationInput` is the ONLY bridge from the draft model to the shared
+   * validator, and it used to decide the mode from `kind` alone: a composite
+   * icon (an upload's `{kind:'set', value:''}` + `iconConfig`, or a recipe) was
+   * sent as `'url'` with an EMPTY value, so the URL branch blocked the save —
+   * "Enter an icon URL, or choose Custom Icon / Use chain" — and the draft could
+   * never be persisted. The mapper, not the validator, was wrong.
+   *
+   * Asserted at the MAPPER boundary (not through `validateRuleForm`, which the
+   * cases above drive directly with an explicit mode — that is why the bug had
+   * no failing test).
+   */
+  const draft = (over: Partial<{ iconMode: { kind: 'set'; value: string } | { kind: 'use-chain' }; iconConfig?: { dataUri?: string; bgColor?: string; text?: string; textColor?: string } }>) => ({
+    url: 'https://example.com/page',
+    matchType: 'exact' as const,
+    titleMode: { kind: 'use-chain' as const },
+    iconMode: { kind: 'set' as const, value: '' },
+    priority: 0,
+    ...over,
+  });
+
+  it('a config-carrying draft is validated as `custom`, never as an empty `url`', () => {
+    const input = toValidationInput(draft({ iconConfig: { dataUri: 'data:image/png;base64,UP' } }));
+    expect(input.iconMode).toBe('custom');
+    expect(validateRuleDraft(draft({ iconConfig: { dataUri: 'data:image/png;base64,UP' } })).valid).toBe(true);
+  });
+
+  
+
+  it('a plain draft without a config still validates as `url` (unchanged)', () => {
+    expect(toValidationInput(draft({ iconMode: { kind: 'set', value: 'https://cdn/x.png' } })).iconMode).toBe('url');
+    expect(validateRuleDraft(draft({ iconMode: { kind: 'set', value: 'https://cdn/x.png' } })).valid).toBe(true);
+  });
+
+  it('an empty URL with NO config still blocks (the guard is not weakened)', () => {
+    expect(validateRuleDraft(draft({ iconMode: { kind: 'set', value: '   ' } })).valid).toBe(false);
   });
 });
 
