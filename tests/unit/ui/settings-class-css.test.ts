@@ -224,9 +224,35 @@ describe('import fields expansion', () => {
     for (const ok of ['flex-basis:100%', 'flex: 1 1 100%', 'width:100%']) {
       expect(FULL_WIDTH.test(ok), `should match: ${ok}`).toBe(true);
     }
-    for (const no of ['min-width:100%', 'max-width:100%', 'padding:0; min-width:100%', 'min-width:0']) {
+    // The whole `*-width` family, not just the two spellings that were found by
+    // hand: the lookbehind rejects the CLASS, so this is a spec, not a patch.
+    for (const no of [
+      'min-width:100%',
+      'max-width:100%',
+      'padding:0; min-width:100%',
+      'min-width:0',
+      'border-width:100%',
+      'outline-width:100%',
+      'column-width:100%',
+      'max-inline-size:100%',
+    ]) {
       expect(FULL_WIDTH.test(no), `should NOT match: ${no}`).toBe(false);
     }
+  });
+
+  it('documents what the full-width pattern does NOT claim to cover', () => {
+    // KNOWN LIMITS — the pattern matches TEXT, not the CSS property model, and
+    // these do not match. Neither is worth a rewrite: two of them are exotic
+    // spellings and the third is a weaker-but-legal value. Pinning them as
+    // failing makes the limit a checked fact, so a later change to the pattern
+    // confronts it instead of silently "fixing" it by accident.
+    //   - `inline-size:100%`   the logical equivalent of `width` (not matched)
+    //   - `width : 100%`       a space before the colon (not matched)
+    //   - `flex:0 1 100%`      a legal value that permits shrinking (matched,
+    //                          but weaker than the canonical `1 1 100%`)
+    expect(FULL_WIDTH.test('inline-size: 100%')).toBe(false);
+    expect(FULL_WIDTH.test('width : 100%')).toBe(false);
+    expect(FULL_WIDTH.test('flex:0 1 100%')).toBe(true);
   });
 
   it('does not tint the record status as plain text (the status is a badge now)', () => {
