@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from '../../helpers/strip-comments';
 
 /** Recursive `.ts`/`.tsx` walker. */
 function walk(dir: string, out: string[] = []): string[] {
@@ -39,10 +40,11 @@ const SPECIFIER = /(?:from|import|require)\s*\(?\s*['"]([^"']+)['"]/g;
  * otherwise read as an import (a REAL false positive today). Over-stripping only
  * reduces matches inside comments and can never hide a real import, so the
  * direction of error is safe.
+ *
+ * The stripper is a STRING-AWARE state machine (one shared source, see
+ * `tests/helpers/strip-comments.ts`): the regex it replaced matched a `//` inside
+ * a string and truncated the line, so an import after it was invisible.
  */
-function stripComments(s: string): string {
-  return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-}
 
 /** Specifiers in `source` (a file at `filePath`) that leave `src/shared`. */
 function specifierOffenders(source: string, filePath: string): string[] {
@@ -98,6 +100,9 @@ describe('layer boundary', () => {
       "import { A } from '@adapters/x';",
       "import { z } from 'zod';", // third-party: the old denylist missed it
       "import { A } from '@ui/NEW_ALIAS/x';", // a future alias: no list to update
+      // A `//` inside a STRING is not a comment: a regex strip truncated the line
+      // here, hiding the import that follows it. The escape the guard must close.
+      "const p = 'https://x'; import { A } from '@ui/evil';",
     ];
     const MUST_NOT_FLAG = [
       '// see @ui/x for details',
@@ -105,6 +110,9 @@ describe('layer boundary', () => {
       "// copied from '@ui/x' long ago",
       "/* copied from '@ui/x' */",
       "// from 'the site value is an empty string'", // real repo false positive
+      "const p = 'https://x';", // string with `//`, no import ⇒ no false positive
+      "// import { A } from '@ui/evil';", // the import is inside a comment ⇒ not code
+      'const p = "a // b"; const q = "c /* d */ e";', // string `//` and `/* */` kept intact
       "import { A } from './x';",
       "import {\n  A,\n} from './x';",
       "export { A } from './x';",

@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from '../../helpers/strip-comments';
 
 /**
  * Every `tbs-settings__*` class the settings surfaces render must be defined in
@@ -43,10 +44,10 @@ const FULL_WIDTH = /(?<![\w-])(?:flex-basis:\s*100%|flex\s*:[^;]*\b100%|width:\s
  * not a rendered class, so flagging it would be a false positive — the same
  * reason `layer-boundary.test.ts` strips comments. Over-stripping can only lose
  * matches inside comments and can never hide a real class usage.
+ *
+ * The stripper is the ONE shared, string-aware helper
+ * (`tests/helpers/strip-comments.ts`), so this step has a single spelling.
  */
-function stripComments(s: string): string {
-  return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-}
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
