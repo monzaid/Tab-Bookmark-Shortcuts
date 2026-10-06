@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Shared form validation (E1 / E1-a / CT4-bis).
  *
  * A single pure module that reuses the background validation primitives, so the
