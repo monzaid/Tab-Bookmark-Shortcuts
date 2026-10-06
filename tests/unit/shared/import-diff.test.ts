@@ -161,6 +161,29 @@ describe('T8: computeDiff — mode governs only "file-missing, target-has"', () 
     const diff = computeDiff(FILE, CURRENT);
     expect(diff.records.some((r) => r.kind === 'rule')).toBe(false);
   });
+
+  it('expands the MATCH fields too, so a changed match is visible (A12/D9)', () => {
+    // A record whose only difference is its match definition used to diff as
+    // "unchanged" on every field — the change existed but nothing showed it.
+    const diff = computeDiff(FILE, CURRENT);
+    const row = diff.records.find((r) => r.kind === 'slot' && r.id === 2);
+    const fields = (row?.fields ?? []).map((f) => f.field);
+    expect(fields).toEqual(['title', 'icon', 'match-url', 'match-type']);
+
+    const matchUrl = row?.fields.find((f) => f.field === 'match-url');
+    expect(matchUrl?.before).toEqual({ kind: 'text', value: 'https://s2.example/' });
+    expect(matchUrl?.after).toEqual({ kind: 'text', value: 'https://s2.example/' });
+    const matchType = row?.fields.find((f) => f.field === 'match-type');
+    expect(matchType?.before).toEqual({ kind: 'text', value: 'exact' });
+  });
+
+  it('a KEPT row still carries all four facets (the shape is stable)', () => {
+    const diff = computeDiff(FILE, CURRENT);
+    const kept = diff.records.find((r) => r.status === 'kept' && r.kind === 'slot');
+    expect((kept?.fields ?? []).map((f) => f.field))
+      .toEqual(['title', 'icon', 'match-url', 'match-type']);
+    expect((kept?.fields ?? []).every((f) => !f.changed)).toBe(true);
+  });
 });
 
 describe('T8: applyIntent — produces the final state, both sides decided by diff', () => {

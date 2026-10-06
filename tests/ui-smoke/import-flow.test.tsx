@@ -408,6 +408,39 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     });
   });
 
+  it('expanding Fields lists Title / Icon / Match URL / Match Type with both sides', async () => {
+    await openImportSection();
+    await selectFile();
+
+    const fields = screen.getByTestId('import-fields-slot-2');
+    const text = fields.textContent;
+    // All four facets of the record are shown, so "which part changed" is
+    // answerable — the match definition used to be invisible.
+    expect(text).toMatch(/Title:/);
+    expect(text).toMatch(/Icon:/);
+    expect(text).toMatch(/Match URL:/);
+    expect(text).toMatch(/Match Type:/);
+    // A changed facet carries BOTH concrete values; an unchanged one says so.
+    expect(text).toMatch(/Title: S2 → FILE-S2/);
+    expect(text).toMatch(/Match URL: unchanged/);
+  });
+
+  it('a changed MATCH is shown with both concrete values (not "unchanged")', async () => {
+    // The file moves slot 7's match away from the target's: with four facets,
+    // that change is now visible — before, every field read "unchanged" and the
+    // row looked identical to a no-op.
+    const target: SyncState = { ...CURRENT, slots: [curSlot(7, 'S7')] };
+    const file: ExportPackage = {
+      ...PKG,
+      slots: [{ id: 7, urlMatch: exact('https://moved.example/'), titleSnapshot: 'S7', faviconSnapshot: '', marker: {} }],
+    };
+    await openImportSection(makeInspection(file, target));
+    await selectFile();
+
+    const text = screen.getByTestId('import-fields-slot-7').textContent;
+    expect(text).toMatch(/Match URL: https:\/\/s7\.example\/ → https:\/\/moved\.example\//);
+  });
+
   it('lists slots by slot NUMBER with the number in the label, whatever order the file used', async () => {
     // The file carries its slots in a NON-numeric order. A fixed 1–10 set shown
     // in file order is unscannable, and a bare title does not say which slot a
@@ -421,7 +454,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
 
     const rows = screen.getByTestId('import-dim-slots')
       .querySelectorAll('ul.tbs-settings__import-records > li > span:first-child');
-    const labels = Array.from(rows).map((el) => el.textContent ?? '');
+    const labels = Array.from(rows).map((el) => el.textContent);
     expect(labels).toEqual(['Slot 1 — S1', 'Slot 2 — S2', 'Slot 3 — S3']);
   });
 
@@ -464,7 +497,9 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
           },
         });
       }
-      return base ? base(msg) : Promise.resolve({ result: { success: true } });
+      return base
+        ? (base(msg) as Promise<unknown>)
+        : Promise.resolve({ result: { success: true } });
     });
 
     mockSendMessage.mockClear();

@@ -29,6 +29,7 @@ import type {
   SyncState,
   PageRule,
   SlotDefinition,
+  UrlMatchDefinition,
   IconSource,
   ImportIntent,
   ImportDiff,
@@ -138,12 +139,66 @@ function presence(pkg: ExportPackage): DimensionPresence {
 interface Facets {
   title: ImportFieldValue | null;
   icon: ImportFieldValue | null;
+  urlMatch: ImportFieldValue | null;
+  matchType: ImportFieldValue | null;
+}
+
+/** The fields a record can differ on, in the order the UI shows them. */
+const FACET_FIELDS = ['title', 'icon', 'match-url', 'match-type'] as const;
+
+/** The four "unchanged" facets for a kept row (A12 keeps the shape stable). */
+function keptFields(before: Facets): ImportFieldDiff[] {
+  const unchanged: Record<string, ImportFieldValue | null> = {
+    title: before.title,
+    icon: before.icon,
+    'match-url': before.urlMatch,
+    'match-type': before.matchType,
+  };
+  return FACET_FIELDS.map((field) => ({
+    field,
+    before: unchanged[field],
+    after: unchanged[field],
+    changed: false,
+  }));
+}
+
+/** The four field diffs for a row whose record is being taken/deleted. */
+function changedFields(before: Facets, after: Facets): ImportFieldDiff[] {
+  const beforeByField: Record<string, ImportFieldValue | null> = {
+    title: before.title,
+    icon: before.icon,
+    'match-url': before.urlMatch,
+    'match-type': before.matchType,
+  };
+  const afterByField: Record<string, ImportFieldValue | null> = {
+    title: after.title,
+    icon: after.icon,
+    'match-url': after.urlMatch,
+    'match-type': after.matchType,
+  };
+  return FACET_FIELDS.map((field) =>
+    fieldDiff(field, beforeByField[field] ?? null, afterByField[field] ?? null));
+}
+
+/** "This side has no value" — distinct from "unknown" (only deletions are unknown). */
+const NO_FACETS: Facets = { title: null, icon: null, urlMatch: null, matchType: null };
+
+/** The match definition as two facets: the URL text and the mode name. */
+function matchFacets(urlMatch: UrlMatchDefinition): {
+  urlMatch: ImportFieldValue | null;
+  matchType: ImportFieldValue | null;
+} {
+  return {
+    urlMatch: textFacet(urlMatch.value),
+    matchType: textFacet(urlMatch.type),
+  };
 }
 
 function slotFacets(slot: SlotDefinition): Facets {
   return {
     title: textFacet(slot.uiMarker.customTitle ?? slot.titleSnapshot),
     icon: storedIconFacet(slot.uiMarker.icon, `icon:slot-${String(slot.id)}`),
+    ...matchFacets(slot.urlMatch),
   };
 }
 
@@ -151,23 +206,16 @@ function ruleFacets(rule: PageRule): Facets {
   return {
     title: textFacet(rule.title ?? ''),
     icon: storedIconFacet(rule.favicon, `icon:${rule.id}`),
+    ...matchFacets(rule.urlMatch),
   };
 }
 
 function fieldDiff(
-  field: 'title' | 'icon',
+  field: ImportFieldDiff['field'],
   before: ImportFieldValue | null,
   after: ImportFieldValue | null,
 ): ImportFieldDiff {
   return { field, before, after, changed: facetKey(before) !== facetKey(after) };
-}
-
-/** The two "unchanged" facets for a kept row (A12 keeps the shape stable). */
-function keptFields(before: Facets): ImportFieldDiff[] {
-  return [
-    { field: 'title', before: before.title, after: before.title, changed: false },
-    { field: 'icon', before: before.icon, after: before.icon, changed: false },
-  ];
 }
 
 // ─── computeDiff (A12 / §3.2 / A4) ───────────────────────────────────────────
@@ -196,6 +244,7 @@ export function computeDiff(
       const afterFacets: Facets = {
         title: textFacet(afterTitle),
         icon: portableIconFacet(portable.marker.icon),
+        ...matchFacets(portable.urlMatch),
       };
 
       if (!existing) {
@@ -204,10 +253,7 @@ export function computeDiff(
           id: portable.id,
           label: portable.titleSnapshot || `Slot ${String(portable.id)}`,
           status: 'added',
-          fields: [
-            fieldDiff('title', null, afterFacets.title),
-            fieldDiff('icon', null, afterFacets.icon),
-          ],
+          fields: changedFields(NO_FACETS, afterFacets),
         });
         continue;
       }
@@ -215,7 +261,9 @@ export function computeDiff(
       const before = slotFacets(existing);
       const differs =
         facetKey(before.title) !== facetKey(afterFacets.title) ||
-        facetKey(before.icon) !== facetKey(afterFacets.icon);
+        facetKey(before.icon) !== facetKey(afterFacets.icon) ||
+        facetKey(before.urlMatch) !== facetKey(afterFacets.urlMatch) ||
+        facetKey(before.matchType) !== facetKey(afterFacets.matchType);
       // "Both sides" is decided by the diff, NOT by the mode (§3.2). The default
       // is to take the file (D8); only an explicit `keep` override protects it.
       const override = overrideFor(intent, 'slot', portable.id);
@@ -226,10 +274,7 @@ export function computeDiff(
         id: portable.id,
         label: existing.titleSnapshot || afterTitle || `Slot ${String(portable.id)}`,
         status,
-        fields:
-          status === 'kept'
-            ? keptFields(before)
-            : [fieldDiff('title', before.title, afterFacets.title), fieldDiff('icon', before.icon, afterFacets.icon)],
+        fields: status === 'kept' ? keptFields(before) : changedFields(before, afterFacets),
       });
     }
 
@@ -249,6 +294,9 @@ export function computeDiff(
           ? [fieldDiff('title', before.title, null), fieldDiff('icon', before.icon, null)]
           : keptFields(before),
       });
+      // A deletion has no incoming record: the match facets would have no
+      // "after" side, so they are left out rather than invented (`before` is
+      // still read above for the title/icon removal story).
     }
   }
 
@@ -262,6 +310,7 @@ export function computeDiff(
       const afterFacets: Facets = {
         title: textFacet(afterTitle),
         icon: portableIconFacet(portable.favicon),
+        ...matchFacets(portable.urlMatch),
       };
 
       if (!existing) {
@@ -270,10 +319,7 @@ export function computeDiff(
           id: portable.id,
           label: portable.title ?? portable.urlMatch.value,
           status: 'added',
-          fields: [
-            fieldDiff('title', null, afterFacets.title),
-            fieldDiff('icon', null, afterFacets.icon),
-          ],
+          fields: changedFields(NO_FACETS, afterFacets),
         });
         continue;
       }
@@ -281,7 +327,9 @@ export function computeDiff(
       const before = ruleFacets(existing);
       const differs =
         facetKey(before.title) !== facetKey(afterFacets.title) ||
-        facetKey(before.icon) !== facetKey(afterFacets.icon);
+        facetKey(before.icon) !== facetKey(afterFacets.icon) ||
+        facetKey(before.urlMatch) !== facetKey(afterFacets.urlMatch) ||
+        facetKey(before.matchType) !== facetKey(afterFacets.matchType);
       const override = overrideFor(intent, 'rule', portable.id);
       const status: ImportRecordStatus = override === 'keep' ? 'kept' : differs ? 'replaced' : 'kept';
 
@@ -290,13 +338,7 @@ export function computeDiff(
         id: portable.id,
         label: existing.title ?? (afterTitle || portable.urlMatch.value),
         status,
-        fields:
-          status === 'kept'
-            ? keptFields(before)
-            : [
-                fieldDiff('title', before.title, afterFacets.title),
-                fieldDiff('icon', before.icon, afterFacets.icon),
-              ],
+        fields: status === 'kept' ? keptFields(before) : changedFields(before, afterFacets),
       });
     }
 

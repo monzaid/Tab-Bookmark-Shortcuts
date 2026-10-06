@@ -35,8 +35,15 @@ export function formatFieldValue(v: ImportFieldValue | null): string {
  * report the value they carry. Only `kept` / `replaced` (the cases where both
  * sides may exist) use the "unchanged" / arrow wording (A12).
  */
+const FIELD_LABELS: Record<ImportFieldDiff['field'], string> = {
+  title: 'Title',
+  icon: 'Icon',
+  'match-url': 'Match URL',
+  'match-type': 'Match Type',
+};
+
 export function formatFieldDiffLine(diff: ImportFieldDiff, status: ImportRecordStatus): string {
-  const label = diff.field === 'title' ? 'Title' : 'Icon';
+  const label = FIELD_LABELS[diff.field];
 
   if (status === 'added') {
     const value = formatFieldValue(diff.after);

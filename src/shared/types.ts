@@ -279,8 +279,14 @@ export type ImportFieldValue =
   | { kind: 'recipe'; bgColor: string; text: string; textColor: string };
 
 /** Per-field change detail inside a record (A12). */
+/**
+ * The facets a record can differ on. `match-url` / `match-type` carry the match
+ * definition (the URL and the mode name) as plain `text` values, so a row can
+ * say WHICH part of a record differs and what the two sides hold — a record
+ * whose URL match moved is otherwise indistinguishable from an unchanged one.
+ */
 export interface ImportFieldDiff {
-  field: 'title' | 'icon';
+  field: 'title' | 'icon' | 'match-url' | 'match-type';
   before: ImportFieldValue | null;
   after: ImportFieldValue | null;
   changed: boolean;
