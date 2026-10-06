@@ -69,7 +69,7 @@ function storedIconSignature(icon: IconSource | null | undefined, iconKey: strin
 }
 
 /** Per-record override for a record, or `undefined` when none was given (A4). */
-function overrideFor(
+export function overrideFor(
   intent: ImportIntent,
   kind: 'slot' | 'rule',
   id: number | string,
@@ -81,8 +81,12 @@ function overrideFor(
  * Does the dimension mode delete this file-missing record, absent an override?
  * A `keep` override protects it; a `take` override deletes it (even under
  * incremental — that is how "incremental ≠ delete nothing" is expressed).
+ *
+ * Exported so a surface that must quantify deletions under the user's ACTUAL
+ * intent (the D7 confirmation, `ui/settings/App.tsx`) reuses this one rule
+ * instead of re-encoding it and drifting from `computeDiff`.
  */
-function deletesFileMissing(mode: DimensionMode, override: 'keep' | 'take' | undefined): boolean {
+export function deletesFileMissing(mode: DimensionMode, override: 'keep' | 'take' | undefined): boolean {
   if (override === 'keep') return false;
   if (override === 'take') return true;
   return mode === 'overwrite';

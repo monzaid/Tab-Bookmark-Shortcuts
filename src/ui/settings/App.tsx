@@ -15,6 +15,9 @@ import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
 import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, DimensionPresence, DimensionMode, ExportScope } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
+import { deletesFileMissing, overrideFor } from '@shared/import-diff';
+import { isExportPackage } from '@shared/export-package';
+import type { ExportPackage } from '@shared/export-package';
 
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import { FieldEditor } from '@ui/shared/field-editor';
@@ -86,6 +89,23 @@ function extractResult(res: unknown): Record<string, unknown> | null {
   if (!res || typeof res !== 'object') return null;
   const r = res as Record<string, unknown>;
   return (r.result as Record<string, unknown>) ?? r;
+}
+
+/**
+ * Parse the import file's package. The background has already validated it
+ * structurally (`IMPORT_INSPECT` succeeded), so this only needs the ids the
+ * D7 deletion count asks about; malformed JSON yields `null` and the count
+ * simply stays at zero (the background remains the authority on apply).
+ */
+function parseExportPackage(text: string): ExportPackage | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isExportPackage(parsed)) return null;
+  return parsed;
 }
 
 // ─── Per-slot strategy drafts (ACC#5) ────────────────────────────────────────
@@ -2233,6 +2253,14 @@ function ImportExportSection() {
    */
   const [file, setFile] = useState<string | null>(null);
   const [inspection, setInspection] = useState<ImportInspection | null>(null);
+  /**
+   * The parsed package behind `file`. It is the authority on which record ids
+   * the file CARRIED: the "file-missing, target-has" rows — the only ones a
+   * dimension mode may delete (§3.2) — are exactly the target records whose id
+   * is absent here. The diff cannot supply this (it contains both kinds of
+   * "kept" row), so the package is parsed once at INSPECT time and reused.
+   */
+  const [pkg, setPkg] = useState<ExportPackage | null>(null);
   const [intent, setIntent] = useState<ImportIntent>(() => defaultImportIntent());
   /** The quantized confirmation is CONSTANT (D7) — opened by Apply, always. */
   const [confirming, setConfirming] = useState(false);
@@ -2254,6 +2282,7 @@ function ImportExportSection() {
     setImporting(true);
     setInspection(null);
     setFile(null);
+    setPkg(null);
     try {
       const text = typeof chosen.text === 'function' ? await chosen.text() : '';
       const res = await sendMessage('IMPORT_INSPECT', { file: text });
@@ -2261,6 +2290,7 @@ function ImportExportSection() {
       if (result?.success && result.inspection) {
         setFile(text);
         setInspection(result.inspection as ImportInspection);
+        setPkg(parseExportPackage(text));
         setIntent(defaultImportIntent());
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Invalid import file' });
@@ -2287,13 +2317,33 @@ function ImportExportSection() {
 
   const carried = (d: keyof DimensionPresence): boolean => inspection?.dimensions[d] ?? false;
 
-  /** Design D7: count only IRREVERSIBLE deletions (not replacements). */
+  /**
+   * Design D7: count only IRREVERSIBLE deletions, computed under the intent the
+   * user has ACTUALLY chosen — the INSPECTION's own `deleted` rows reflect the
+   * default (incremental) intent and would under-report after a mode switch.
+   *
+   * The rows this can delete are exactly the "file-missing, target-has" ones
+   * (§3.2): a record is file-missing iff the package did not carry its id. The
+   * per-record rule (`take` deletes even under incremental; `keep` protects) is
+   * reused from the same module as `computeDiff` so the two cannot drift.
+   */
   const deletionCounts = (() => {
     const counts = { slots: 0, rules: 0 };
-    for (const r of inspection?.diff.records ?? []) {
-      if (r.status !== 'deleted') continue;
-      if (r.kind === 'slot') counts.slots += 1;
-      else counts.rules += 1;
+    if (!inspection || !pkg) return counts;
+    const fileSlotIds = new Set((pkg.slots ?? []).map((s) => s.id));
+    const fileRuleIds = new Set((pkg.rules ?? []).map((r) => r.id));
+    for (const r of inspection.diff.records) {
+      if (r.kind === 'slot') {
+        if (fileSlotIds.has(r.id as number)) continue; // both sides — never mode-deleted
+        if (deletesFileMissing(intent.dimensionModes.slots, overrideFor(intent, 'slot', r.id))) {
+          counts.slots += 1;
+        }
+      } else {
+        if (fileRuleIds.has(r.id as string)) continue;
+        if (deletesFileMissing(intent.dimensionModes.rules, overrideFor(intent, 'rule', r.id))) {
+          counts.rules += 1;
+        }
+      }
     }
     return counts;
   })();
@@ -2325,6 +2375,7 @@ function ImportExportSection() {
         setToast({ variant: 'success', message: 'Import applied' });
         setInspection(null);
         setFile(null);
+        setPkg(null);
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Import failed' });
       }
@@ -2441,7 +2492,7 @@ function ImportExportSection() {
           })}
 
           <div className="tbs-settings__import-actions">
-            <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); }}>Cancel</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); setPkg(null); }}>Cancel</Button>
             <Button
               size="sm"
               variant="primary"
