@@ -1,0 +1,1233 @@
+# Import / Export 迭代 — 决策清单
+# 日期：2026-10-04 / 05
+# 主设计文档：2026-10-04-import-export-design.md
+# 状态汇总：44 项 RESOLVED / 9 项 VOID / 0 项 OPEN
+
+meta:
+  topic: import-export
+  date: 2026-10-04
+  revised: 2026-10-05
+  layers: [goal, constraint, architecture, detail]
+  open_items: 0
+  revised_authorities:
+    - file: 2026-07-14-tab-bookmark-shortcuts-decisions.yaml
+      action: 部分取代（import-export-format / import-merge / export-local-icons 标记 REVISED）
+    - file: 2026-07-14-tab-bookmark-shortcuts-constraints-permissions-privacy-design.md
+      action: 图标章节补「导出 ≠ 同步，但同样不搬运位图字节」澄清
+
+decisions:
+
+  # ─── 🔍 Goal ──────────────────────────────────────────────────────────────
+
+  - layer: goal
+    node: G1-scope
+    decision: B + C 并做（修正错误语义 + 扩展能力），且不承担向后兼容
+    alternatives:
+      - option: 仅对齐设计权威
+        rejected_reason: 只补一块已有砖，不修会静默损坏数据的语义
+      - option: 仅修正语义
+        rejected_reason: 会让"分享单条规则/槽位"名不副实
+      - option: 仅扩展能力
+        rejected_reason: 在静默损坏未修的前提下，扩展只会放大损害面
+    rationale: 开发阶段无历史包需兼容；三处宽容读取（legacy 判别/静默纠正/可选字段）随之收紧
+    implications: 版本不符严格拒绝；switchDirection 非法值拒绝而非纠正
+    status: RESOLVED
+    depends_on: []
+
+  - layer: goal
+    node: G2-package-model
+    decision: 一个版本化的「可携带包」，全量与子集同构
+    alternatives:
+      - option: 仍为全量快照，只修语义
+        rejected_reason: C（部分导出）会变成补丁，需额外定义规则是否随行
+      - option: 拆成「备份」与「分享」两种产物
+        rejected_reason: 两套 schema、两套校验、两套测试
+    rationale: 合并语义只需定义一次；包自描述，可派生 diff/清单
+    implications: 导出可勾选范围；导入按"文件里有什么就合并什么"
+    status: RESOLVED
+    depends_on: [G1-scope]
+
+  - layer: goal
+    node: G3-record-kinds
+    decision: sync 层 + 可选「图标数据」附件（opt-in，默认关）
+    alternatives:
+      - option: 仅 sync 层
+        rejected_reason: 使"分享单条规则/槽位"名不副实，接收方拿到占位且不知要重选
+      - option: sync + 本地层附件
+        rejected_reason: 抵触设计权威的图标同步边界；bindings/siteSnapshot 是设备会话语义
+    rationale: 导出是用户显式触发的迁移/分享动作，与「同步」是不同边界
+    implications: 需包内声明是否含图标数据（**后由 C1 取代**）
+    status: SUPERSEDED
+    superseded_by: C1-icon-carriage
+    depends_on: [G2-package-model]
+    note: 已被 C1 取代 —— 用户裁定「图标只支持导出 Icon URL / local-icon 路径 / Custom Icon 配方」，包内禁任何原始位图
+
+  - layer: goal
+    node: G4-success-criteria
+    decision: 保真 + 可解释 + 可逆，三条全为硬指标，冲突时 B > A > C
+    alternatives:
+      - option: 单一判据
+        rejected_reason: 三条互不替代，各自堵一类真实缺陷
+    rationale: 保真堵静默替换；可解释堵用户不知情；可逆堵手滑即灾难
+    implications: 三者可共用同一次解析结果
+    status: RESOLVED
+    depends_on: [G1-scope]
+    revisions:
+      - date: 2026-10-05
+        change: 撤回「可逆」——不实现导入撤销
+        effect: 取舍顺序变为 B > A；替代保障为「量化后果 + 可选备份 + 风险确认」
+
+  - layer: goal
+    node: G5-import-boundary
+    decision: 文件驱动 + 显式「清空」指令
+    alternatives:
+      - option: 一律文件驱动
+        rejected_reason: 无法表达"恢复成某个已知状态"的灾备诉求
+      - option: 一律全量覆盖
+        rejected_reason: 即现行 state.rules = preview.rules，是"保留现有却清空规则"缺陷的根源
+    rationale: 两种意图都保留，但强制显式表达
+    implications: diff 与快照规模可被用户预期
+    status: RESOLVED
+    depends_on: [G2-package-model]
+    revisions:
+      - date: 2026-10-05
+        change: 精细化为「每维度一个增量/覆盖模式」（G5-refined）
+        effect: 全局开关无法表达"槽位覆盖、规则保留"的组合
+
+  # ─── 🔒 Constraint ────────────────────────────────────────────────────────
+
+  - layer: constraint
+    node: C1-icon-carriage
+    decision: 包内禁止原始位图；只承载 Icon URL / local-icon 裸引用 / 可复现配方
+    alternatives:
+      - option: 始终附带 data URI
+        rejected_reason: 单图标可达约 2.7MB（2MB 输入 × base64 膨胀），10 槽位约 27MB
+      - option: 默认不附带、可 opt-in
+        rejected_reason: 仍需承载位图与包内声明；URL 缓存应交由接收方建立
+    rationale: URL 与配方都可复现；引用占位交由接收方重新选择，无需搬运字节
+    implications:
+      - 无需体积上限、无需 opt-in 开关
+      - MAX_OUTPUT_SIZE（声明但从未执行）欠账作废
+    revisions:
+      - date: 2026-10-06
+        change: T22 实施期澄清 —— missingIcons 口径 = 仅"不可解析的 local-icon 引用"（C9② 精确范围）
+        effect: |
+          实施 T22 时出现两种口径分歧，裁定如下：
+          - **missing 仅指** `type:'upload' && value.startsWith(LOCAL_ICON_REF_PREFIX) && 解析为 null`
+            （C9② 原文范围）⇒ 与 `IconService.resolveForDisplayState` 同源；
+          - **`type:'url'` 不计入**：URL 可复现，其跨设备语义是「**接收方首次需要时建立本地缓存**」
+            （本节点 rationale 原文）⇒ 若计入，**每台新设备一导入即满屏"需重选"**，把"可复现"
+            误报为"缺失"。下载/重试路径已存在（`retryDownload` / `DOWNLOAD_ICON`）；
+          - **`template`（配方）不计入**：可复现渲染；
+          - **"从未设置"不计入**：`!source ⇒ missing:false`（D9 硬要求可区分）；
+          - **判定对象 = `finalSafe`**（`applyIntent` 产物 = 本次写入的对象），**不是写前 `current`**：
+            写前判会把 `replaced` 记录误判为 not-missing（其 blob 随后被 `keysToClear` 清掉）。
+          - **收集点须在 `clearAndWriteWithCompensation` 之后**（`:409-417` 之后）：
+            文件携带 `local-icon:icon:slot-3` 而**目标机 `local['icon:slot-3']` 可能持有目标机自己的
+            blob** ⇒ 写前 probe 命中 ⇒ 误判 not-missing，而该 blob **即将被 `keysToClear` 清掉**
+            （C10 正是要避免这种"假成功"）⇒ **写前判定会系统性欠报 `replaced`**。
+            （"包内无位图 ⇒ 与清槽时机无关"**只对 `added` 成立** —— 这是实施期修正，
+            reviewer 补上了"何时探"这一半。）
+            必测 RED：**`replaced` + 文件 `local-ref` + 目标机该 key 有自有 blob ⇒ 须报 missing**
+            （同时抓"写前判定"与"重写 if 链"两种错法）。
+          - **实现须调用 `IconService.isMissingIcon`**，不得重写 if 链（否则新增第三处前缀消费）；
+            且 `import-export-service.ts` 内**不得**出现 `resolveIconReference(`（单数）调用 ——
+            该方法的调用点须仍仅 `icon-service.ts`（可机检）。
+          - **`tolerant` 的字段 allowlist 须编译期耦合**：`as const satisfies Record<keyof PortableXxx, true>`
+            ⇒ 给形状加字段而忘同步 ⇒ **类型错误**（裸字符串数组与**裸 `as const`** 均不达标，会静默漏检）。
+            可行性已验：本仓库 `as const satisfies` 有多处先例（`worker-orchestrator.ts:107` 等）；
+            `satisfies Record<keyof T, true>` 靠**编译期穷尽检查**、不依赖运行时类型反射；
+            运行时数组用 `Object.keys(KEYS)` 取。
+          - **allowlist 只列 root/slot/rule 三层**（`icon` 条目**删除**）：实现有意**不深走**
+            `urlMatch`/`marker`/`icon` 内部 ⇒ 声明却不生效的键集会被误读为"icon 也被检"
+            （"作者意图 vs 实现"漂移）。
+          - **双落点防漂移断言**：同一 `parsed` 下，`inspect().tolerant` 与 apply 结果的 `tolerant`
+            **同序同值**（行为型比较两个真实输出）。
+        open_item: |
+          记账（**非 T22 范围**）：新设备上 URL 图标的本地缓存**没有自动建立路径**
+          （`resolveForDisplay` 明确 "does NOT trigger downloads"；`retryDownload` 仅由
+          `DOWNLOAD_ICON` 动作触发）⇒ "首次需要时建立缓存"目前**无自动实现者**。
+          属**导入路径之外**的既有缺口，另行跟踪。
+      - 附带范围扩张：新增「Custom Icon 配方持久化」
+    status: RESOLVED
+    supersedes: G3-record-kinds
+    depends_on: [G1-scope]
+
+  - layer: constraint
+    node: C2-export-deref
+    decision: 导出必须解引用，且裸发引用（不得加 [local:…] 包装）
+    alternatives:
+      - option: 保留现有包装
+        rejected_reason: "[local:local-icon:icon:slot-3] 首尾均不匹配 startsWith('local-icon:')，必然无法解析"
+    rationale: 现网缺陷 —— 带包装的字符串永远解析不了，也不被识别为引用
+    implications: URL 类直接导出 URL，不上引用
+    status: RESOLVED
+    depends_on: [C1-icon-carriage]
+
+  - layer: constraint
+    node: C3-atomicity
+    decision: 严格原子 —— 预检全部通过才提交；单次配置写入；否则整体拒绝、零改动 + 定位原因 + 化解建议
+    alternatives:
+      - option: 尽力而为（部分成功）
+        rejected_reason: 使判据 B（预览即合同）与 C（撤销=回到导入前）同时失效
+      - option: 原子 + 配额降级通道
+        rejected_reason: 把同一决策拆成两次勾选，违反"意图显式表达一次"
+    rationale: 原子是"可逆"能成立的唯一干净前提
+    implications: F4 并入 —— 提交必须绑定预览时确定的版本号
+    status: RESOLVED
+    depends_on: [G4-success-criteria]
+    revisions:
+      - date: 2026-10-05
+        change: 第三个触发条件（记录非法）由「整体拒绝」放宽为「跳过该记录 + 披露」
+        effect: 见 D15；安全等价性：不写入即无风险
+
+  - layer: constraint
+    node: C4-server-authority
+    decision: 服务端重新推导 —— UI 只回传用户意图，服务端重算 diff 与预览比对，不符则拒绝；preview 仅展示
+    alternatives:
+      - option: 服务端缓存预览（token）
+        rejected_reason: MV3 下 service worker 随时挂起，内存状态会丢
+      - option: 维持 UI 回传完整 preview + 加强校验
+        rejected_reason: 权威在客户端使判据 B 退化；且允许绕过"清空需显式勾选"
+    rationale: 既有注释自证"preview may have been built by hand or mutated"
+    implications: 包必须自描述（服务端仅凭「文件 + 意图」可重算）
+    status: RESOLVED
+    depends_on: [C3-atomicity]
+    revisions:
+      - date: 2026-10-05
+        change: 文件漂移残余风险由 D12 构造性消除
+        effect: 权威性与告知性同时得到保证
+
+  - layer: constraint
+    node: C5-snapshot-storage
+    decision: 快照只存 storage.local，独立键 + 惰性 TTL，不设预设上限
+    alternatives:
+      - option: 明确容量上限 + 不满足则拒绝
+        rejected_reason: 用户选择不预判体积
+      - option: 允许存 sync
+        rejected_reason: 违反 sync 语义边界与 8KB/键限制
+    rationale: 复用以 lazy expiresAt 应对 MV3 挂起
+    implications: 取消"预先按体积拒绝"
+    status: VOID
+    void_reason: 2026-10-05 不实现导入撤销
+    depends_on: [G4-success-criteria]
+
+  - layer: constraint
+    node: C6-snapshot-failure
+    decision: 快照写入失败时仍执行导入，但显式告知"本次不提供撤销"并由用户独立确认
+    alternatives:
+      - option: 拒绝执行导入
+        rejected_reason: 把可逆抬到高于用户意图，与 G4 顺序不符
+      - option: 先腾空间再重试
+        rejected_reason: 会静默删除用户的图标缓存，把失败路径扩成两个决策
+    rationale: G4 的取舍顺序（B > A > C）本身即支持"知情后放弃撤销"
+    implications: 需在提交前探测快照可行性 → 两种终止态
+    status: VOID
+    void_reason: 2026-10-05 不实现导入撤销；提交路径收敛为单一终止态
+    depends_on: [C5-snapshot-storage]
+
+  - layer: constraint
+    node: C7-no-undo-on-failure
+    decision: 导入失败不需要撤销（由严格原子自动推出）
+    rationale: 失败 = 零改动 = 无物可撤
+    status: VOID
+    void_reason: 2026-10-05 澄清对象（撤销）已不存在
+    depends_on: [C3-atomicity]
+
+  - layer: constraint
+    node: C8-validation-strictness
+    decision: 宽容读取 + 逐项披露 + 用户确认（仅限同 schema 版本内）；版本不符严格拒绝
+    alternatives:
+      - option: 全严格（任一即拒绝）
+        rejected_reason: 用户选择保留可读性，但要求每处宽容可见
+      - option: 宽松读取（静默取默认）
+        rejected_reason: 把"文件损坏"变成"静默改配"
+    rationale: 宽容 ≠ 静默 —— 把"我替你做了决定"变成"我告诉你，你同意再说"
+    implications:
+      - 宽容只发生在预检阶段，不降低原子性
+      - diff 行项扩为 6 类（+忽略未知字段 / +填充默认值）
+    revisions:
+      - date: 2026-10-06
+        change: T22 实施期裁定 —— tolerant 生产者须在本迭代落地（不得空壳）
+        effect: |
+          预检发现 tolerant 仅"类型声明 + 两处 tolerant: []"（import-export-service.ts:141 inspect /
+          :430 apply），**无生产者**。裁定：**T22 内实现最小真实生产者**（不得标注"范围外"），理由：
+          ① 本条（C8）RESOLVED 且 implications 明写"diff 行项扩为 **6 类**"；
+          ② 计划 :2464 把"宽容项折叠汇总"列为 T22 交付项；
+          ③ 留空壳 ⇒ T22 核心验收"六类各 ≥1 条"无法行为化，F1–F4 会判未交付。
+          最小实现：解析期比对已声明形状的 allowlist（来源须引用 ExportPackage/PortableSlotDef/
+          PortableRule 字段），每处未知键 ⇒ TolerantItem{kind:'unknown-field', detail:'<json path>'}；
+          "默认值被填"半可单列并给做/延后建议，但"未知字段"半须落地；若需改包契约须先回报。
+    status: RESOLVED
+    depends_on: [C3-atomicity]
+    revisions:
+      - date: 2026-10-06
+        change: T22 实施期裁定 —— "未知字段"半落地（T22）；"默认值被填"半**正式延后**（具名记账）
+        effect: |
+          T22 提交 2630427 落地了 tolerant 最小真实生产者（PACKAGE_FIELD_ALLOWLIST，root + slots[]/rules[]
+          每项 keys ⇒ TolerantItem{kind:'unknown-field'}；inspect 与 apply 两处共用 collectTolerant）。
+          "默认值被填"半裁定**延后**，理由：包内必需字段缺失走 D14 严格拒绝（不是"填默认"）；
+          现存"填默认"只出现在 packageToSyncPatch 的**跨机派生默认**（strategy ?? 'inherit'、
+          createdAt/updatedAt ?? now）—— 那是跨机语义而非文件缺陷；要披露须先定义"哪些派生默认值得报"
+          ⇒ **需设计输入**。延后须**具名记账**（代码注释 + 提交信息各一句），不得静默。
+          另：allowlist 须**编译期耦合**（as const satisfies Record<keyof PortableXxx, true>）——
+          裸 as const 加字段忘同步不会编译失败（会静默漏检）；且只列 root/slot/rule 三层
+          （icon 条目已删：实现有意不深走 urlMatch/marker/icon 内部）。
+    status: RESOLVED
+
+  - layer: constraint
+    node: C9-missing-icon
+    decision: 保留裸引用 + 一次性告知；缺失由消费方判定
+    alternatives:
+      - option: 值置空
+        rejected_reason: 只能满足"告知"，无法满足设计要求的"展示占位"（属持续状态）
+      - option: 值置空 + 持久化待重选标记
+        rejected_reason: 需扩展 schema；而引用 + 消费方判定已能推导出同一状态
+      - option: 保留占位字符串（今日 [local:…]）
+        rejected_reason: 已证否 —— 带包装的字符串永远解析不了
+    rationale: 贴合既有实现（引用与解析器已存在），改动面最小
+    implications:
+      - 需导出裸发引用（C2）
+      - 需消费方规则：引用无法解析 ⇒ 视为缺失 ⇒ 显示占位
+    status: RESOLVED
+    depends_on: [C1-icon-carriage, C2-export-deref]
+
+  - layer: constraint
+    node: C10-icon-key-clearing
+    decision: 替换记录时同步清空其图标存储槽
+    alternatives:
+      - option: 引用键加内容哈希/uuid
+        rejected_reason: 现存 >6KB 图标已以 icon:slot-N 落库且是唯一副本，改键会让图标集体变缺失（数据回归）
+    rationale: 键由记录 id 派生（slot id 恒为 1..10）→ 目标机可能"假成功解析"取到自己的图标，比破图更糟
+    implications:
+      - ① 作用域严格：只对真正写入的记录
+      - ② 与写入同属一次原子操作（失败即补偿）
+      - ③ 快照覆盖（后作废 —— 清空为永久删除）
+    status: RESOLVED
+    depends_on: [C9-missing-icon, C3-atomicity]
+
+  - layer: constraint
+    node: C11-missing-list-producer
+    decision: 缺失清单是 APPLY 的产物（一次性告知），不是读取侧状态；读取侧保留裸引用（C9）
+    alternatives:
+      - option: 在 resolveIconReferences 失败分支置空 / 抹去 local-icon: 前缀
+        rejected_reason: 会抹掉消费方唯一的缺失判据（resolveForDisplayState 依赖 value.startsWith('local-icon:')）⇒ D9"缺失 vs 本来没有"不可区分，等于自毁 T6
+      - option: 扩展 getSyncState() 契约携带缺失位
+        rejected_reason: 影响全部消费方（链路 / 投递 / UI）；且 C9 已否决"需扩展 schema 才能推导状态"的方向
+      - option: 另设可轮询的 getMissingIcons() 旁路查询
+        rejected_reason: 与 C9"一次性告知"语义不符——清单是导入应用那一刻的结果，不是持续状态
+    rationale: 两层分离——持久 / 读取态保留裸引用（C9），显示态由消费方判定（D9）；清单只在 APPLY 结果里登记一次
+    implications:
+      - resolveIconReferences 失败分支行为不变（保留 local-icon: 字面量，不置空）
+      - UI 渲染必须经 resolveForDisplayState 后再出占位（接线归 T20 / T22）
+      - ImportApplyResult.missingIcons 由 APPLY 路径填充（T11 / T22），读取侧不生产
+      - 投递侧对"缺失"不做占位处理：缺失引用在 field-chain 处即被协议白名单拒（非允许协议 → tier 未设）→ 落 site/restore，页面保留站点原图标；"缺失"与"本来没有"的可区分性只落在扩展 UI（D9），不在页面
+    status: RESOLVED
+    depends_on: [C9-missing-icon]
+    revisions:
+      - date: 2026-10-06
+        change: T22 落地 —— 生产者建成（提交 2630427 + 收尾 ac621ee）
+        effect: |
+          生产者不再是空壳：service 侧 `collectMissingIcons(finalSafe, probe)` 在
+          `clearAndWriteWithCompensation` **成功之后**判定（import-export-service.ts:455-467），
+          遍历 `finalSafe`（应用后状态）、结构性排除 `deleted`；判据复用 `isMissingIcon`（注入窄接口
+          `MissingIconProbe = { isMissingIcon(src) }`，不重写 if 链、不 import 服务；构造改为**必需** 2 参
+          ⇒ 漏接线即编译失败而非静默空 `[]`）。UI 侧落 `ImportExportSection`（D9 修复入口 = 跳分区 + 高亮行，
+          零写入）。
+          判决性 RED（唯一可判别「写后收集 + memo 作废」的用例）：`replaced` 记录 + 目标机同 key **有自有 blob**
+          ⇒ 须报 missing。**可失败性双重实测**（2026-10-06，我做）：
+          - 收集点挪到写前 ⇒ 该例红（executor 证）；
+          - **删掉 storage-repository.ts:1041 `iconResolutionCache.clear()` ⇒ 该例红**（我独立复验：
+            `Tests 1 failed | 12 passed`，失败例即该判决性用例）。
+          ⇒ 该守卫对「写后 + memo 作废」**两个错法都真能失败**，非空转。
+          另：⑧ inspect/apply 的 tolerant 列表加**等价断言**（`toEqual` 比两真实输出）。
+    depends_on: [C9-missing-icon]
+
+  # ─── 🏗️ Architecture ─────────────────────────────────────────────────────
+
+  - layer: architecture
+    node: A1-package-self-description
+    decision: 缺失即权威 + 按维度显式选择模式（默认增量）；不设 manifest
+    alternatives:
+      - option: manifest（包内显式清单）
+        rejected_reason: 意图已显式后属冗余；需维护"清单与内容一致"的第二重校验
+      - option: 类型化缺失（null/[]/absent 约定）
+        rejected_reason: JSON 中极易写错，而 C8 的宽容会掩盖这类错误
+    rationale: 含义由用户明确声明而非推断
+    implications: 需按维度建模；覆盖导入的高风险默认落在保留（增量）
+    status: RESOLVED
+    depends_on: [G5-import-boundary, C4-server-authority]
+    conflicts_resolved:
+      - conflict: "'缺失' 一词在 G5 里被重载（文件驱动 = 不碰；清空意图 = 删除）"
+        resolution: 由按维度显式模式消解
+
+  - layer: architecture
+    node: A2-absent-dimension
+    decision: 文件未承载的维度不提供选择器；UI 标注"本包未包含规则"，按增量处理
+    alternatives:
+      - option: 照覆盖执行（删除该维度全部）
+        rejected_reason: 一次误选即全毁；且这类删除无法被 diff 行项充分表达
+      - option: 提供选择器但覆盖需二次确认
+        rejected_reason: 用户选择更彻底的做法：直接不给入口
+    rationale: 把"用干净包重置规则"的表达限制在合法路径上
+    status: RESOLVED
+    depends_on: [A1-package-self-description]
+
+  - layer: architecture
+    node: A3-tri-state
+    decision: 未携带 = 字段不存在；已携带但为空 = 空数组 []；两者 UI 与模式选择不同
+    rationale: 三态由 JSON 语法天然区分，无需额外清单
+    implications: 非数组维度（settings/switchDirection/autoBindGlobal）只有两态
+    status: RESOLVED
+    depends_on: [A2-absent-dimension]
+
+  - layer: architecture
+    node: A4-per-record-override
+    decision: 逐维度模式为默认值，逐记录可覆盖；提供 diff
+    alternatives:
+      - option: 文件一律胜出（维度模式为唯一输入）
+        rejected_reason: 与既有设计要求冲突（detail-ui-validation-design.md:58 要求逐项选择）
+      - option: 逐记录决策为准（维度模式仅批量设置）
+        rejected_reason: 会弱化"按维度表达意图"这一 A1 的基础
+    rationale: 恰好是既有设计"逐项选择 + 一键全选"的推广，无需修订 ADR
+    implications: 意图载荷 = 各维度模式 + 稀疏记录级覆盖（有界，服务端可重算）
+    status: RESOLVED
+    depends_on: [A1-package-self-description]
+
+  - layer: architecture
+    node: A5-no-comparison
+    decision: 不做比对（不校验文件是否在预览后变化）
+    alternatives:
+      - option: 文件指纹
+        rejected_reason: 用户判断实践中几乎总成立
+      - option: 全量结果比对
+        rejected_reason: 重复一次确定性推导；载荷随记录数线性膨胀
+    rationale: 权威性不受影响（服务端写的是当前文件内容），仅告知性收窄
+    implications: 残余风险曾存在（后由 D12 构造性消除）
+    status: SUPERSEDED
+    superseded_by: D12-shared-string
+    depends_on: [C4-server-authority]
+
+  - layer: architecture
+    node: A6-recipe-value-model
+    decision: 配方只存在于存储层，链路解析时渲染；链路值模型零改动
+    alternatives:
+      - option: 链路值扩展为可携带配方
+        rejected_reason: MaskedSummary 把 node.value 当文本渲染，联合类型会显示成对象
+      - option: 存储层同时保存配方与渲染结果
+        rejected_reason: 两份状态不一致时会静默投递旧图标
+    rationale: 配方成为唯一持久真源，渲染值只作缓存；与 local-icon 走同一条路
+    implications:
+      - 必须真用 iconResolutionCache 记忆化
+      - 渲染统一在 background，用 OffscreenCanvas 产出 PNG；UI 与投递路径共用同一结果
+      - 须补写入门禁适配：三处门禁需排除 type:'template'（配方 value 为空串，会被 url-utils.ts:618 误拒）
+    status: RESOLVED
+    depends_on: [C1-icon-carriage]
+    revisions:
+      - date: 2026-10-05
+        change: 渲染落点由「background 读取时」更正为「UI 侧」（规划期发现 + 用户裁定 Q1=A）
+        effect: 载体表述调整，未改变"配方为唯一持久真源"
+      - date: 2026-10-05
+        change: 渲染落点最终裁定为 R1 —— background 用 OffscreenCanvas 产出 PNG（取代 Q1=A）
+        effect: |
+          依据纠正："background 无 canvas" 指的是 document.createElement('canvas')；
+          OffscreenCanvas 是 MV3 service worker 可用平台 API，无需新增依赖。
+          决定性理由：投递路径不经过 UI（内容脚本导航驱动、apply-fields.ts 只接受字符串且拒 SVG），
+          故 UI 侧渲染只能修好 UI 可见面，且会迫使投递侧另设渲染器 → 两个渲染器并存。
+          顺带修复既有 latent 缺陷（resolveForDisplay 的 template 分支产 SVG 被页面侧静默丢弃）。
+          已知风险：worker 内字体/emoji 保真度需 spike；失败降级为占位（不得降级为 SVG）。
+      - date: 2026-10-05
+        change: 渲染落点最终形态 R2 —— 落点由 resolveForDisplay 改为 resolveIconReferences（读取时物化）
+        effect: |
+          实施期由实现方与独立审查方各自独立发现 BLOCKER：R1 把渲染放进 background 是对的，
+          但落点 resolveForDisplay 生产调用点 = 0（仅测试调用），故"UI 与投递共用渲染结果"从未成立
+          —— 用户保存 Custom Icon 后页面图标不生效、UI 也不显示。
+          根因（本设计的一处错误）：ChainResult 只承载 value:string|null，
+          IconSource（含 type 与配方）在进链时即被剥离（field-chain.ts:113-114 asSet('') → null）；
+          且渲染 async 而 field-chain 是同步纯函数 → 配方必须在"进链之前"物化
+          （此即 A6 决策句原文「链路解析时渲染」的本意）。
+          R2 形态：在 storage-repository.resolveIconReferences 中对 type='template'
+          渲染 PNG 写入 value，配方字段与 type 原样保留。
+          可行的决定性事实：field-delivery-service.ts:197 已是 await getSyncState()（async 障碍不存在）；
+          resolveIconReferences 已在做同形状的"解析时物化"（local-icon: 引用 → 真实 data URI，现成先例）。
+          A6「链路值模型零改动」得以保全；投递与 UI 同经 getSyncState() ⇒ 天然共用同一结果。
+          硬要求：渲染失败的降级必须产 PNG 占位，value 中不得出现 SVG
+          （投递侧白名单拒 svg+xml，塞 SVG 会被静默丢弃）。
+          R1 的唯一已知风险已实测排除：真实 MV3 service worker 内 OffscreenCanvas 可用，
+          CJK 930px / emoji 3044px、彩色像素 651、9 色 —— 字体与 emoji 保真度通过。
+      - date: 2026-10-05
+        change: R2 物化落地范围补全 —— 由「仅 sync 读取」扩至「所有承载 IconSource 的读取路径（含 local.tabOverrides）」
+        effect: |
+          独立审查发现与刚闭合的 BLOCKER 同构的残留缺口：resolveIconReferences 只遍历
+          sync 的 rules / slots，未覆盖 local.tabOverrides（最高优先级层，Change Icon 写入，
+          storage-repository.setTabOverride → writeLocal）。override 配方 value 恒为 '' →
+          field-chain asSetFavicon('') → null → 投递 restore/none → 当前页图标不生效，
+          即「Custom Icon 端到端可用」尚未达成。
+          裁定：采用 (a) —— 为 local 读取补等价物化，复用同一 RecipeRenderer，并施加同一
+          strip 不变式（local 持久态亦不得回写派生渲染值；writeLocal 为唯一写口）。
+          附带裁定（同一 C1 面）：UI 编辑往返保真列入 T7 必测 —— seedIconFieldSource 只吃
+          string，会把读取时物化的 PNG 当真实上传（{mode:'custom', iconConfig:{dataUri}}），
+          使 type:'template' 降级为 'upload'、配方真源丢失、导出不再可复现。
+          反向转换 iconSourceToIconConfig 已存在但零调用者，须接线。
+      - date: 2026-10-05
+        change: 「配方身份保真」升级为跨面统一不变量（三条 UI 路径统一处置）
+        effect: |
+          审查定位到同一类病（派生渲染值使配方身份丢失 / 降级为 upload）落在三条 UI 路径：
+          ① 编辑往返（种子/应用）—— sidebar seedIconFieldSource:862、onApplyTier:990；
+             settings openEdit:1641、applyTierValue:1559；
+          ② 撤销回放（T13）—— settings handleUndo:1611/:1618，快照捕获 :1482-1483 存 winner.value；
+          ③ 链上 Use（UUID-19）—— applyTierValue / onApplyTier 取 TierValue.value 但丢掉 IconSource.type。
+          统一不变量（唯一持久的必须是配方身份本身 IconSource，不得由渲染值反推）：
+          - 编辑器播种必须经 iconSourceToIconConfig(source)（已存在、零调用者 → 接线为唯一反向入口）；
+          - 撤销快照必须存原始 IconSource（须加宽 UndoSnapshot：现为 string-only），回放原样重放；
+          - 链/记录值 pick 若绕过编辑器的提交流程，也必须保留源身份（同一条转换入口）。
+          本项为迭代内交付门禁（不并入浅层范围）；T13 为先行切片。与 T14（背景物化范围）
+          属同一 C1 面的「读」与「写回」两侧。
+      - date: 2026-10-05
+        change: 修正 T14 strip 判据的存疑前提 —— 「writeLocal 是唯一 local 写口」不准确
+        effect: |
+          审查核实：storage.local 有 7 处不经 writeLocal 的直写（setPendingUndo:942、
+          offloadLargeIcons:436/448、sync-unavailable fallback:351/374/708/718）。
+          真实受 R2 影响者仅 setPendingUndo：captureUndoSnapshot 读 getSyncState()（已物化）
+          → 捕获 uiMarker 含 PNG → 直写 pendingUndo 键。
+          裁定：
+          - strip 落点**保持 writeLocal**（LocalState 唯一正规写口）；不追改 7 处直写
+            （4 处 sync-fallback 已由 writeSync/mutateSync strip 前置覆盖；offloadLargeIcons
+            仅处理 data: >6KB，受 strip 保护）。
+          - setPendingUndo **显式豁免**：pendingUndo 非 LocalState、5s TTL、不导出，且
+            restoreSlot→saveSlot→writeSync 会 strip（配方字段/type 保留），**无持久污染**。
+          - 据此修正 T14 复审判据：「local 持久态配方 value 恒为 ''」**仅对 LocalState 成立**；
+            pendingUndo 允许短暂持有 PNG，单列为可接受项。
+          - 附带事实：offloadLargeIcons 是 strip 的**下游依赖**（判 value.startsWith('data:')），
+            strip 同时是 offload 正确性的前提，非仅保真。
+      - date: 2026-10-05
+        change: T13 范围收窄 —— 三条 Undo 路径仅 settings 一条为真实缺陷
+        effect: |
+          审查核对三条撤销路径：① settings handleUndo（:1611/:1618）→ string-only 快照
+          → {type:'upload'} → **真降级（T13 真实缺陷，strip 救不了：type 已丢失）**；
+          ② sidebar UNDO_SAVE（PendingUndoSnapshot，slot-service:596-666）→ 捕获整个
+          uiMarker/slot，type 保留 → 恢复经 writeSync strip ✓ 已被覆盖；
+          ③ sidebar 槽位移除 undo（previousSlot: SlotDefinition）→ 整个对象 → saveSlot→strip ✓。
+          裁定：T13 **只修 settings 一条**，不得过度扩张到 2/3。
+      - date: 2026-10-05
+        change: 「配方身份保真」反向门禁 chokepoint 改锚 —— 「一个函数」→「IconSource 边界」
+        effect: |
+          审查证实"唯一反向入口"表述不可实现：反向实有两条路径且中间模型有损。
+          - P1 iconSourceToIconConfig（icon-source.ts:43）源感知，但**对 type:'url' 返回 {}**
+            （无 url 分支）→ 单靠 P1 无法覆盖 url 播种；且调用者为 0。
+          - P2 toIconFieldValue（icon-mode-adapter.ts:19）按 data: 前缀猜（:24），
+            调用者 4 处（field-editor.tsx:163/170/259/266），在用。
+          - FieldMode 与 IconFieldValue 均无 type 字段（icon-field-editor.tsx:26-32）⇒ P2 天生只能猜。
+          修订裁定：
+          - 门禁锚点 = 单一**源感知**反向边界，而非单一函数：新增 composer 按 source.type 分派
+            （template→mode:'custom'+iconConfig 配方三字段**不得带 dataUri**；upload→mode:'upload'；
+            url→mode:'url'），内部复用 P1；**P1 须补 url 分支**。
+          - **凡在已知 IconSource 的播种点，反向不得按 data: 前缀推断 mode**；P2 的前缀猜测
+            仅允许作为"无源信息"旧路径的最后手段。
+          - 三条门禁路径共同前置 = 按 owner 取源小工具 iconSourceForOwner(owner, ctx)，
+            供三处复用，避免各写一套。
+          - 链路身份：**不改 ChainResult / field-chain**（A6 已否决链路值携带配方）；
+            捕获点按 owner 重读到记录（ChainResult.nodes 带 owner；winner 仅带 TierKey，
+            调用上下文 DashboardEntry 持有 tabId/slotId/ruleId，足够定位）。
+      - date: 2026-10-05
+        change: composer 的集成地雷 —— matchesLocal 只比 dataUri，配方编辑将无法传播到选择器
+        effect: |
+          composer 上线后（template 分支 iconConfig 不含 dataUri）激活一处潜伏缺陷：
+          field-editor.tsx:179 matchesLocal 的 iconConfig 分支**只比 dataUri**
+          （state.iconConfig?.dataUri === iconConfig.dataUri）；两侧均 undefined
+          ⇒ 恒真 ⇒ 重同步条件 !sameIconSource && !matchesLocal 永假 ⇒ setState 永不执行
+          ⇒ 选择器显示旧配方、父级持有新配方（换行/父级配方变化时不刷新）。
+          今日潜伏不显形的唯一原因：今日 iconConfig 必带物化 dataUri（前缀猜测路径）。
+          裁定：matchesLocal 的 iconConfig 分支**必须复用 iconConfigsEqual 全字段比较**
+          （与 sameIconSource 同口径）；反例锚点 = 该分支不得只比 dataUri。
+          测试须做**结构断言**（配方字段变化后 FieldEditor 的 iconConfig 与父级一致），
+          不测渲染像素 —— 否则"播种保真"被静默吞掉而测试假绿。
+          附带确认：toIconFieldValue 的 4 个调用点全为 prop-派生（FieldEditor 只收
+          mode/iconConfig/baseline，无 IconSource）⇒ "已知源播种点禁前缀；P2 仅作无源末选"
+          的例外边界成立。
+      - date: 2026-10-05
+        change: 前缀推断点锚点由「四处（症状列举）」改为「持有 IconSource 者为界（完备集合）」
+        effect: |
+          审查取精确基线：src/ui 内 startsWith('data:') 共 14 处命中，而「四处」清单漏报
+          两处**源感知**播种点：
+          - InlineRuleEditor（settings/App.tsx:447-583，硬缺陷）：入参为完整 rule，
+            rule.favicon 即 IconSource（:449 isCustomIcon 前缀判定；:458-463 播种 iconConfig
+            仅 dataUri；:573-575 baseline；:578 reset）—— 打开既有配方规则并保存即把
+            type:'template' 降级为 'upload'、配方真源丢失。属"已知 IconSource 的播种点"，
+            **必修**。
+          - CreateRuleModal（sidebar:1039/1042/1055/1056/1181）收 string prop；
+            调用方 handleSlotAddToGlobal:1997 持有 slot.uiMarker.icon（IconSource）却只传 .value；
+            applyChainValueToDraft:1127-1133（链上 Use 复制）同型。
+          修订裁定：
+          - #8 锚点措辞改为「**凡持有 IconSource 的播种/编辑点均不得按 data: 前缀推断 mode**」，
+            并**显式列入 InlineRuleEditor**（必修）；
+          - CreateRuleModal / applyChainValueToDraft / handleSlotAddToGlobal 三处
+            **显式标注为本轮已知残留**（附行号与原因），**不得默认静默**；
+          - 机械反例锚点：`rg -n "startsWith\('data:'\)" src/ui` 的命中集合必须**收敛到**
+            显式例外清单（P2 prop-派生 + 显示-only + 已标注残留），而非"四处"。
+      - date: 2026-10-05
+        change: FIX-B 物化落点须覆盖 sidebar raw 读取（否则 override 物化被旁路）
+        effect: |
+          审查发现 FIX-B 的范围缺口：sidebar loadState（App.tsx:1272-1284）在 GET_STATE
+          （→ getLocalState()，FIX-B 物化点）之后，**又直读 chrome.storage.local.get('localState')
+          并用持久态 tabOverrides 覆盖**（:1279）。守卫 typeof chrome !== 'undefined' 在扩展内恒真
+          ⇒ 生产环境每次都执行。后果：即便 getLocalState() 正确物化，sidebar 仍换回持久态
+          （配方 value:''）⇒ override 配方在 sidebar 显示空白、Change Icon 播种不出配方。
+          全 src/ui 仅此一处 chrome.storage.local.get（手工核实）。
+          补充事实：该 raw 读取**只**对 tabOverrides 特判，bindings/siteSnapshot 均未特判 —— 本身即坏味道。
+          裁定：
+          - FIX-B 物化落点须覆盖该 raw 读取：抽出 materializeLocalState(raw) 供两侧复用，
+            或取消该 raw 覆盖、把"新鲜度"改为 GET_STATE 结果上的判断；
+          - 反例锚点：src/ui 不得出现未经物化直接使用 chrome.storage.local.get('localState')
+            的 tabOverrides；
+          - 测试：FIX-B override 用例须经过 sidebar loadState 路径（或断言 raw 覆盖不发生在物化之后），
+            否则"绿而 sidebar 仍空"。
+          附带：该 raw 读取只读、不回写 ⇒ 不构成新的派生值升格通道；但使「LocalState 持久态
+          value 恒 ''」与「UI 显示物化值」出现分叉 —— 正是 FIX-B 要堵的口。
+      - date: 2026-10-05
+        change: 纠正 FIX-B 「取消 raw 覆盖」的推理依据，并把该选项与新鲜度回归测试绑定
+        effect: |
+          修正上一条的推理错误：getLocalState()（storage-repository.ts:272-277）**只在
+          !localCache 时 hydrate 重读，否则直接返回缓存** —— 它**不是**"每次缓存失效重读"。
+          真正的"新鲜度"来自：writeLocal 写后直接 this.localCache = updated（:607）；
+          handleStorageChange 在 local 变更时 this.localCache = changes[LOCAL_KEY].newValue（:270-271）。
+          ⇒ raw 覆盖**确实冗余**，但依据应为「后台 writeLocal/onChanged 对自身写即时新鲜」，
+          而非「getLocalState() 每次重读」。区别重要：它决定删除后是否需要补新鲜度护栏。
+          该 raw 读取是历史缺陷补丁（9ab3651 / 2026-08-05 "Problem 1: tabOverrides 不更新"），
+          当时后台缓存确实会陈旧；今日 writeLocal:607 已直接更新缓存 ⇒ 大概率可退役，但非"已验证"。
+          裁定（FIX-B #1 验收增补）：
+          - 若**取消 raw 覆盖**（倾向方案），**必须配一条新鲜度回归测试**：写 override → 立即经
+            sidebar loadState/GET_STATE → 断言新值可见（不等 onChanged 回调时序）；否则原 Problem 1
+            可能静默回归而现有测试不发现（它们不覆盖这条 raw 读取）。
+          - 若走 `materializeLocalState(raw)` 复用，则无需该测试，但接受"多一次 raw 读取"的复杂度。
+          实现细节（无论选哪种）：handleStorageChange 更新 localCache 时**不做物化**（:271 直接存 raw）
+          ⇒ FIX-B 物化**必须在读取处（getLocalState()）做**，不能依赖缓存内容已被物化。
+      - date: 2026-10-05
+        change: FIX-B 收口 —— sidebar 侧未闭合 + 测试诚实性 + B6 快照契约加固（LOW）
+        effect: |
+          复审 `177593c`：background 侧 5 点全通过（物化落 getLocalState、同一 RecipeRenderer、
+          进链前、strip updater 前后各一次、失败不留 SVG）；sidebar 侧**未闭合**。
+          未闭合项 = App.tsx:1276-1279 raw 覆盖（全 src/ui 唯一 chrome.storage.local.get('localState')）
+          仍以持久态 tabOverrides 覆盖 GET_STATE 已物化结果 ⇒ state.local.tabOverrides 回到 ''
+          ⇒ 显示错误 + Change Icon 播种空值；与 background 侧"绿"并存（典型「绿而仍然坏」）。
+          测试诚实性缺口：override-recipe-delivery.test.ts 4 条全走 repo/FieldDeliveryService，
+          **不经 sidebar loadState** ⇒ 结构上不可能发现该缺口。补完 sidebar 后**必须另加**一条
+          （取消 raw 覆盖 → 新鲜度回归；复用 materializeLocalState → 断言不再覆盖）。
+          LOW（B6 快照契约加固，非阻断）：resolveLocalIconReferences 在 changed===false 时返回
+          **同一** state（tabOverrides 与 localCache 共享数组引用），而 stripDerivedLocalRecipeValues
+          是**原地 mutate** ⇒ 违反 B6「返回快照不得与缓存共享、不得原地改」。今日无实际损害
+          （该分支下配方 value 恒 ''，strip 跳过）；但属脆弱组合。裁定：strip 改为**纯函数返回新对象**
+          （或在 changed===false 时也 shallow-copy tabOverrides）—— 并入 FIX-B 收口，加固非阻断。
+      - date: 2026-10-05
+        change: B6 acceptance 由「strip 改纯函数」升格为「getLocalState 返回值与缓存不共享」+ 调用点必须用返回值
+        effect: |
+          审查纠正两处事实（我复核成立）：
+          1. getLocalState() 的浅拷贝共享是**既有**语义（FIX-B 前 `{ ...localCache }`，FIX-B 后
+             `resolveLocalIconReferences({ ...localCache })` 同语义），FIX-B 未加重；
+          2. writeLocal 的原地 strip 今日是 **no-op**（changed===false ⇔ 无 template override 被物化
+             ⇔ 其 value 恒 '' ⇔ strip 条件不满足）⇒ **潜伏**，非现行污染。
+          关键陷阱：现调用点 writeLocal:661/663 **丢弃返回值**（`this.strip(...)` 独立语句）。若只把函数体
+          改纯（return newState）而不改调用点，结果被扔掉、updater 仍拿到未 strip 的 current ⇒
+          "B6 已满足"是**假的**，且无编译错误、无测试报警（静默 no-op）。
+          修正后的 acceptance（以**性质**而非实现断言）：
+          **getLocalState() 的返回值（含 tabOverrides/bindings/iconCache）与 localCache 不共享可变数组；
+          writeLocal 对 updater 传入对象做任何处理都不得改动 localCache。** 调用点 :661/:663 **必须使用**
+          strip 的返回值。
+          测试形态（结构性，非像素）：取 snapshot → 原地 push → 再取 → 断言缓存未被污染（tabOverrides 一条、
+          bindings 一条）。这才能真正抓住 B6，而非"strip 是不是纯函数"。
+          彻底做法：getLocalState() 返回时对 tabOverrides（及被上游原地改的数组）shallow-copy；
+          是否本轮做由裁定 —— 属既有 B6 面，**不阻断 FIX-B**。
+      - date: 2026-10-05
+        change: FIX-A / FIX-B / FIX-C 三项闭合（经独立复验 a–i 九项全部达成）
+        effect: |
+          收口提交：95446fd(FIX-A follow-up) / d00629a(FIX-B closure) / db299c9(FIX-C closure)。
+          独立复验（HEAD 真值，非采信报告）a–i 九项全达成：
+          a canonicalIconSource（仅 template 且非空时归 ''，直展开禁往返）；
+          b mock 改物化态 + RED 形态精确（失败信息为 value 收到 PNG）；
+          c rule 变体已删；d sidebar raw 覆盖整块删除；
+          e sidebar-override-freshness 结构性测试（raw get 未被调用 + 渲染 PNG）；
+          f strip 改纯函数 + 两处调用点用返回值 + local-snapshot-isolation 性质测试；
+          g IconConfig.url 移除（iconSourceToIconConfig url 分支回 {} + 比较器去 url）；
+          h/i 编辑往返 openEdit/seedIconFieldSource 改源感知，锚点 14→10。
+          实质判定：FIX-A/B/C 闭合。残留（非阻断，已知）：MEDIUM-C 缓存高频 clear；
+          链上 Use（applyTierValue/onApplyTier）3 处前缀猜为具名残留；missingIcons 归 T11/T20/T22。
+          一处遗留复核：db299c9 对 sidebar-icon-editor-prefill.test.tsx 的断言由
+          getByAltText('Icon preview')+toHaveAttribute('src') 放宽为 querySelectorAll('img').some(src)，
+          原意（首开即预载非空白）仍成立但断言略弱 —— 待 reviewer 明确判定，或后续加强。
+      - date: 2026-10-05
+        change: 上条遗留项复核结论 —— prefill 断言已成【恒真】，判为测试诚实性回归，须修
+        effect: |
+          reviewer 第三轮复核确认并加重：#2 不是"略弱"而是**恒真断言**。
+          决定性事实：sidebar 自身在两种场景都已渲染 src=EXISTING_ICON 的 <img>：
+          - 用例2（当前页）：mock tabs.query 返 favIconUrl=EXISTING_ICON ⇒ header 渲染
+            <img className="tbs-sidebar__current-favicon" src={displayCurrentFavicon}>（App.tsx:2155），
+            displayCurrentFavicon（:2119-2121）含 state.currentTabFavicon ⇒ 恒真；
+          - 用例1（槽位）：slot.uiMarker.icon={type:'upload',value:EXISTING_ICON} ⇒ 槽位行渲染
+            <img src={displayIcon}>（:506）⇒ 也恒真。
+          ⇒ **编辑器完全没预载（空白）时两用例仍 GREEN** ⇒ 原 RED 守卫（"首开无预览 img"）被彻底取消。
+          裁定：#2 判为**测试诚实性回归**（与 #6 同族），**须修**（唯一未闭合项，其余 a–i 达成）。
+          加强形态（二选一，恢复守卫）：
+          - `const dialog = screen.getByRole('dialog'); expect(within(dialog).getByRole('img')).toHaveAttribute('src', EXISTING_ICON);`
+          - 或按 FIX-C 新形态：在 dialog 内断言唯一预览 img 的 src，**并**断言模式确为源感知
+            （`.tbs-icon-field[data-mode="upload"]`）—— 同时证明"预载"与"源感知播种"。
+          附带记录（FIX-C RED 偏弱，可接受但留训）：fixc-red.txt 4 条中 3 条是
+          `iconSourceToDraft is not a function`（"函数未实现"型，非行为型）；行为证据实际来自
+          测试内 control（旧前缀猜产 upload）+ seed→apply 往返 ⇒ 可接受。后续新功能的 RED
+          应避免仅"函数未实现"型，须含行为型断言。
+
+  - layer: architecture
+    node: A7-snapshot-icon-protection
+    decision: (未裁定即失效) 快照保护被清空图标：改名 vs 复制
+    status: VOID
+    void_reason: 2026-10-05 不实现导入撤销；清空为永久删除
+    depends_on: [A8-no-undo]
+
+  - layer: architecture
+    node: A8-no-undo
+    decision: 不实现导入撤销
+    rationale: 用户裁定
+    implications:
+      - 覆盖导入成为不可逆的数据销毁操作
+      - C3 的原子性只防"失败"，不防"成功地做错"
+      - 既有槽位覆盖的 5 秒 UndoBar 保留（性质不同：快速键盘动作 vs 刻意操作）—— 有意的不对称
+    status: RESOLVED
+    depends_on: [G4-success-criteria]
+
+  - layer: architecture
+    node: A9-destructive-guard
+    decision: 量化破坏范围 + 「导出备份」按钮 + 「我了解风险，确认导入」按钮，用户自行选择
+    alternatives:
+      - option: 仅加强确认文案
+        rejected_reason: 逐维选择表达的是策略而非后果规模，落差需补
+      - option: 不需要
+        rejected_reason: 同上
+    rationale: 把备份从"仪式"变成"能力"，避免强制备份的缺陷
+    implications:
+      - 按钮承载责任转移，不承载"我已备份"；两者是并列选择
+      - 须说明备份反映导出那一刻的状态
+    status: RESOLVED
+    depends_on: [A8-no-undo]
+
+  - layer: architecture
+    node: A10-protocol-redesign
+    decision: 重新设计该子系统协议
+    alternatives:
+      - option: 在现有三动作内扩展载荷
+        rejected_reason: IMPORT_COMMIT 载荷必须变更（preview → file+intent），且用户选择一次理顺
+    rationale: 重构协议应在语义定稿之后 —— 语义此时已定完
+    implications: 牵动 messages.ts / worker-orchestrator / message-client / 既有测试
+    status: RESOLVED
+    depends_on: [C4-server-authority]
+    revisions:
+      - date: 2026-10-05
+        change: 协议重构拆两阶段（T14a 新增 / T14b 删旧），因旧动作调用者全属下游
+        effect: |
+          实施期发现 T14 验收（typecheck 0 error + src/ 反例 0）与依赖图冲突：旧三动作仍有
+          活体调用者（settings/App.tsx:2013/2044/2070 → T18/T19；full-suite.test.ts:132/139、
+          messages.test.ts:58-60/275/301 → T21）。单独在 Wave 3 删除即破坏构建（违反"每个提交自洽"）。
+          且"把 T14 后移到 T18 之后"会**成环**（既有依赖 T14→T17→T18：T18 Blocked By 含 T17、
+          T17 Blocked By 含 T14）。
+          裁定：T14a 只**新增**三动作契约（旧动作保留共存，联合类型/白名单各含 6 项，编译自洽），
+          T14b **删旧动作**并入 T21 收口（settings 迁移完成后执行，届时 src/ 反例收敛为 0）；
+          T17 的 Blocked By 由 T14 改为 T14a。
+      - date: 2026-10-05
+        change: T14b 反例锚点扩到同族类型名；锁定 ImportPreview（类型）删除 / ImportPreviewTable（组件）保留
+        effect: |
+          审查发现 T14b 原锚点 `rg "EXPORT_CONFIG|IMPORT_PREVIEW|IMPORT_COMMIT" src/` 仅覆盖
+          **动作字面量**，漏报同族旧契约（非大写字面量，rg 不匹配）：ExportConfigRequest/
+          ExportConfigResponse、ImportPreviewRequest/ImportPreviewResponse、ImportCommitRequest、
+          `interface ImportPreview`、ImportSlotConflict/ImportSlotDecision、ExportPayload、
+          message-client 旧方法 exportConfig/importPreview/importCommit。
+          风险：锚点打 0 而旧契约仍在（编译过、锚点 0、删除未完成）—— 与 MEDIUM-5 锚点**误报**
+          是同一类病的**反向（漏报）**。
+          歧义消解（关键，二者同名易混）：
+          - `ImportPreview` = **旧类型** ⇒ T14b **删除**（计划 :147 明列）；
+          - `ImportPreviewTable` = **组件** ⇒ **保留并由 T20 演进**（计划 :1977-2054）；
+          - 新版类型名为 `ImportInspection`，不复用 `ImportPreview` 名。
+          裁定：
+          - T14b 反例锚点**增补同族**：
+            `rg -n "\b(ExportConfigRequest|ExportConfigResponse|ImportPreviewRequest|ImportPreviewResponse|ImportCommitRequest|ImportSlotConflict|ImportSlotDecision|ExportPayload|ImportPreview)\b" src/` → **0**
+            （`\b` 保证不误匹配 `ImportPreviewTable`/`ImportPreviewProps`）；
+          - `message-client.ts` 三个旧方法须与 `KNOWN_ACTIONS` **同步删除**（否则"客户端能调、后台无 case"）；
+          - 孤儿页 `ui/import-preview/`（`App.tsx` 组件由 T20 保留演进；`main.tsx`/`index.html`/
+            `vite.config.ts:36` 独立页入口）**须显式处置**：T20 定稿时默认**删除独立页入口**
+            （组件改由 settings 内联消费，T18），除非保留作开发预览并写明理由 —— **不得静默跨过收口**。
+      - date: 2026-10-05
+        change: W5 基线锁定 + 两处锚点盲区补丁（组件保留但类型迁移 / 服务方法名）
+        effect: |
+          审查实测基线（供 W5 直接比对）：动作字面量 15 处；同族旧类型（\b 列表）32 处；
+          ImportPreviewTable/ImportPreviewProps 4 处（豁免）。\b 验证通过（ImportPreview 后紧跟
+          T/P 均为词字符 ⇒ 无误匹配）。
+          盲区 1（组件保留但类型迁移）：ui/import-preview/App.tsx 被保留（组件演进），
+          但其 :16/:21 仍用旧类型 ImportPreview/ImportSlotConflict/ImportSlotDecision
+          ⇒ W5 时该文件会被同族锚点命中。裁定：T20 验收须含"把 :16/:21 的类型迁到
+          ImportInspection/新类型，仅保留 ImportPreviewTable/ImportPreviewProps 名"；
+          锚点届时归 0 是**正确预期**，不是误报（防止执行者因"文件要保留"而漏迁类型）。
+          盲区 2（服务方法名，两锚点均抓不到）：ImportExportService.exportConfig/generatePreview/
+          commitImport（import-export-service.ts:42/82/199，调用点 worker-orchestrator.ts:762/765/769）
+          既非动作字面量、也非类型名。裁定：T14b 判据补一条锚点
+          `rg "\.(exportConfig|generatePreview|commitImport)\(" src/` → 0，否则"客户端能调、后台无 case"
+          的同族残留会从服务层漏过。
+
+  - layer: architecture
+    node: A11-action-set
+    decision: 三动作各一语义 —— EXPORT_PACKAGE(scope) / IMPORT_INSPECT(file) / IMPORT_APPLY(file, intent)
+    alternatives:
+      - option: 四动作（+ EXPORT_DESCRIBE）
+        rejected_reason: YAGNI —— 范围选择所需数据已从 GET_STATE 获得
+      - option: 两动作（dryRun 标志区分）
+        rejected_reason: 把只读推导与破坏性写入混在同一入口
+    rationale: INSPECT 是「文件」的纯函数 → 改意图无需重新 inspect
+    implications: EXPORT_PACKAGE 同时是「导出备份」的实现
+    status: RESOLVED
+    depends_on: [A10-protocol-redesign]
+
+  - layer: architecture
+    node: A12-diff-granularity
+    decision: 记录级为默认，字段级可展开
+    alternatives:
+      - option: 记录级（只标替换/保留/删除/新增）
+        rejected_reason: 不足以支撑裁决 —— 决策依据正是"哪个字段会变"
+      - option: 字段级为默认
+        rejected_reason: 10 槽位×2 + 9 规则×2 = 38 行，多数是"不变"
+    rationale: 与 MaskedSummary 的折叠手法一致，不引入新交互范式
+    status: RESOLVED
+    depends_on: [A4-per-record-override]
+    revisions:
+      - date: 2026-10-06
+        change: 字段值契约为结构化 ImportFieldValue —— 内部签名不得进入契约/UI（实施期裁定）
+        effect: |
+          实施 T20a 时 executor 先建 src/ui/shared/import-field-format.ts，用
+          startsWith('url:'/'local-ref:'/'recipe:') 解析 import-diff 的私有比较串。
+          审查（reviewer）与我判定其三宗问题：
+          ① 平行推导：签名格式唯一 owner 是 import-diff.ts:49-69 的私有 portableIconSignature；
+             UI 侧重解析 ⇒ import-diff 改格式即静默漂移（与 D7 刚消灭的"第三条平行推导"同型）。
+          ② 前缀推断：startsWith 猜语义，与本迭代 FIX-C 判据 #8「不得按 data: 前缀推断 mode」同族
+             （已在 FIX-C 花两轮消灭，此处复现）。
+          ③ 泄漏仅被遮盖：签名仍留在 ImportFieldDiff 契约里，任何新消费者都可能直接渲染。
+          裁定（选 (b) 结构化，非 (a) 解析移址）：
+          - ImportFieldDiff.before/after 改为 ImportFieldValue | null（统一用 value 承载）：
+            { kind:'text'; value } | { kind:'url'; value } | { kind:'local-ref'; key }
+            | { kind:'recipe'; bgColor; text; textColor }；
+          - import-diff.ts 内把 portableIconSignature 拆为 portableIconFacet（结构）+ facetKey（比较串，
+            成对相邻、仅用于相等）；零解析、零前缀推断，正确性不变；
+          - UI 只做「结构 → 文字」渲染（纯展示）；
+          - deleted 行须渲染 "removed"（before 有值/after null 渲染成"不变"是错误陈述）；
+            "unchanged" 措辞仅适用于 kept 行（formatFieldDiffLine 须带 record status）。
+          影响面证据：ImportDiff 不持久化（storage-repository.ts / export-package.ts 零命中）；
+          fields 唯一消费者 = settings UI（App.tsx:2588/2592/2594）⇒ 跨层零波及。
+          反例锚点（精确版；裸前缀字面量**不锚**，仅锚"解析/切签名"）：
+          A. rg -n "startsWith\('(url|local-ref|recipe):'\)" src/ui/     → 0
+          B. rg -n "slice\('(url|local-ref|recipe):'\.length\)" src/ui/  → 0
+          （范围**只到 src/ui/**；不扩到 background。）
+          ⚠️ 为何不锚裸前缀：src/background/recipe-renderer.ts:30 已有
+          `RECIPE_CACHE_PREFIX = 'recipe:'`，:73-74 recipeSignature() 拼出与 portableIconSignature
+          **完全同格式**的串（memo cache key，合法）⇒ "src/ 内前缀归零"会误伤该合法生产者。
+          记账（本轮不动）：recipeSignature（cache key）与 portableIconSignature（比较串）格式重复但独立；
+          变更 cache key 格式会作废既有 memo ⇒ 不属 T20，禁止"统一"它们。
+          测试不得断言原始签名字符串出现在 DOM。
+          三条前置（防 (b) 新漂移）：
+          1. empty 语义不变 —— before/after 无值仍为 `null`，不得 `{kind:'text',value:''}`；
+          2. `changed` 仍由 facetKey 单一派生（portableIconFacet 与 facetKey 成对相邻）；
+          3. 仅 tests/unit/shared/import-diff.test.ts:148 须改（且保持 toEqual 精确）；
+             recipe-roundtrip-textcolor.test.ts:98/124 只断 .changed ⇒ 不受影响、勿动。
+          爆炸半径（reviewer 独立实测）：src/ 消费 .fields = 0（HEAD 态）；tests/ = 3 处（仅 1 处断字符串）。
+          W5 基线更正（我的原表述"3→2"错）：同族旧类型实为 **5 文件**
+          （import-export-service.ts:11 / messages.ts:13 / types.ts:6 / import-preview/App.tsx:7 /
+          message-client.ts:3）⇒ 删 import-preview 后 **5→4**，T20 贡献 = 1 文件（非 0）。
+
+  - layer: architecture
+    node: A13-testing-strategy
+    decision: 分层按可确定性 —— 纯逻辑走单测；跨存储顺序与补偿路径走集成（注入失败）；canvas 与真实浏览器留给手工
+    alternatives:
+      - option: 以集成测试为主
+        rejected_reason: 自然流向只走成功路径，而成功路径恰是最不需要保护的一半
+      - option: 真实浏览器 E2E 覆盖全流程
+        rejected_reason: 把整条链路拖进 E2E 成本过高
+    rationale: 关键不是"多集成"，而是"能制造失败"
+    implications: 与仓库既有 unit/integration/ui-smoke 同名同形
+    status: RESOLVED
+    depends_on: [C10-icon-key-clearing]
+
+  - layer: architecture
+    node: A14-transport-schema
+    decision: 独立的传输 schema + 双向映射层（不镜像内部形态）
+    alternatives:
+      - option: 镜像内部形态
+        rejected_reason: 内部字段（createdAt/updatedAt/configVersion）会泄漏，且在 C8 下须被逐项披露为"未知字段"
+      - option: 顶层独立、记录镜像
+        rejected_reason: 保留泄漏问题，只分了一半
+    rationale: G4-A 要求"不改动未勾选的记录"——显式 schema 让"携带了什么"成为枚举事实
+    implications:
+      - 映射层是新增代码量，记录字段变化时需同步维护
+      - 包不可能照抄 SyncState（导出时图标已被改写）
+    status: RESOLVED
+    depends_on: [C1-icon-carriage, C8-validation-strictness]
+
+  # ─── 📐 Detail ────────────────────────────────────────────────────────────
+
+  - layer: detail
+    node: D1-export-scope-ui
+    decision: 维度为主、记录为展开；至少勾选一个维度，否则禁止导出并说明原因
+    alternatives:
+      - option: 记录平铺清单
+        rejected_reason: 把维度降级为视觉分组，与导入侧不匹配
+      - option: 预设按钮 + 记录微调
+        rejected_reason: 引入第二套入口表达同一件事
+    rationale: 两端同构，用户不必重新学习
+    implications: "仅策略"/"仅快捷键"是合法组合 → 规则是"至少一个维度"
+    status: RESOLVED
+    depends_on: [A1-package-self-description]
+
+  - layer: detail
+    node: D2-dimension-extension
+    decision: 策略维度需支持每个 slot 的数据；新增 Shortcuts 维度
+    rationale: 用户要求
+    status: RESOLVED
+    depends_on: [D1-export-scope-ui]
+
+  - layer: detail
+    node: D3-field-ownership
+    decision: strategy 唯一归策略维度（槽位维度剥离）；Shortcuts 同构
+    alternatives:
+      - option: 归槽位维度
+        rejected_reason: 做不到用户的要求 —— "只勾策略维度"无法导出任何 per-slot 策略
+      - option: 允许重叠（出现即并集）
+        rejected_reason: 文件含义变成并集，C4 的服务端重算失去确定性
+    rationale: strategy 是 SlotDefinition 的字段，双归属会让"是否被携带"变成两个复选框的并集
+    implications: 单独导出槽位不含 per-slot 策略与快捷键；须在预览写成显式行项
+    status: RESOLVED
+    depends_on: [D2-dimension-extension]
+
+  - layer: detail
+    node: D4-platform-degradation
+    decision: 统一 schema，按平台能力降级执行（Firefox 自动应用；Chrome/Edge 展示差异 + 引导手动设置）
+    alternatives:
+      - option: Chrome/Edge 下隐藏该维度
+        rejected_reason: 使包的含义依赖来源平台，与 A3 相悖
+      - option: 包随平台变化（仅 Firefox 携带）
+        rejected_reason: 摧毁主要用途 —— "从 Chrome 迁到 Firefox"恰最需要导出快捷键
+    rationale: 平台差异应放在适配层（与 NormalizedCommand 的既有做法一致）
+    implications:
+      - Chrome/Edge 下该维度不提供「覆盖」模式
+      - "引导手动设置"必须进入清单
+    status: RESOLVED
+    depends_on: [D3-field-ownership]
+
+  - layer: detail
+    node: D5-dimension-set
+    decision: 槽位 / 规则 / 策略 / 快捷键 —— 4 个维度，不再增删
+    rationale: 恰好覆盖 SyncState 全部字段，无遗漏无重复
+    implications:
+      - 不进包：bindings / tabOverrides / siteSnapshot / iconCache / diagnostics
+      - configVersion 不随包（内部一致性标记）
+    status: RESOLVED
+    depends_on: [D4-platform-degradation]
+
+  - layer: detail
+    node: D6-import-ui-shape
+    decision: 单页，维度选择器折叠（默认折叠到维度级）
+    alternatives:
+      - option: 单页平铺
+        rejected_reason: 破坏性提示与按钮无法同时可见
+      - option: 两步向导
+        rejected_reason: 第 1 步看不到"会删掉什么"，正是判据 B 要消灭的形态
+    rationale: 决策与证据在同一视线内；复用 MaskedSummary 的折叠手法
+    status: RESOLVED
+    depends_on: [A4-per-record-override, A12-diff-granularity]
+
+  - layer: detail
+    node: D7-destructive-prompt
+    decision: diff 后点「应用」→ 恒定确认弹窗（量化提示 + 导出备份 + 我了解风险确认导入）
+    alternatives:
+      - option: 底部常驻提示行
+        rejected_reason: 恒定 N=0 会让提示退化为装饰
+      - option: 仅在有删除时出现并按规模分级
+        rejected_reason: 混合场景下（槽位覆盖、规则增量）按模式开关显示会漏报
+    rationale: 量化"删除"（真正不可逆），而非替换总数（可重做）
+    implications: 量化须按最终生效的选择计算，并由服务端重算后校对
+    status: RESOLVED
+    depends_on: [D6-import-ui-shape, A9-destructive-guard]
+
+  - layer: detail
+    node: D8-both-sides-default
+    decision: 双侧都有时默认预选「覆盖」（文件胜出）
+    rationale: D7 的恒定确认弹窗消解了"静默改配"的担忧；且语义更可预测
+    implications: 组标题行需提供「全部覆盖/全部保留」批量手段
+    status: RESOLVED
+    depends_on: [D7-destructive-prompt]
+
+  - layer: detail
+    node: D9-missing-icon-ui
+    decision: 显式占位（灰色 ?）+ 行内"需重新选择"标注 + 直接修复入口
+    alternatives:
+      - option: 走既有回退（🔖）
+        rejected_reason: 使"缺失"与"本来没有"无法区分
+      - option: 显式占位但无修复入口
+        rejected_reason: 告知是一次性清单，之后修复成本高
+    rationale: 复用 getPlaceholder() 与既有图标编辑器，不新增组件
+    status: RESOLVED
+    depends_on: [C9-missing-icon]
+
+  - layer: detail
+    node: D10-duplicate-match-hint
+    decision: 恒定提示；定义 = Match URL + Match Type 完全一致
+    alternatives:
+      - option: 不提示
+        rejected_reason: 重合改变运行时行为，影响大于字段变化
+      - option: 仅在可能产生重合的模式下提示
+        rejected_reason: 重合也可来自包内部，与模式无关
+    rationale: 判据最简单最可靠 —— "最终结果里是否存在重合"
+    implications:
+      - 是对最终状态的纯函数，单元可测
+      - 有意不覆盖语义重合（正则不同但匹配同一 URL）
+    status: RESOLVED
+    depends_on: [D5-dimension-set]
+
+  - layer: detail
+    node: D11-contract-identity
+    decision: schemaVersion + generator（仅诊断，不参与校验）
+    rationale: 拒绝信息目前无法定位"是什么工具、什么版本产出的"
+    status: RESOLVED
+    depends_on: [A14-transport-schema]
+
+  - layer: detail
+    node: D12-shared-string
+    decision: UI 复用 INSPECT 时读到的同一份字符串传给 APPLY
+    alternatives:
+      - option: APPLY 时重新读取磁盘文件
+        rejected_reason: 退回需检测（A5 已否决的路子）
+      - option: 保留 File 对象引用再读一次
+        rejected_reason: File 不缓存内容，再次读取仍反映磁盘变化
+    rationale: 预览内容与写入内容在构造上同一 → 漂移不可能发生
+    implications: 判据 B 从"通常成立"升为结构保证；省掉 A5 的遗留待决项
+    status: RESOLVED
+    supersedes: A5-no-comparison
+    depends_on: [A11-action-set]
+
+  - layer: detail
+    node: D13-file-naming
+    decision: 固定前缀 + 日期（现状）
+    alternatives:
+      - option: 按范围命名
+        rejected_reason: 用户选择保留现状
+    implications: 同日多次导出由浏览器自动加 (1) 后缀 —— 已知可接受
+    status: RESOLVED
+    depends_on: [D11-contract-identity]
+
+  - layer: detail
+    node: D14-validation-boundary
+    decision: 严格字段集合 + 域约束（slot.id ∈ 1..10；urlMatch.type ∈ {exact,regex}；正则通过 B4 闸门；URL 长度上限）
+    rationale: |
+      A14 选独立传输 schema，其意义正是"文件里是什么"可枚举可验证；
+      slot.id ∈ 1..10 是必要新增 —— 否则包里能出现 slot 11，而 UI 只有 10 行
+    implications: 复用既有正则安全闸门与 URL 校验，不新造
+    status: RESOLVED
+    depends_on: [A14-transport-schema]
+
+  - layer: detail
+    node: D15-domain-violation
+    decision: 一律「跳过该记录 + 披露」，整体导入继续；B4 闸门由"拒绝整包"放宽为"跳过该记录"
+    alternatives:
+      - option: 分级（安全类仍整体拒绝）
+        rejected_reason: 整包拒绝对分享场景过重，而换来的额外安全性为零（跳过即不写入）
+    rationale: |
+      B4 注释明确"模式从不被执行，只做静态校验" → 危害只在于被写入；
+      跳过即不写入，与整体拒绝在安全性上等价
+    implications:
+      - 域违规记录只能被丢弃，绝不能照原样写入（slot 11 会产生看不见的槽位）
+      - 披露必须醒目且不可跳过，单独归类为"因不安全被跳过"
+      - 须修改现有实现：service.ts:122 / :184 + 既有测试
+    status: RESOLVED
+    revises: C3-atomicity
+    depends_on: [D14-validation-boundary]
+
+# ─── 统计 ───────────────────────────────────────────────────────────────────
+summary:
+  goal: 5           # G1..G5（G3 已被取代）
+  constraint: 10    # C1..C10（C5/C6/C7 作废）
+  architecture: 14  # A1..A14（A5 被取代；A7 作废）
+  detail: 15        # D1..D15
+  total_entries: 44
+  resolved: 38      # 44 - 2 superseded - 4 void
+  superseded: 2     # G3（被 C1 取代）、A5（被 D12 取代）
+  void: 4           # C5、C6、C7、A7
+  open: 0
+
+# ─── 实施日志（非决策，仅供追溯）─────────────────────────────────────────────
+implementation_log:
+  - date: 2026-10-05
+    item: T14a（协议三动作加性契约）+ T17（路由接线 + F4 + 双编译期守卫）闭合
+    commits: [16df278(T14a), 788c9f9(T17 路由/服务/F4), 7e1db9e(T17 双守卫)]
+    detail: |
+      T14a：ExportPackage/ImportInspect/ImportApply 三请求 + 三响应 + UiRequest 联合 + KNOWN_ACTIONS
+      （旧三动作保留共存；"src/ 反例 0"不在本阶段）。
+      T17：三 routeMessage case + 服务层 exportPackage/inspect + IMPORT_APPLY 强制绑定
+      request.configVersion（缺失→INVALID_REQUEST，F4）；三道方向编译期闭环 + 差集测试断言：
+        (1) KNOWN_ACTIONS `as const satisfies` ⇒ 白名单 ⊆ AnyRequest（无幽灵项）；
+        (2) 双 Exclude ⇒ AnyRequest ⊆ 白名单（无漏项）；
+        (3) routeMessage default `const _exhaustive: never` ⇒ AnyRequest ⊆ case；
+        (4) 差集测试断言（持续回归）。
+      ⚠️ 宽注解陷阱：`ReadonlyArray<AnyRequest['action']>` 会擦除字面量 ⇒ Exclude 恒 never ⇒ 假守卫；
+      必须 `as const`。N4 的 known limitation 由此闭合。
+    status: CLOSED
+
+  - date: 2026-10-05
+    item: 方法论沉淀 —— 「守卫可信度」同族问题（本迭代共 8 次）
+    detail: |
+      审查侧累计捕获同族问题：①锚点误报(MEDIUM-5) ②锚点漏报字面量(T14b) ③漏报组件/服务层
+      (InlineRuleEditor) ④漏报目录 tests/(T14b) ⑤测试不观察响应(gate 只看 claimed)
+      ⑥守卫恒真(宽注解陷阱) ⑦假注释(N4 文档与实现不一致) ⑧守卫自身撞门禁(noUnusedLocals)
+      ⑨锚点无法区分代码与注释(基线数字混入注释/文档命中：src/ 报 18 实为 17 代码 + 1 注释；
+        tests/ 报 12 实约 8 代码 + 注释/文档/常量)。
+      固化原则：
+      - 守卫/锚点须**真能失败**，且**失败条件须据其实质**判定，不得凭措辞推断；
+      - 锚点以「语义族 + 全部同族载体（类型名/方法名/字面量）+ 全部目录（src/ + tests/）+
+        **可执行代码为界（注释/文档/字符串不构成待迁移项）**」为界；
+      固化原则：
+      - 守卫/锚点须**真能失败**，且**失败条件须据其实质**判定，不得凭措辞推断；
+      - 锚点以「语义族 + 全部同族载体（类型名/方法名/字面量）+ 全部目录（src/ + tests/）」为界；
+      - 声明形式不得擦除判别信息（`as const` 而非宽注解）；
+      - 注释须随实现同批更新（防空注释）；
+      - 守卫自身须能过门禁（`void` 掉未读 const、`includes` 加宽转）；
+      - 复审一律以 `git rev-parse HEAD` + `git show HEAD:` 真值为准（消"提交 vs 工作区"混淆）；
+      - 必要时建 5 行**探针实跑**代替字面推断（本轮双向纠偏：既验证守卫真失败，
+        也反驳了一处对差集测试兜底的误判）。
+    status: RECORDED
+
+  - date: 2026-10-05
+    item: 🔴 OPEN —— T18-D7 量化未按"最终生效的选择"重算（明日必修）
+    detail: |
+      缺陷（reviewer 复审 eb478d0 / 已复核确认）：settings/App.tsx 的 deletionCounts 直接读
+      inspection.diff.records 的 status==='deleted'；而 inspection 来自 IMPORT_INSPECT，
+      其 inspect()（import-export-service.ts:128）用 defaultImportIntent() 计算 ⇒ 该 status 是
+      默认 intent（incremental）下的结果；UI 从不重算（src/ui 内 import-diff/computeDiff/
+      applyIntent/deletesFileMissing 0 引用）。
+      后果：deletesFileMissing（import-diff.ts:85-89）incremental 下对 file-missing 返 false
+      ⇒ 默认 deleted 恒 0 ⇒ 用户切到 overwrite（真会删该维度全部 file-missing）后，弹窗仍说
+      "delete no records, and cannot be undone" ⇒ 违背 D7「量化须按最终生效的选择计算」。
+      同因假绿：import-flow.test.tsx:22-38 手工标 status:'deleted'，与任何单一 intent 的真实输出
+      都不一致 ⇒ 结构上测不出。
+      修法：deletionCounts 按当前 intent 重算（复用 deletesFileMissing）；测试改用真实 computeDiff
+      + 新增 "slots: overwrite ⇒ 文案含该维度删除数" 用例（RED→GREEN）。
+      依据：D7（decisions.yaml:821-822）。
+    status: OPEN
+
+  - date: 2026-10-06
+    item: T18-D7 实施补充裁定（三项）
+    detail: |
+      实施期（WIP：仅 tests/ui-smoke/import-flow.test.tsx 已改、生产码未动 ⇒ 标准 RED）
+      确立三项裁定：
+      ① 删除数的真源 = quantifyDeletions(final, current)（import-diff.ts），final = applyIntent(pkg, current, intent)；
+         **不得**再遍历 inspection.diff.records 求数；弹窗量化须随用户最终 intent 变化（D7 原文）。
+      ② 记录的 current 来源 = **ImportExportSection 自取 GET_STATE**（选项 ②），否决"SettingsApp 下传"（①）。
+         实测前提：SettingsApp:2616-2620 只持有 slots、**无 rules**（rules 活在另一组件 RulesSection:618）；
+         ImportExportSection:2228 是**无 props 组件**（:2847）。故 ① 若只转发现有字段 ⇒ current.rules===[] ⇒
+         rules 删除数恒 0（测试 1 修完仍 RED）。否决 ① 的理由：(a) 需给 SettingsApp 加 rules state 并与
+         RulesSection:618 形成**两个真源**、规则编辑后漂移；(b) ① 的 sync 是 load-time 快照，用户在
+         RulesSection 改规则后再导入 ⇒ 下传 rules 陈旧 ⇒ 弹窗数与 APPLY 实际行为不一致（D7 要治的"数量说谎"）；
+         (c) ② 与现有测试天然契合（installMock 的 GET_STATE 已返回含 r1..r3 的 sync，无需改 mock）；
+         (d) ① 唯一优势（同一份 sync 供 T19-C 记录清单）② 同样具备。
+      ③ D7「恒定弹窗（0 删除也开）」的**具名守卫必须保留**：不得只靠其他用例的 toMatch 隐含覆盖
+         ⇒ 0 删除场景须同时断言 dialog 出现 + 文案 delete no records（守卫独立可失败性）。
+      附带约束：currentSync 取数失败时计数 **null/unknown**（**不得**为 0）但**弹窗仍开**
+      （恒定弹窗守卫不因取数失败而失效）。
+      【2026-10-06 复审更正】原写"计数 0"及"T19-C 复用同一 currentSync"**均作废**：
+      - 实作为 `deletionCounts` 返回 **null** 并渲染第三态 unknown 文案（比"0"更严，永不把"未算出"混同为"零"）；
+      - "复用同一 currentSync"**不成立**：`ExportSection`（App.tsx:2146/2162-2175）与
+        `ImportExportSection`（:2396）是**两个独立无 props 组件**，各取一次 GET_STATE。
+        且该要求与裁定 ②"避免双真源/漂移"**不自洽**（跨组件共享状态恰恰需要一个共享真源 = ① 父级下传）
+        ⇒ reviewer 撤回其判据 #8，采纳。当前"各取一次"非漂移、仅冗余。
+
+  - date: 2026-10-06
+    item: T18-D7 裁定 ① 依据升级 —— quantifyDeletions 是孤儿，禁止第三条平行推导
+    detail: |
+      executor 首版 WIP 改为「parseExportPackage(text) → pkg.slots/rules id 集合 +
+      deletesFileMissing/overrideFor 逐条判」（tests 已 6/6 绿，实测通过）——**偏离裁定 ①**。
+      决定性事实：`git grep quantifyDeletions` → **零生产调用方**（仅 tests/unit/shared/import-diff.test.ts 的 T8 单测）；
+      而真实 apply 走 `applyIntent`：import-export-service.ts:133（INSPECT）、**:376（applyImport）**。
+      ⇒ quantifyDeletions(applyIntent(pkg,current,intent), current) 的计数是**真实 apply 的产物**（构造性一致）；
+      UI 版是**第三条平行推导**（computeDiff 内一套 / applyIntent 内一套 / UI 一套）⇒ 一致性只是**假设**。
+      且 UI 版**迫使** import-diff.ts 放宽 2 个导出（overrideFor:72 / deletesFileMissing:89），
+      专属引用方是会消失的 UI ⇒ 导出面纯为复刻规则而开（本迭代"诚实边界"同族）。
+      裁定：
+      - 维持 ①：deletionCounts = quantifyDeletions(applyIntent(pkg, current, intent), current)；
+      - **回退** overrideFor / deletesFileMissing 的新导出（值回 `function`）；
+      - 删掉 UI 内 fileSlotIds/fileRuleIds + deletesFileMissing/overrideFor 循环；
+      - 保留 parseExportPackage（isExportPackage 守卫，好设计）；
+      - current 取法维持 ②（ImportExportSection 自取 GET_STATE；否决 SettingsApp 下传 = 双真源/漂移）；
+      - current===null ⇒ 计数 0 但弹窗仍开；T19-C 复用同一 current。
+      附带：不接线则 quantifyDeletions 这个为 D7 而生的 API 便是死代码（与 missingIcons 同型）。
+      认可的 WIP 部分：parseExportPackage/isExportPackage 守卫、pkg-as-carried-ids 概念、0 删除具名守卫（:285-292）均已到位。
+    status: RESOLVED
+
+  - date: 2026-10-06
+    item: T18-D7 收口登记 + 三态文案 + T20 待核
+    detail: |
+      落盘链（实测核实）：de601bd（③版，被取代）→ **3c4ebbe（HEAD，①版，工作区 clean）**。
+      3c4ebbe 已满足全部已裁项：
+      - `App.tsx:18` `import { applyIntent, quantifyDeletions }`；`:2443` `quantifyDeletions(applyIntent(pkg, current, intent), current)`；
+      - `import-diff.ts:72/85` 已回退为 `function`（非 export）⇒ UI 不再直用模块内部规则；
+      - 三态文案：deletionCounts===null →「delete an unknown number of records」（**不含** no records 子串）/
+        0 →「no records」/ n →「n slots and m rules」；
+      - `handleFileChosen` 内独立 try 取 GET_STATE，失败保留 null（非致命的"未知"而非虚假"无删除"）；
+      - 同批含 T15-A（mock-adapter.reset 清 commandsUpdateSupported）、T15-B（null unbind → '' per MDN）、
+        T19-A（scoped 断言）、T19-B（shortcuts 禁用 + 可见原因）、T19-C（记录展开进 scope.excludedSlotIds/RuleIds，
+        复用同一 current）、T19-D（样式）。
+      实测：tsc 0 error；ui-smoke import-flow 7/7（含 :313 "unreadable current state says 'unknown', never 'no records'"）。
+      点 7 判级澄清：该 unknown 文案不含 `no records` 子串 ⇒ `/unknown/i` 断言已足以证伪回退，
+      `not.toMatch(/no records/i)` 属冗余加固（非必须；若复审坚持则采纳）。
+      待办：T20 主体是否已被 T18/T19 取代（executor 核实中）；T20 至少保留两项收口义务
+      （类型迁移 import-preview/App.tsx:16/21/22/27 → ImportInspection；孤儿页 main.tsx/index.html/vite.config.ts:36 处置）。
+    status: RESOLVED
+
+  - date: 2026-10-06
+    item: T20/T22 闭合 + 迭代收口状态 + T14b/T21 遗留面（唯一未收口项）
+    detail: |
+      提交链（实测）：3c4ebbe(T18-D7/T19/T20a-③) → 80413d8(T20a 结构化，取 b 方案)
+      → 643edfe(T20b 删孤儿页) → 2630427(T22 主体) → ac621ee(allowlist 编译期耦合)
+      → f44ef5c(C8 记账) → **1377fec(HEAD，icon-memo 契约注释)**。
+      **工作区 clean**（src/ + tests/）。
+      [T20 PASS] T20a：ImportFieldValue 结构化契约（不再泄漏内部签名），
+      UI 零解析（src/ui 内三前缀 startsWith/slice = 0）；T20b：删 import-preview 目录 + css +
+      vite 入口 + 两测试 + page-lang 白名单 5→4 + candidate-selector-removed 计数 5→4（保精确）
+      + 新建 import-preview-removed.test 三断言；W5 同族旧类型 **5→4**。
+      [T22 PASS] reviewer 12 项 + 四处补齐 + **两处可失败性反证**（我与 reviewer 各自独立实做）：
+      - allowlist：加字段 ⇒ TS1360（编译期失败）；
+      - missingIcons 判决性 RED：**既证「收集点写前 ⇒ 红」又证「删 storage-repository.ts:1041
+        iconResolutionCache.clear() ⇒ 红」** ⇒ 该例是"写后收集 + memo 作废"的唯一共同守门人。
+      reviewer 保留项（"defaulted 半记账在哪"）已由 f44ef5c 具名落盘 ⇒ **撤回保留，T22 无遗留**。
+      [收口登记] 发现三笔**未在团队消息中报告但由同一作者（monzaid）提交**的补丁：
+      ac621ee（前条正文未提）、f44ef5c、1377fec（完全未提）⇒ 已记入"新提交 hash 必须回报"的
+      流程纪律（1377fec 系 reviewer 建议的 T22 judgment 注释，内容正确、无风险）。
+      [唯一未收口项 = T14b/T21] 遗留协议三动作**仍活**（生产面）：
+      - worker-orchestrator.ts:81-83 KNOWN_ACTIONS 三字面量 + :789/792/795 三个 switch case（**仍可路由**）；
+      - messages.ts:213/217/222 请求类型 + :527/537 响应类型；
+      - message-client.ts:294/298/302 三个封装；types.ts:217 ExportPayload / :228-240 ImportSlot* / ImportPreview。
+      既有**守卫**已就位（messages-import-export-contract.test.ts 的 LEGACY_ACTIONS 三动作断言、
+      worker-import-export-routing.test.ts、full-suite.test.ts）⇒ 通道**仍绿**（未弱化），但它们**断言 legacy 存在**
+      ⇒ 删除时须与守卫**同批**迁移（否则红）。
+      待收口：① 删三动作的 KNOWN_ACTIONS/case/类型/message-client + types.ts 四个旧类型；
+      ② 同批迁移三处测试（contract / messages.test.ts:58-60/279/305 / full-suite:132/139 / routing）；
+      ③ W5 阈值 **4 → 0**（`\b(ExportPayload|ImportSlotDecision|ImportSlotConflict|ImportPreview)\b` 于 src/ 归零）。
+    status: RESOLVED
+
+  - date: 2026-10-06
+    item: 归因更正（PROBE 残留属 reviewer）+ 新同族形态（探针可区分性）+ 行号漂移
+    detail: |
+      [归因更正] "storage-repository.ts 瞬时 PROBE 残留（- iconResolutionCache.clear() +
+      // PROBE: memo-clear removed…）"**不是我先前判的 executor，而是 reviewer 第 2 步反证的现场**
+      （他为验"memo 作废是否被测试锚定"临时删该行）。证据：`git log -S "PROBE: memo-clear removed" --all`
+      = 空 ⇒ **未进入任何提交**；`iconResolutionCache.clear()` 现行三处（`:277` / `:1045` / `:1057`）完整。
+      ⇒ 记账改挂 reviewer 名下。**executor 本轮无此操作**。
+      [行号漂移] `1377fec` 在 `:1040-1044` 新增 5 行注释（保留 `:1039` 原首行；diff +5/−1）⇒ 被守护行
+      由 `:1041` 移至 **`:1045`**。我的旧行号 `:1041` 属过期值（后续引用一律用 `:1045`）。
+      [新同族形态 · 第 10 种] **探针与产品码不可区分**（probe indistinguishable from product code）：
+      本轮三处变异（`import-field-format.ts` 的 `case 'recipe'` 返签名 / `export-package.ts` 的
+      `probeExtraField` / `storage-repository.ts` 删 memo 行）**均无 `⚠️ PROBE — MUST NOT COMMIT` 标记**
+      ⇒ 静止窗口内不可区分于真实代码；任一窗口内提交即把**故意注入的缺陷**入库。
+      裁定（对 executor 与 reviewer **同等适用**）：探针须 ① 文件头加显式 PROBE 标记，**且** ② 在
+      **同一工具调用内**完成"改动 + 跑测 + 还原"，或改走 `git stash` 隔离。
+      [流程纪律] 本轮 `ac621ee`/`f44ef5c`/`1377fec` **三笔提交均未在团队消息中报告**
+      ⇒ 裁定：每次 commit 后必须回报新 hash + 摘要（即使纯注释）；复审一律以 `git rev-parse HEAD` 为真值。
+    status: RESOLVED

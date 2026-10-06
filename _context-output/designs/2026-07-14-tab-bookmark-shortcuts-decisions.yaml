@@ -1,3 +1,10 @@
+# ⚠️ 部分被取代（2026-10-04）
+# 本清单中的 `import-export-format`、`import-merge`、`export-local-icons` 三项
+# 已由 `2026-10-04-import-export-*-design.md` 系列修订。修订后语义以新文档为准：
+#   - export-local-icons : 只承载 URL / 引用占位 / 可复现配方，不含位图（见下）
+#   - import-format      : 版本化「可携带包」，全量与子集同构
+#   - import-merge       : 文件驱动 + 显式「清空」指令；逐记录合并
+# 其余决策不受影响。
 decisions:
   - layer: goal
     node: browser-target
@@ -198,7 +205,8 @@ decisions:
     decision: 明文 JSON，导入前展示摘要并确认
     rationale: 可审阅、可迁移，不上传服务
     implications: 需要导入预览 UI
-    status: RESOLVED
+    superseded_by: 2026-10-04-import-export-goal-scope-design（G2：版本化「可携带包」，全量与子集同构）
+    status: REVISED (2026-10-04)
 
   - layer: constraint
     node: icon-storage
@@ -329,16 +337,28 @@ decisions:
   - layer: architecture
     node: import-merge
     decision: 完全替换或合并导入；合并时槽位冲突逐项选择
+    alternatives:
+      - option: 一律文件驱动（无「清空」意图）
+        rejected_reason: 无法表达「恢复成某个已知状态」的灾备/迁移诉求
+      - option: 一律全量覆盖
+        rejected_reason: 即现行 `state.rules = preview.rules` 行为，正是「保留现有却清空全部规则」缺陷的根源
     rationale: 适合完整迁移和部分补充
-    implications: 需要导入预览表格 UI
-    status: RESOLVED
+    implications: 需要导入预览表格 UI；两种意图须由用户**显式表达**，不得推断
+    superseded_by: 2026-10-04-import-export-goal-scope-design（G5：文件驱动 + 显式「清空」指令）
+    status: REVISED (2026-10-04)
 
   - layer: architecture
     node: export-local-icons
-    decision: 导出占位引用，不包含 data URI
-    rationale: 与本地图标不参与同步的边界一致
-    implications: 导入后需重新选择文件
-    status: RESOLVED
+    decision: 导出只承载 Icon URL、local-icon 引用占位、可复现配方；不含任何原始位图数据
+    alternatives:
+      - option: 始终附带 data URI
+        rejected_reason: 单个图标 data URI 可达约 2.7MB（输入上限 2MB 的 base64 膨胀），10 槽位即约 27MB，文件无法传递
+      - option: 默认不附带、可 opt-in 附带
+        rejected_reason: 仍需承载位图与「本包含图标数据」声明；而 URL 缓存图标交由接收方自行建立缓存，更符合既有的「新设备首次需要时建立本地缓存」边界
+    rationale: URL 与配方都可复现；引用占位交由接收方重新选择，无需搬运字节
+    implications: 无需体积上限、无需 opt-in 开关；导出前须将 local-icon 解引用为占位；接收方须见「需重新选择」提示
+    superseded_by: 2026-10-04-import-export-constraint-boundaries-design
+    status: REVISED (2026-10-04)
 
   - layer: architecture
     node: spa-navigation-detection
@@ -534,7 +554,15 @@ decisions:
     decision: 统一预览表格，逐项选择 + 快捷全选
     rationale: 横向比较，整体决策
     implications: 需要预览表格 UI
-    status: RESOLVED
+    status: SUPERSEDED
+    # 2026-10-06: 主体（src/ui/import-preview/ 目录 + ImportPreviewTable）已由
+    # import-export-iteration 的 T20b 删除；「维度分组 + 记录级行 + 恒定量化确认」
+    # 由 T18 ImportExportSection 取代，「逐项选择」由 A4 per-record override
+    # （recordOverrides）取代，「快捷全选」的批量手段由 D8 的每维度模式选择器
+    # （import-mode-{dim}：incremental/overwrite）承接 —— 行为落点是 ImportExportSection 的
+    # setDimensionMode（App.tsx:2416 定义 / :2560 接线，写 intent.dimensionModes），
+    # `data-testid="import-mode-{dim}"`（:2558）仅是其选择器标记。
+    # 本条不再是有效权威（防 F1 式"文档说存在、实现已无"）。
 
   - layer: detail
     node: recovery-window
