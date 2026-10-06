@@ -14,6 +14,7 @@
  */
 
 import { RadioGroup } from './radio-group';
+import { MATCH_TYPE_LABELS } from '@shared/match-type-labels';
 import { wildcardToRegex } from '@shared/url-utils';
 import type { ValidationIssue } from '@shared/form-validation';
 
@@ -99,8 +100,8 @@ export function MatchFields({
         value={value.matchType}
         onChange={(next) => { onChange({ matchType: next as 'exact' | 'regex' }); }}
         options={[
-          { value: 'exact', label: 'Exact URL' },
-          { value: 'regex', label: 'Regex pattern' },
+          { value: 'exact', label: MATCH_TYPE_LABELS.exact },
+          { value: 'regex', label: MATCH_TYPE_LABELS.regex },
         ]}
         disabled={disabled}
         // Item 2.1: one horizontal row, not two stacked lines.

@@ -44,6 +44,7 @@ import type {
 import type { ExportPackage, PortableIcon } from './export-package';
 import { packageToSyncPatch, iconToPortable } from './export-package';
 import { defaultImportIntent } from './types';
+import { matchTypeLabel } from './match-type-labels';
 
 // ─── Facet helpers ───────────────────────────────────────────────────────────
 //
@@ -180,7 +181,13 @@ function changedFields(before: Facets, after: Facets): ImportFieldDiff[] {
     fieldDiff(field, beforeByField[field] ?? null, afterByField[field] ?? null));
 }
 
-/** "This side has no value" — distinct from "unknown" (only deletions are unknown). */
+/**
+ * The "this side is KNOWN to have no record" side — the before of an `added`
+ * row and the after of a `deleted` one. Distinct from "unknown": every record
+ * here has a real, readable other side, so all four facets are still
+ * reportable ("Match URL: removed (https://…)"). Only a record whose other side
+ * genuinely cannot be read may omit facets.
+ */
 const NO_FACETS: Facets = { title: null, icon: null, urlMatch: null, matchType: null };
 
 /** The match definition as two facets: the URL text and the mode name. */
@@ -190,7 +197,10 @@ function matchFacets(urlMatch: UrlMatchDefinition): {
 } {
   return {
     urlMatch: textFacet(urlMatch.value),
-    matchType: textFacet(urlMatch.type),
+    // The MODE is not text: it is one of two contract values, and it is rendered
+    // through the same names the rule form uses, so a diff never shows a raw
+    // `exact` next to a form that says `Exact URL`.
+    matchType: textFacet(matchTypeLabel(urlMatch.type)),
   };
 }
 
@@ -290,13 +300,8 @@ export function computeDiff(
         id: existing.id,
         label: existing.titleSnapshot || `Slot ${String(existing.id)}`,
         status: deleted ? 'deleted' : 'kept',
-        fields: deleted
-          ? [fieldDiff('title', before.title, null), fieldDiff('icon', before.icon, null)]
-          : keptFields(before),
+        fields: deleted ? changedFields(before, NO_FACETS) : keptFields(before),
       });
-      // A deletion has no incoming record: the match facets would have no
-      // "after" side, so they are left out rather than invented (`before` is
-      // still read above for the title/icon removal story).
     }
   }
 
@@ -353,9 +358,7 @@ export function computeDiff(
         id: existing.id,
         label: existing.title ?? existing.urlMatch.value,
         status: deleted ? 'deleted' : 'kept',
-        fields: deleted
-          ? [fieldDiff('title', before.title, null), fieldDiff('icon', before.icon, null)]
-          : keptFields(before),
+        fields: deleted ? changedFields(before, NO_FACETS) : keptFields(before),
       });
     }
   }

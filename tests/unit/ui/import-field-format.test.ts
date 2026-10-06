@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { formatFieldValue, formatFieldDiffLine } from '@ui/shared/import-field-format';
+import { matchTypeLabel } from '@shared/match-type-labels';
 import type { ImportFieldDiff, ImportFieldValue, ImportRecordStatus } from '@shared/types';
 
 describe('T20a — structured value → human', () => {
@@ -114,5 +115,31 @@ describe('T20a — field line dispatched by record status (A12)', () => {
       'added',
     );
     expect(out).toBe('Title: added (New)');
+  });
+
+  it('names the two NEW facets (Match URL / Match Type), never "Icon"', () => {
+    const out = line(
+      { field: 'match-url', before: null, after: { kind: 'text', value: 'https://n' }, changed: true },
+      'added',
+    );
+    expect(out).toBe('Match URL: added (https://n)');
+    const type = line(
+      { field: 'match-type', before: null, after: { kind: 'text', value: 'Exact URL' }, changed: true },
+      'added',
+    );
+    expect(type).toBe('Match Type: added (Exact URL)');
+  });
+});
+
+describe('T20a — the match MODE is localised (one source of names)', () => {
+  it('renders the mode through the shared labels, not the contract value', () => {
+    // The rule form says "Exact URL"; a diff saying "exact" would name the same
+    // concept twice. Both sides now read from MATCH_TYPE_LABELS.
+    expect(matchTypeLabel('exact')).toBe('Exact URL');
+    expect(matchTypeLabel('regex')).toBe('Regex pattern');
+  });
+
+  it('shows an unrecognised value verbatim rather than blanking it', () => {
+    expect(matchTypeLabel('glob')).toBe('glob');
   });
 });

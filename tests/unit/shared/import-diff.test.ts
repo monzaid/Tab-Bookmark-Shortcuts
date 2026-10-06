@@ -174,7 +174,26 @@ describe('T8: computeDiff — mode governs only "file-missing, target-has"', () 
     expect(matchUrl?.before).toEqual({ kind: 'text', value: 'https://s2.example/' });
     expect(matchUrl?.after).toEqual({ kind: 'text', value: 'https://s2.example/' });
     const matchType = row?.fields.find((f) => f.field === 'match-type');
-    expect(matchType?.before).toEqual({ kind: 'text', value: 'exact' });
+    // The MODE is carried through the shared human names, not the raw contract
+    // value — the rule form already says "Exact URL", and a diff must not name
+    // the same concept twice.
+    expect(matchType?.before).toEqual({ kind: 'text', value: 'Exact URL' });
+  });
+
+  it('a DELETED row still reports all four facets of what is going away', () => {
+    // The record is leaving, but its match is still readable — reporting it
+    // keeps the shape uniform AND answers "which match am I losing?". Omitting
+    // the pair made deleting and keeping a record look structurally different.
+    const emptyFile = pkg({ slots: [], rules: [] });
+    // Only the mode may delete a file-missing row, so the deletion is asked for
+    // explicitly rather than assumed from an empty file.
+    const diff = computeDiff(emptyFile, CURRENT, overwriteSlots());
+    const row = diff.records.find((r) => r.status === 'deleted' && r.kind === 'slot');
+    expect((row?.fields ?? []).map((f) => f.field))
+      .toEqual(['title', 'icon', 'match-url', 'match-type']);
+    expect(row?.fields.find((f) => f.field === 'match-url')?.before)
+      .toEqual({ kind: 'text', value: 'https://s1.example/' });
+    expect(row?.fields.find((f) => f.field === 'match-url')?.after).toBeNull();
   });
 
   it('a KEPT row still carries all four facets (the shape is stable)', () => {
