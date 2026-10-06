@@ -62,8 +62,14 @@ function installMock() {
           matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' },
           switchDirection: 'next',
           autoBindGlobal: true,
-          slots: [],
-          rules: [],
+          // T19-C needs real records to expand; the summary comes from the
+          // EXPORT_PACKAGE payload, so the counts here are independent.
+          slots: [
+            { id: 1, urlMatch: { type: 'exact', value: 'https://s1.example/' }, strategy: 'inherit', uiMarker: {}, titleSnapshot: 'S1', faviconSnapshot: '', createdAt: '', updatedAt: '' },
+          ],
+          rules: [
+            { id: 'r1', urlMatch: { type: 'exact', value: 'https://a.example/' }, priority: 0, createdAt: '', updatedAt: '' },
+          ],
         },
         local: {
           bindings: [], cycleCursors: [], lastSuccessSlotId: null,
@@ -126,7 +132,48 @@ describe('T19 — independent export section', () => {
 
     // Summary shown first; the download is a separate, explicit step.
     const summary = await screen.findByTestId('export-summary');
-    expect(summary.textContent).toMatch(/rules/i);
+    // Scoped to THIS row's count, not a bare "Rules" that is always present.
+    expect(summary.textContent).toMatch(/Rules:\s*2/);
+    // A dimension that was NOT chosen reports 0 (R-1).
+    expect(summary.textContent).toMatch(/Slots:\s*0/);
     expect(screen.getByTestId('export-download')).toBeTruthy();
+  });
+
+  it('disables the shortcuts dimension with a visible reason (T19-B — no producer yet)', async () => {
+    await openExportSection();
+
+    const shortcuts = screen.getByTestId('export-dim-shortcuts');
+    expect(shortcuts).toBeDisabled();
+    expect(screen.getByTestId('export-shortcuts-reason').textContent).toMatch(/not supported/i);
+    // The other dimensions remain usable.
+    expect(screen.getByTestId('export-dim-slots')).not.toBeDisabled();
+  });
+
+  it('expands a chosen dimension and deselects a record into the scope (T19-C)', async () => {
+    await openExportSection();
+
+    fireEvent.click(screen.getByTestId('export-dim-slots'));
+
+    // Expand the record list, then deselect one record.
+    const details = await screen.findByTestId('export-records-slots');
+    (details as HTMLDetailsElement).open = true;
+    const record = await screen.findByTestId('export-record-slot-1');
+    fireEvent.click(record);
+
+    mockSendMessage.mockClear();
+    fireEvent.click(screen.getByTestId('export-submit'));
+
+    await waitFor(() => {
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'EXPORT_PACKAGE' }),
+      );
+    });
+    const call = mockSendMessage.mock.calls.find(
+      (c) => (c[0] as { action?: string }).action === 'EXPORT_PACKAGE',
+    );
+    const sentScope = (call?.[0] as { payload: { scope: { slots?: boolean; excludedSlotIds?: number[] } } })
+      .payload.scope;
+    expect(sentScope.slots).toBe(true);
+    expect(sentScope.excludedSlotIds).toContain(1);
   });
 });

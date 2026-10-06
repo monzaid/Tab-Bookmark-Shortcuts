@@ -175,6 +175,9 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
       state.incognitoAllowed = true;
       state.sidePanelSupported = true;
       state.browserType = 'chrome';
+      // T15: the capability OVERRIDE must be cleared too, or a case that forced
+      // it leaks into the next one (the derived default would be masked).
+      state.commandsUpdateSupported = undefined;
       state.nextError = undefined;
       state.executeScriptError = undefined;
       state.sendMessageError = undefined;
@@ -278,11 +281,14 @@ export function createMockAdapter(initialState?: Partial<MockAdapterState>): Moc
           if (!(state.commandsUpdateSupported ?? state.browserType === 'firefox')) {
             throw new AdapterError('BROWSER_API_ERROR', 'commands.update is not supported on this browser');
           }
+          // MDN: the UNBIND value is `""`, not `null` — map at the boundary so a
+          // stored command never carries the unspecified `null`.
+          const bound = shortcut ?? '';
           const idx = state.commands.findIndex((c) => c.name === name);
           if (idx >= 0) {
-            state.commands[idx] = { ...state.commands[idx], shortcut };
+            state.commands[idx] = { ...state.commands[idx], shortcut: bound };
           } else {
-            state.commands.push({ name, description: '', shortcut });
+            state.commands.push({ name, description: '', shortcut: bound });
           }
           return Promise.resolve();
         } catch (e) {

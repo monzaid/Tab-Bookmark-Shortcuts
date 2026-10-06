@@ -13,9 +13,9 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import { Button, Toast, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, DimensionPresence, DimensionMode, ExportScope } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, DimensionPresence, DimensionMode, ExportScope, SyncState } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
-import { deletesFileMissing, overrideFor } from '@shared/import-diff';
+import { applyIntent, quantifyDeletions } from '@shared/import-diff';
 import { isExportPackage } from '@shared/export-package';
 import type { ExportPackage } from '@shared/export-package';
 
@@ -2134,17 +2134,60 @@ function downloadPackage(pkg: string): void {
  * D1: four dimension checkboxes; an empty selection is BLOCKED (exporting
  * nothing is not a legal export). D1/D13: export produces the package and shows
  * a per-dimension summary FIRST; the download is a separate, explicit step.
+ *
+ * T19-B (D4-permitted degradation): no shortcut producer exists yet
+ * (`PortableShortcuts` is never populated — that lands in T22), so the
+ * shortcuts checkbox is DISABLED with a visible reason instead of silently
+ * exporting an empty dimension.
+ *
+ * T19-C: a selected record dimension can be expanded and its records
+ * individually deselected (`scope.excludedSlotIds` / `excludedRuleIds`).
  */
 function ExportSection() {
   const [checked, setChecked] = useState<Record<keyof DimensionPresence, boolean>>({
     slots: false, rules: false, settings: false, shortcuts: false,
   });
+  /** T19-C: per-record deselection inside a selected dimension (D1). */
+  const [excludedSlots, setExcludedSlots] = useState<number[]>([]);
+  const [excludedRules, setExcludedRules] = useState<string[]>([]);
+  /**
+   * The records a package could carry, from the SAME GET_STATE snapshot the
+   * import section uses (one source of truth, one fetch per surface). `null`
+   * means the read failed — expansion is then simply not offered.
+   */
+  const [records, setRecords] = useState<{ slots: SlotDefinition[]; rules: PageRule[] } | null>(null);
   const [pkg, setPkg] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await sendMessage('GET_STATE');
+        const result = extractResult(res);
+        const sync = result?.success
+          ? (result.sync as { slots?: SlotDefinition[]; rules?: PageRule[] } | undefined)
+          : undefined;
+        setRecords({ slots: sync?.slots ?? [], rules: sync?.rules ?? [] });
+      } catch {
+        setRecords(null);
+      }
+    })();
+  }, []);
 
   const anyChecked = (Object.keys(checked) as Array<keyof DimensionPresence>).some((d) => checked[d]);
   const scope: ExportScope = {
     slots: checked.slots, rules: checked.rules, settings: checked.settings, shortcuts: checked.shortcuts,
+    excludedSlotIds: excludedSlots, excludedRuleIds: excludedRules,
+  };
+
+  const toggleExcluded = (kind: 'slot' | 'rule', id: number | string) => {
+    if (kind === 'slot') {
+      setExcludedSlots((prev) =>
+        prev.includes(id as number) ? prev.filter((x) => x !== id) : [...prev, id as number]);
+    } else {
+      setExcludedRules((prev) =>
+        prev.includes(id as string) ? prev.filter((x) => x !== id) : [...prev, id as string]);
+    }
   };
 
   const summary = (() => {
@@ -2186,6 +2229,7 @@ function ExportSection() {
                 type="checkbox"
                 data-testid={`export-dim-${dim}`}
                 checked={checked[dim]}
+                disabled={dim === 'shortcuts'}
                 onChange={(e) => {
                   const next = e.currentTarget.checked;
                   setChecked((prev) => ({ ...prev, [dim]: next }));
@@ -2193,9 +2237,59 @@ function ExportSection() {
               />
               {label}
             </label>
+            {/* T19-B: no shortcut producer exists yet (T22); say so rather
+                than exporting a dimension that would always be empty. */}
+            {dim === 'shortcuts' && (
+              <span className="tbs-settings__export-unavailable" data-testid="export-shortcuts-reason">
+                Shortcuts are not supported for export yet.
+              </span>
+            )}
           </li>
         ))}
       </ul>
+
+      {/* T19-C: expand a selected record dimension and deselect individual
+          records (D1 "expand to record level"). */}
+      {checked.slots && records !== null && (
+        <details className="tbs-settings__export-records" data-testid="export-records-slots">
+          <summary>Slots ({records.slots.length})</summary>
+          <ul>
+            {records.slots.map((slot) => (
+              <li key={slot.id}>
+                <label>
+                  <input
+                    type="checkbox"
+                    data-testid={`export-record-slot-${String(slot.id)}`}
+                    checked={!excludedSlots.includes(slot.id)}
+                    onChange={() => { toggleExcluded('slot', slot.id); }}
+                  />
+                  {slot.titleSnapshot || `Slot ${String(slot.id)}`}
+                </label>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {checked.rules && records !== null && (
+        <details className="tbs-settings__export-records" data-testid="export-records-rules">
+          <summary>Rules ({records.rules.length})</summary>
+          <ul>
+            {records.rules.map((rule) => (
+              <li key={rule.id}>
+                <label>
+                  <input
+                    type="checkbox"
+                    data-testid={`export-record-rule-${rule.id}`}
+                    checked={!excludedRules.includes(rule.id)}
+                    onChange={() => { toggleExcluded('rule', rule.id); }}
+                  />
+                  {rule.title || rule.urlMatch.value}
+                </label>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
 
       {!anyChecked && (
         <p className="tbs-settings__hint" data-testid="export-empty-reason">
@@ -2253,14 +2347,16 @@ function ImportExportSection() {
    */
   const [file, setFile] = useState<string | null>(null);
   const [inspection, setInspection] = useState<ImportInspection | null>(null);
-  /**
-   * The parsed package behind `file`. It is the authority on which record ids
-   * the file CARRIED: the "file-missing, target-has" rows — the only ones a
-   * dimension mode may delete (§3.2) — are exactly the target records whose id
-   * is absent here. The diff cannot supply this (it contains both kinds of
-   * "kept" row), so the package is parsed once at INSPECT time and reused.
-   */
+  /** The parsed package behind `file`; `null` when the file was unreadable. */
   const [pkg, setPkg] = useState<ExportPackage | null>(null);
+  /**
+   * The target machine's CURRENT state, fetched once per chosen file (D7). The
+   * deletion count must be derived by actually applying the intent
+   * (`applyIntent` + `quantifyDeletions`) rather than by re-reading a diff:
+   * only that path stays constructively identical to what APPLY will do. The
+   * SAME snapshot backs the export record list (T19-C) — never a second fetch.
+   */
+  const [current, setCurrent] = useState<SyncState | null>(null);
   const [intent, setIntent] = useState<ImportIntent>(() => defaultImportIntent());
   /** The quantized confirmation is CONSTANT (D7) — opened by Apply, always. */
   const [confirming, setConfirming] = useState(false);
@@ -2283,6 +2379,7 @@ function ImportExportSection() {
     setInspection(null);
     setFile(null);
     setPkg(null);
+    setCurrent(null);
     try {
       const text = typeof chosen.text === 'function' ? await chosen.text() : '';
       const res = await sendMessage('IMPORT_INSPECT', { file: text });
@@ -2292,6 +2389,18 @@ function ImportExportSection() {
         setInspection(result.inspection as ImportInspection);
         setPkg(parseExportPackage(text));
         setIntent(defaultImportIntent());
+        // D7: the quantification needs the CURRENT state. A failure here is
+        // NON-fatal — `current` stays null and the copy reports "unknown"
+        // rather than the false claim "no records".
+        try {
+          const stateRes = await sendMessage('GET_STATE');
+          const stateResult = extractResult(stateRes);
+          if (stateResult?.success && stateResult.sync) {
+            setCurrent(stateResult.sync as SyncState);
+          }
+        } catch {
+          // keep `null` — the confirm dialog still opens, with unknown copy
+        }
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Invalid import file' });
       }
@@ -2318,38 +2427,28 @@ function ImportExportSection() {
   const carried = (d: keyof DimensionPresence): boolean => inspection?.dimensions[d] ?? false;
 
   /**
-   * Design D7: count only IRREVERSIBLE deletions, computed under the intent the
-   * user has ACTUALLY chosen — the INSPECTION's own `deleted` rows reflect the
-   * default (incremental) intent and would under-report after a mode switch.
+   * Design D7: quantify only IRREVERSIBLE deletions, computed under the intent
+   * the user has ACTUALLY chosen. The count is the product of the SAME
+   * derivation APPLY performs (`applyIntent` then `quantifyDeletions`), so the
+   * dialog cannot describe a different outcome than the write — no parallel
+   * re-implementation of the "file-missing" rule, and no reliance on the
+   * INSPECTION's default-intent `status` (which under-reports after a switch).
    *
-   * The rows this can delete are exactly the "file-missing, target-has" ones
-   * (§3.2): a record is file-missing iff the package did not carry its id. The
-   * per-record rule (`take` deletes even under incremental; `keep` protects) is
-   * reused from the same module as `computeDiff` so the two cannot drift.
+   * `null` means the current state could not be read: the count is UNKNOWN, not
+   * zero (assuming zero would assert "no records" while knowing nothing — the
+   * exact misleading-copy defect D7 exists to prevent).
    */
-  const deletionCounts = (() => {
-    const counts = { slots: 0, rules: 0 };
-    if (!inspection || !pkg) return counts;
-    const fileSlotIds = new Set((pkg.slots ?? []).map((s) => s.id));
-    const fileRuleIds = new Set((pkg.rules ?? []).map((r) => r.id));
-    for (const r of inspection.diff.records) {
-      if (r.kind === 'slot') {
-        if (fileSlotIds.has(r.id as number)) continue; // both sides — never mode-deleted
-        if (deletesFileMissing(intent.dimensionModes.slots, overrideFor(intent, 'slot', r.id))) {
-          counts.slots += 1;
-        }
-      } else {
-        if (fileRuleIds.has(r.id as string)) continue;
-        if (deletesFileMissing(intent.dimensionModes.rules, overrideFor(intent, 'rule', r.id))) {
-          counts.rules += 1;
-        }
-      }
-    }
-    return counts;
-  })();
+  const deletionCounts = useMemo(() => {
+    if (!pkg || !current) return null;
+    return quantifyDeletions(applyIntent(pkg, current, intent), current);
+  }, [pkg, current, intent]);
 
   /** D7/A9: the confirmation copy is CONSTANT (even at 0 deletions). */
   const quantizedMessage = (() => {
+    if (deletionCounts === null) {
+      // Unknown ≠ none: never claim "no records" without having computed it.
+      return 'This import will delete an unknown number of records, and cannot be undone.';
+    }
     const parts: string[] = [];
     if (deletionCounts.slots > 0) parts.push(`${String(deletionCounts.slots)} slots`);
     if (deletionCounts.rules > 0) parts.push(`${String(deletionCounts.rules)} rules`);
@@ -2376,6 +2475,7 @@ function ImportExportSection() {
         setInspection(null);
         setFile(null);
         setPkg(null);
+        setCurrent(null);
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Import failed' });
       }
@@ -2492,7 +2592,7 @@ function ImportExportSection() {
           })}
 
           <div className="tbs-settings__import-actions">
-            <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); setPkg(null); }}>Cancel</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); setPkg(null); setCurrent(null); }}>Cancel</Button>
             <Button
               size="sm"
               variant="primary"

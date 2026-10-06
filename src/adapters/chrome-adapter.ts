@@ -91,7 +91,9 @@ export function createChromeAdapter(browserType: BrowserType = 'chrome'): Browse
           throw new AdapterError('BROWSER_API_ERROR', 'commands.update is unavailable');
         }
         try {
-          await commandsApi.update({ name, shortcut });
+          // MDN: the UNBIND value is `""`; `null` is not specified to unbind, so
+          // map at the boundary instead of forwarding the unspecified value.
+          await commandsApi.update({ name, shortcut: shortcut ?? '' });
         } catch (e) {
           throw new AdapterError('BROWSER_API_ERROR', 'Failed to update command', e);
         }

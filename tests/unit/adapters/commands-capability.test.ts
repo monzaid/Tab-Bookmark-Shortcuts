@@ -11,7 +11,7 @@
  * UI branch without a try/catch; `update()` still throws a recognisable
  * `AdapterError` if called anyway.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { createChromeAdapter } from '@adapters/chrome-adapter';
 import { AdapterError } from '@adapters/contract';
@@ -67,6 +67,38 @@ describe('T15 — commands.update capability (Firefox vs Chrome/Edge)', () => {
 
       expect(adapter.commands.updateSupported()).toBe(false);
       await expect(adapter.commands.update('save-slot-1', 'Alt+1')).rejects.toBeInstanceOf(AdapterError);
+    });
+
+    it('reset() clears the override so it cannot leak into the next case (T15-A)', () => {
+      // The leak repro: force it TRUE, then reset — the browser goes back to
+      // chrome, so a surviving `true` would wrongly advertise the capability.
+      const adapter = createMockAdapter({ browserType: 'chrome', commandsUpdateSupported: true });
+      expect(adapter.commands.updateSupported()).toBe(true);
+
+      adapter.reset();
+
+      expect(adapter.state.commandsUpdateSupported).toBeUndefined();
+      // chrome has no commands.update ⇒ false. A leaked `true` fails here.
+      expect(adapter.commands.updateSupported()).toBe(false);
+    });
+  });
+
+  describe('the null unbind value is normalised to "" (MDN, T15-B)', () => {
+    it('mock stores "" rather than null', async () => {
+      const adapter = createMockAdapter({ browserType: 'firefox' });
+      await adapter.commands.update('save-slot-1', null);
+
+      expect(adapter.state.commands.find((c) => c.name === 'save-slot-1')?.shortcut).toBe('');
+    });
+
+    it('the real chrome-adapter forwards "" to the browser API', async () => {
+      const update = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal('chrome', { commands: { update } });
+
+      await createChromeAdapter('firefox').commands.update('save-slot-1', null);
+
+      expect(update).toHaveBeenCalledWith({ name: 'save-slot-1', shortcut: '' });
+      vi.unstubAllGlobals();
     });
   });
 });

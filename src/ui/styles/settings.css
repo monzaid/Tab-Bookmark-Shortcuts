@@ -500,6 +500,53 @@
   margin-bottom: var(--space-md);
 }
 
+.tbs-settings__export-dims {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.tbs-settings__export-dims label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.tbs-settings__export-unavailable {
+  margin-left: var(--space-sm);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+}
+
+.tbs-settings__export-records {
+  margin: 0 0 var(--space-md);
+}
+
+.tbs-settings__export-records ul {
+  list-style: none;
+  padding: 0 0 0 var(--space-lg);
+  margin: var(--space-xs) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.tbs-settings__export-summary {
+  margin-top: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.tbs-settings__export-summary ul {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-md);
+}
+
 /* ─── Diagnostics Section ─────────────────────────────────────────────────── */
 
 .tbs-settings__diag-actions {

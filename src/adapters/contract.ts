@@ -90,7 +90,16 @@ export interface BrowserAdapter {
      * an unsupported platform is a guidance case, NEVER an import failure.
      */
     updateSupported(): boolean;
-    /** T15: WebExtensions `commands.update`; `null`/empty unbinds the shortcut. */
+    /**
+     * T15: WebExtensions `commands.update`. Per MDN the UNBIND value is the
+     * empty string `""`; passing `null` is NOT specified to unbind, so the
+     * adapter boundary maps `null → ""` rather than forwarding it. (`null`
+     * remains accepted here so a caller may say "no shortcut" naturally.)
+     *
+     * Currently a dead parameter: D4 gives the shortcut dimension no overwrite
+     * mode (Chrome/Edge cannot execute it, Firefox applies a real string), so
+     * no shipping path unbinds. Kept as the contract's honest shape.
+     */
     update(name: string, shortcut: string | null): Promise<void>;
   };
 

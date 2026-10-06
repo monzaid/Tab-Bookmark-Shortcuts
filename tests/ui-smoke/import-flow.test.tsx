@@ -155,6 +155,12 @@ function makeFile(text: string): File {
  * `sendRaw` that resolves to `undefined` would throw on `.configVersion` and
  * drop the whole section into its error state.
  */
+/**
+ * Toggled by a test to model the current-state read failing AFTER the app has
+ * mounted (mount itself must succeed, or the whole settings app is an error).
+ */
+let failStateRead = false;
+
 function installMock(inspection: ImportInspection = DEFAULT_INSPECTION) {
   mockSendMessage.mockImplementation((msg: { action?: string }) => {
     if (msg.action === 'IMPORT_INSPECT') {
@@ -165,6 +171,9 @@ function installMock(inspection: ImportInspection = DEFAULT_INSPECTION) {
     }
     if (msg.action === 'GET_COMMANDS') {
       return Promise.resolve({ result: { success: true, commands: [] } });
+    }
+    if (msg.action === 'GET_STATE' && failStateRead) {
+      return Promise.reject(new Error('state unavailable'));
     }
     return Promise.resolve({
       result: {
@@ -194,16 +203,22 @@ async function selectFile() {
   await screen.findByTestId('import-diff');
 }
 
-/** Open the constant confirm dialog (Apply always opens it — D7). */
+/**
+ * Open the constant confirm dialog (Apply always opens it — D7). Choosing a file
+ * also fetches the current state, so Apply stays disabled until that settles;
+ * wait for it rather than assuming the inspect round-trip alone was enough.
+ */
 async function openConfirmDialog(): Promise<HTMLElement> {
-  fireEvent.click(screen.getByTestId('import-apply'));
-  const dialog = await screen.findByRole('dialog');
-  return dialog;
+  const apply = screen.getByTestId('import-apply');
+  await waitFor(() => { expect(apply).not.toBeDisabled(); });
+  fireEvent.click(apply);
+  return screen.findByRole('dialog');
 }
 
 describe('T18 — import section: dimension modes, diff, quantized confirm', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    failStateRead = false;
   });
 
   it('shows a mode selector per carried dimension, and Apply opens the quantized confirm', async () => {
@@ -267,7 +282,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await selectFile();
 
     // Slot 1 is file-missing; incremental keeps it unless explicitly taken.
-    expect((screen.getByTestId('import-mode-slots')).value).toBe('incremental');
+    expect((screen.getByTestId('import-mode-slots') as HTMLSelectElement).value).toBe('incremental');
     fireEvent.click(screen.getByRole('button', { name: 'Take S1' }));
 
     const dialog = await openConfirmDialog();
@@ -287,8 +302,24 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await selectFile();
 
     expect(screen.queryByRole('dialog')).toBeNull();
+    // Independent, named guard for BOTH halves of the D7 point: the dialog is
+    // constant AND the count is an honest zero under the default (incremental)
+    // intent — not merely "some dialog opened".
     const dialog = await openConfirmDialog();
+    expect(dialog).toBeTruthy();
     expect(dialog.textContent).toMatch(/delete no records/i);
+  });
+
+  it('D7: an unreadable current state says "unknown", never "no records"', async () => {
+    await openImportSection();
+    // The app has mounted; now the current-state read fails.
+    failStateRead = true;
+    await selectFile();
+
+    // The count is uncomputable ⇒ the dialog must NOT assert an all-clear.
+    const dialog = await openConfirmDialog();
+    expect(dialog.textContent).not.toMatch(/no records/i);
+    expect(dialog.textContent).toMatch(/unknown/i);
   });
 
   it('Export backup does NOT proceed — it is a sibling of the confirm action (A9)', async () => {
