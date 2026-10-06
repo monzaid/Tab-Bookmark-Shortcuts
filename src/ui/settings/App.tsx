@@ -13,7 +13,8 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import { Button, Toast, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportApplyResult, ImportDiff, DimensionPresence, DimensionMode, ExportScope, SyncState } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportApplyResult, ImportDiff, ImportRecordStatus, DimensionPresence, DimensionMode, ExportScope, SyncState } from '@shared/types';
+import type { StatusBadgeProps } from '@ui/shared/components';
 import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
 import { applyIntent, computeDiff, quantifyDeletions } from '@shared/import-diff';
 import { isExportPackage } from '@shared/export-package';
@@ -2357,6 +2358,25 @@ const DIMENSION_LABELS: ReadonlyArray<{ dim: keyof DimensionPresence; label: str
   { dim: 'shortcuts', label: 'Shortcuts' },
 ];
 
+/**
+ * A record's diff status as a badge. Import is irreversible, so "what will be
+ * replaced / kept" must be scannable at a glance rather than four similar words
+ * read one line at a time.
+ *
+ * Typed as a TOTAL `Record`, not a lookup with a fallback: `skipped` is declared
+ * on `ImportRecordStatus` but NO diff producer ever emits it for a record (it is
+ * only a {@link ImportApplyResult} count key), so it is mapped — and marked
+ * unreachable — so that a future producer must choose a badge consciously rather
+ * than inherit a silent default.
+ */
+const RECORD_BADGE: Record<ImportRecordStatus, StatusBadgeProps['status']> = {
+  added: 'active',
+  replaced: 'pending',
+  kept: 'inactive',
+  deleted: 'error',
+  skipped: 'inactive', // UNREACHABLE for records (count key only).
+};
+
 function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot' | 'rule', id: number | string) => void }) {
   const [importing, setImporting] = useState(false);
   /**
@@ -2608,7 +2628,8 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
                       <ul className="tbs-settings__import-records">
                         {records.map((r) => (
                           <li key={`${r.kind}-${String(r.id)}`}>
-                            <span>{r.label}</span> <span>{r.status}</span>
+                            <span>{r.label}</span>
+                            <StatusBadge status={RECORD_BADGE[r.status]} label={r.status} />
                             {/* Reuse the shared Button so the actions match every
                                 other button on the page; the `aria-label`s are the
                                 test anchors and stay EXACTLY as before. */}
@@ -2690,7 +2711,7 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
             <ul className="tbs-settings__result-records">
               {appliedDiff.records.map((r) => (
                 <li key={`${r.kind}-${String(r.id)}`} data-testid={`import-result-record-${r.kind}-${String(r.id)}`}>
-                  {r.label} <span>{r.status}</span>
+                  {r.label} <StatusBadge status={RECORD_BADGE[r.status]} label={r.status} />
                 </li>
               ))}
             </ul>
