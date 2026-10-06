@@ -613,10 +613,9 @@
   min-width: 0;
 }
 
-.tbs-settings__import-records > li > span:nth-child(2) {
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-sm);
-}
+/* No `> li > span:nth-child(2)` colour rule here: the status is a StatusBadge
+   now, and a text-colour rule (specificity 0,2,1) would override the badge's own
+   colour — the very thing the badge exists to express. */
 
 /* Cancel / Apply row. */
 .tbs-settings__import-actions {
@@ -626,7 +625,12 @@
   margin-top: var(--space-sm);
 }
 
+/* The Fields panel is the 5th flex child of a record row. Without a basis it
+   shared the line, so expanding it changed its own width and re-wrapped the row;
+   `flex-basis: 100%` gives it its own row so the row's other items never move. */
 .tbs-settings__import-fields {
+  flex-basis: 100%;
+  min-width: 0;
   margin-top: var(--space-xxs);
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
@@ -639,6 +643,9 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-xxs);
+  /* Long values (URLs, recipe descriptions) must wrap rather than widen the row. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* T22: the APPLY result list (§4.3). */

@@ -169,3 +169,41 @@ describe('affordance matches behaviour', () => {
     expect(dropCue && !hasDropHandler).toBe(false);
   });
 });
+
+describe('import fields expansion', () => {
+  /**
+   * Comments are stripped on the CSS side too: a selector quoted in prose is not
+   * a rule (the same reason the class scan strips both sides).
+   */
+  const css = () => stripComments(stylesheets());
+  const block = (pattern: RegExp): string => pattern.exec(css())?.[1] ?? '';
+
+  /**
+   * The Fields `<details>` is the 5th flex child of a record row
+   * (`li { display:flex; flex-wrap:wrap; align-items:center }`). With no basis it
+   * shared the line, so expanding it changed its own width and re-wrapped the
+   * row; with no min-width/overflow-wrap a long field value overflows instead of
+   * wrapping. jsdom has no layout engine, so this asserts the STRUCTURE that
+   * makes the fix hold (cf. `sidebar-source-hover.test.tsx`).
+   */
+  it('gives the Fields panel its own full-width row and lets long values wrap', () => {
+    const panel = block(/\.tbs-settings__import-fields\s*\{([^}]*)\}/);
+    expect(panel).not.toBe('');
+    expect(panel).toMatch(/flex-basis:\s*100%/);
+    expect(panel).toMatch(/min-width:\s*0\b/);
+
+    const list = block(/\.tbs-settings__import-fields\s+ul\s*\{([^}]*)\}/);
+    expect(list).not.toBe('');
+    expect(list).toMatch(/min-width:\s*0\b/);
+    expect(list).toMatch(/overflow-wrap:\s*anywhere/);
+  });
+
+  it('does not tint the record status as plain text (the status is a badge now)', () => {
+    // `> li > span:nth-child(2)` was written to colour a plain-text status; the
+    // status is a StatusBadge now, so the rule (specificity 0,2,1) would override
+    // the badge's own colour — the very thing the badge exists to express.
+    expect(css()).not.toMatch(
+      /\.tbs-settings__import-records\s*>\s*li\s*>\s*span:nth-child\(2\)/,
+    );
+  });
+});
