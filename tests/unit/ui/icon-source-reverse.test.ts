@@ -12,7 +12,7 @@
  * dispatch on `type` and NEVER infer from the value.
  */
 import { describe, it, expect } from 'vitest';
-import { canonicalIconSource, iconSourceForOwner, iconSourceToIconConfig, iconSourceToDraft } from '@ui/shared/icon-source';
+import { canonicalIconSource, iconSourceForOwner, iconSourceToFieldSeed, iconSourceToIconConfig, iconSourceToDraft } from '@ui/shared/icon-source';
 import { fromIconFieldValue } from '@ui/shared/icon-mode-adapter';
 import { resolveDraftFavicon } from '@ui/shared/rule-form-submit';
 import type { IconSource } from '@shared/types';
@@ -132,5 +132,50 @@ describe('FIX-C (i): `Use chain` of a recipe RECORD stays a recipe', () => {
   // (see `applyChainValueToDraft`; the lock test lives in sidebar-modality).
   it('a `site` owner has no stored source (falls back to the value shape)', () => {
     expect(iconSourceForOwner({ kind: 'site' }, ctx as never)).toBeNull();
+  });
+});
+
+describe('FIX-C: iconSourceToFieldSeed — the ONE reverse seed, all three types', () => {
+  const UPLOAD: IconSource = { type: 'upload', value: 'data:image/png;base64,UP' };
+  const URL_SOURCE: IconSource = { type: 'url', value: 'https://x.example/i.png' };
+  const seedOf = (s: IconSource) => {
+    const { mode, iconConfig } = iconSourceToFieldSeed(s);
+    return resolveDraftFavicon({ iconMode: mode, iconConfig });
+  };
+
+  it('a MATERIALIZED recipe seeds a recipe and re-persists as template', () => {
+    const seed = iconSourceToFieldSeed(RECIPE_MATERIALIZED);
+    expect(seed.mode).toEqual({ kind: 'set', value: '' });
+    expect(seed.iconConfig).toEqual({ bgColor: '#2563EB', text: 'A', textColor: '#FFFFFF' });
+    expect(seed.iconConfig?.dataUri).toBeUndefined();
+    expect(seedOf(RECIPE_MATERIALIZED)).toEqual(RECIPE);
+  });
+
+  it('an UPLOAD seeds a config-carrying draft and re-persists as upload', () => {
+    // The whole point of using the CONFIG form: a config-less `{kind:'set',
+    // value:<dataUri>}` would be mapped to `'url'`, storing the upload as a URL
+    // while the view still said "Upload".
+    const seed = iconSourceToFieldSeed(UPLOAD);
+    expect(seed.mode).toEqual({ kind: 'set', value: '' });
+    expect(seed.iconConfig).toEqual({ dataUri: 'data:image/png;base64,UP' });
+    expect(seedOf(UPLOAD)).toEqual(UPLOAD);
+    expect(seedOf(UPLOAD)!.type).toBe('upload');
+  });
+
+  it('a URL seeds the text field and re-persists as url (no config carrier)', () => {
+    const seed = iconSourceToFieldSeed(URL_SOURCE);
+    expect(seed.mode).toEqual({ kind: 'set', value: 'https://x.example/i.png' });
+    expect(seed.iconConfig).toBeUndefined();
+    expect(seedOf(URL_SOURCE)).toEqual(URL_SOURCE);
+  });
+
+  it('the OLD lossy seed would have stored an upload as `type:"url"` (control)', () => {
+    // Reproduce the removed `fromIconFieldValue(iconSourceToDraft(...))` pair:
+    // the `upload` branch drops the config, so only the data URI survives and it
+    // is re-persisted as a URL — the identity loss this helper removes.
+    const lossy = fromIconFieldValue(iconSourceToDraft(UPLOAD));
+    const persisted = resolveDraftFavicon({ iconMode: lossy.mode, iconConfig: lossy.iconConfig });
+    expect(persisted!.type).toBe('url'); // the regression the fix removes
+    expect(seedOf(UPLOAD)!.type).toBe('upload'); // and what the fix produces
   });
 });

@@ -29,8 +29,7 @@ import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
 import { resolveFieldChain } from '@shared/field-chain';
 import type { ChainResult, TierKey, TierOwner } from '@shared/field-chain';
 import { useJumpToRow, JUMP_HIGHLIGHT_CLASS, JUMP_HIGHLIGHT_MS } from '@ui/shared/use-jump-to-row';
-import { canonicalIconSource, iconSourceForOwner, iconSourceToDraft } from '@ui/shared/icon-source';
-import { fromIconFieldValue } from '@ui/shared/icon-mode-adapter';
+import { canonicalIconSource, iconSourceForOwner, iconSourceToFieldSeed } from '@ui/shared/icon-source';
 import { UndoBar } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
@@ -1667,7 +1666,7 @@ function DashboardSection() {
         iconConfig: value.startsWith('data:') ? { dataUri: value } : undefined,
       };
     }
-    const seeded = fromIconFieldValue(iconSourceToDraft(canonicalIconSource(source)));
+    const seeded = iconSourceToFieldSeed(source);
     return { iconMode: seeded.mode, iconConfig: seeded.iconConfig };
   };
 
@@ -1759,7 +1758,7 @@ function DashboardSection() {
     // upload — and saving flipped `type:'template'` to `type:'upload'`.
     const source = thisEntryIconSource(entry);
     const icon = source
-      ? fromIconFieldValue(iconSourceToDraft(source))
+      ? iconSourceToFieldSeed(source)
       : { mode: { kind: 'use-chain' } as FieldMode, iconConfig: undefined };
 
     setExpanded((prev) => new Set(prev).add(entry.id));

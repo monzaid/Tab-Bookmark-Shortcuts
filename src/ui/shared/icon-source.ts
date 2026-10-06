@@ -83,6 +83,35 @@ export function iconSourceToDraft(source: IconSource): IconFieldValue {
 }
 
 /**
+ * Reverse a stored `IconSource` into the seed the FIELD EDITORS expect
+ * (`FieldMode` + `IconConfig`), i.e. the {mode, iconConfig} pair every icon
+ * editor surface initialises from.
+ *
+ * Uses `iconSourceToIconConfig`, NOT `iconSourceToDraft`/`fromIconFieldValue`:
+ * that pair maps an `upload` source to a config-less `{kind:'set', value:<dataUri>}`,
+ * which the submit mapper classifies as `'url'` — so an upload is re-saved as a
+ * URL, and the (prefix-based) view says "Upload" while storage says "url". The
+ * config form is what `resolveDraftFavicon` reads back as `upload`/`template`,
+ * so all three source types keep their identity through the round-trip.
+ *
+ * This is the ONE reverse-seed boundary; the sidebar and the settings dashboard
+ * both go through it so neither can drift into a value-shape guess.
+ */
+export function iconSourceToFieldSeed(source: IconSource): {
+  mode: { kind: 'set'; value: string } | { kind: 'use-chain' };
+  iconConfig?: IconConfig;
+} {
+  // A source read through the repository may be MATERIALIZED (a recipe carries
+  // the rendered PNG in `value`), so canonicalise before deciding the shape.
+  const canonical = canonicalIconSource(source);
+  if (canonical.type === 'template' || canonical.type === 'upload') {
+    return { mode: { kind: 'set', value: '' }, iconConfig: iconSourceToIconConfig(canonical) }; // probe
+  }
+  // `url`: no config carrier — the text field holds the value.
+  return { mode: { kind: 'set', value: canonical.value } };
+}
+
+/**
  * FIX-A: the CANONICAL (persistable) form of an icon source.
  *
  * A source read through the repository may be MATERIALIZED — a recipe's `value`

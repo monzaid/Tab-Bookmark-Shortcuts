@@ -805,7 +805,7 @@ function SidebarUndoBar({ undo, onUndo, onExpire }: SidebarUndoAdapters) {
 import type { IconConfig } from '@ui/components/IconEditor';
 import { IconFieldEditor } from '@ui/shared/icon-field-editor';
 import type { IconFieldValue } from '@ui/shared/icon-field-editor';
-import { canonicalIconSource, iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft, iconSourceToIconConfig } from '@ui/shared/icon-source';
+import { canonicalIconSource, iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft, iconSourceToFieldSeed } from '@ui/shared/icon-source';
 import { wildcardToRegex } from '@shared/url-utils';
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import type { FieldMode } from '@ui/shared/field-editor';
@@ -1079,7 +1079,7 @@ interface CreateRuleModalProps {
  * and the helper is identically the same function for `CreateRuleModal` and its
  * `applyChainValueToDraft`.
  *
- * Uses `iconSourceToIconConfig`, NOT `iconSourceToDraft`/`fromIconFieldValue`:
+ * Uses `iconSourceToFieldSeed`, NOT `iconSourceToDraft`/`fromIconFieldValue`:
  * that pair maps an upload to a config-less `{kind:'set', value:<dataUri>}`,
  * which the mapper then classifies as `'url'` — the identity is lost and the
  * view (prefix-based) disagrees with what is saved. The config form is what
@@ -1090,12 +1090,7 @@ interface CreateRuleModalProps {
  * the source is exactly the C1 bug.
  */
 function seedIconFrom(src: IconSource | null, fallback: string): { mode: FieldMode; iconConfig?: IconConfig } {
-  if (src) {
-    if (src.type === 'template' || src.type === 'upload') {
-      return { mode: { kind: 'set', value: '' }, iconConfig: iconSourceToIconConfig(src) };
-    }
-    return { mode: { kind: 'set', value: src.value } };
-  }
+  if (src) return iconSourceToFieldSeed(src);
   // No stored source: the value's shape is the LAST RESORT here — only ever
   // reached AFTER the source branch above, never instead of it (that inversion
   // is the C1 bug).
