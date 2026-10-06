@@ -250,6 +250,10 @@ describe('import fields expansion', () => {
     //   - `width : 100%`       a space before the colon (not matched)
     //   - `flex:0 1 100%`      a legal value that permits shrinking (matched,
     //                          but weaker than the canonical `1 1 100%`)
+    // RED HERE IS NOT NECESSARILY A REGRESSION: tightening the pattern (e.g. to
+    // reject `flex:0 1 100%`, or to accept `inline-size`) is a legitimate
+    // improvement and will turn this case red on purpose. Update the row that
+    // stopped holding — do not read it as a behaviour change in the stylesheet.
     expect(FULL_WIDTH.test('inline-size: 100%')).toBe(false);
     expect(FULL_WIDTH.test('width : 100%')).toBe(false);
     expect(FULL_WIDTH.test('flex:0 1 100%')).toBe(true);

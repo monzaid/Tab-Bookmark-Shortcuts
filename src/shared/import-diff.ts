@@ -197,8 +197,7 @@ const NO_FACETS: Facets = { title: null, icon: null, urlMatch: null, matchType: 
  * RENDERABLE form, so a facet may be display-ready. Concretely, `title` and
  * `urlMatch` carry the raw value (both are `text` facets, which the renderer
  * returns verbatim; other kinds — `url`, `local-ref`, `recipe` — are formatted)
- * while
- * `matchType` is NAMED HERE, in the producer — the mode is presentation-only
+ * while `matchType` is NAMED HERE, in the producer — the mode is presentation-only
  * (`'exact'` has no meaning to a reader) and naming it at the boundary is what
  * keeps the diff and the rule form from drifting apart. The raw mode is not
  * lost: it stays on the record the diff was computed from.
