@@ -208,20 +208,22 @@ function installMock(inspection: ImportInspection = DEFAULT_INSPECTION, current:
 /**
  * `current` is the machine state GET_STATE reports, and `pkgText` is the file the
  * input yields. In production the inspection is computed from the SAME file and
- * the SAME live state (its computation is intent-independent; its result is under
- * the default intent). So a case that diffs a different basis or package must pass
- * them here too — otherwise the UI's own recompute and the injected inspection
- * would disagree (and that mismatch would mask a real divergence).
+ * the SAME live state (its computation does not depend on the intent; its result
+ * is under the default intent). So a case that diffs a different basis or package
+ * must pass them here too — otherwise the UI's own recompute and the injected
+ * inspection would disagree (and that mismatch would mask a real divergence).
  */
 async function openImportSection(
   inspection: ImportInspection = DEFAULT_INSPECTION,
   current: SyncState = CURRENT,
   pkgText: string = FILE_TEXT,
 ) {
-  // G1: the three inputs must describe ONE situation. `dimensions` is
-  // intent-independent (derived from which dimensions the package carries), so a
-  // file that does not match the injected inspection is caught HERE instead of
-  // silently letting every assertion in the case drift from a mismatched basis.
+  // G1: the inputs must describe ONE situation. Coverage is deliberately narrow:
+  // this asserts `pkgText` ↔ `inspection` agree on `dimensions` (which does not
+  // depend on the intent — it is derived from which dimensions the package
+  // carries). It does NOT assert that `current` shares the same basis, so do not
+  // read this as "all three are tied". It still catches the common mistake: a
+  // file that does not match the injected inspection.
   expect(computeDiff(JSON.parse(pkgText) as ExportPackage, current).dimensions).toEqual(
     inspection.dimensions,
   );
@@ -375,19 +377,31 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await openImportSection();
     await selectFile();
 
+    // Climb from the CONTROL to its own row. Reading the whole `ul` would be
+    // vacuous: slot 1 / slot 3 are `kept` by default, so `/kept/` would pass
+    // whether or not S2's toggle worked at all.
+    const row2 = () => {
+      const box = screen.getByTestId('import-record-slot-2');
+      const li = box.closest('li');
+      if (li === null) throw new Error('slot 2 checkbox has no row');
+      return li.textContent;
+    };
+
     const s2 = screen.getByRole('checkbox', { name: 'Take S2' });
     expect(s2).toBeChecked(); // default: take the file ⇒ replaced
+    // BEFORE: replaced — so the AFTER state proves the click changed something.
+    expect(row2()).toMatch(/replaced/);
 
-    // Uncheck ⇒ keep ⇒ the row is retained.
+    // Uncheck ⇒ keep ⇒ this row is retained.
     fireEvent.click(s2);
     expect(screen.getByRole('checkbox', { name: 'Take S2' })).not.toBeChecked();
-    const keptRow = screen.getByTestId('import-dim-slots')
-      .querySelector('ul.tbs-settings__import-records > li')?.parentElement?.textContent ?? '';
-    expect(keptRow).toMatch(/kept/);
+    expect(row2()).toMatch(/kept/);
+    expect(row2()).not.toMatch(/replaced/); // and not both words at once
 
     // Re-check ⇒ replaced again.
     fireEvent.click(screen.getByRole('checkbox', { name: 'Take S2' }));
     expect(screen.getByRole('checkbox', { name: 'Take S2' })).toBeChecked();
+    expect(row2()).toMatch(/replaced/);
 
     // Neither direction is a DELETION: both-sides never enters the count.
     const dialog = await openConfirmDialog();
@@ -512,7 +526,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(screen.getByTestId('import-slot-strategy-1').textContent).toMatch(/inherit \(by default\)/);
     expect(screen.getByTestId('import-slot-strategy-2').textContent).toMatch(/inherit$/);
     expect(screen.getByTestId('import-slot-strategy-2').textContent).not.toMatch(/by default/);
-    const slot3 = screen.getByTestId('import-slot-strategy-3').textContent ?? '';
+    const slot3 = screen.getByTestId('import-slot-strategy-3').textContent;
     expect(slot3).toMatch(/Tab ID exists, Rule check match, Priority tabId/);
     expect(slot3).not.toMatch(/inherit/); // an object must NOT degrade to `inherit`
   });
