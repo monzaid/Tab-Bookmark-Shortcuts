@@ -219,9 +219,10 @@ export interface ExportPackageRequest extends RequestBase {
 }
 
 /**
- * A10/A11: parse a file and diff it against the current state. Read-only and
- * intent-independent — changing a dimension mode or a row decision re-renders
- * from this result and never re-inspects.
+ * A10/A11: parse a file and diff it against the current state. Read-only. Its
+ * COMPUTATION is intent-independent (a pure function of the file); the RESULT is
+ * produced under the DEFAULT intent — the UI recomputes under the user's real
+ * intent and never re-inspects.
  */
 export interface ImportInspectRequest extends RequestBase {
   action: 'IMPORT_INSPECT';

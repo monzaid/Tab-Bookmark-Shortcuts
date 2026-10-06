@@ -2604,8 +2604,10 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
   }, []);
 
   /**
-   * D6/A11: choose a file → `IMPORT_INSPECT` (read-only). The INSPECTION is
-   * intent-independent, so later mode/record changes only re-render — they never
+   * D6/A11: choose a file → `IMPORT_INSPECT` (read-only). Its COMPUTATION is
+   * intent-independent (a pure function of the file); the RESULT is produced
+   * under the DEFAULT intent (no intent is sent). Later mode/record changes
+   * RECOMPUTE the diff from the file under the user's CURRENT intent — they never
    * re-inspect and never re-read the file.
    */
   const handleFileChosen = async (input: HTMLInputElement) => {
@@ -2662,10 +2664,11 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
 
   /**
    * The LIVE diff — recomputed under the user's CURRENT intent, the same call
-   * APPLY performs. The inspection's own diff is intent-independent (default
-   * intent), so reading it after a mode/record change would describe a different
-   * outcome than the write. Before `current` loads there is nothing to recompute
-   * against, so the inspection's diff is used as-is.
+   * APPLY performs. The inspection's own diff is COMPUTED UNDER THE DEFAULT INTENT
+   * (the computation itself is intent-independent), so reading it after a
+   * mode/record change would describe a different outcome than the write. Before
+   * `current` loads there is nothing to recompute against, so the inspection's
+   * diff is used as-is.
    */
   const liveDiff: ImportDiff | undefined =
     current && pkg ? computeDiff(pkg, current, intent) : inspection?.diff;

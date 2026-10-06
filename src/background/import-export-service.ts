@@ -85,11 +85,11 @@ export class ImportExportService {
   /**
    * A11: parse a file and diff it against the current state. READ-ONLY.
    *
-   * Intent-independent by design (A11): the preview is a pure function of the
-   * FILE, so changing a dimension mode or a row decision never requires another
-   * INSPECT — it is idempotent and re-runnable. The default intent is used only
-   * to describe records whose winning dimension mode happens to differ; the UI
-   * re-renders from this same result under the user's real intent.
+   * Its COMPUTATION is intent-independent by design (A11): the preview is a pure
+   * function of the FILE. The RESULT is produced under the DEFAULT intent, so
+   * changing a dimension mode or a row decision never requires another INSPECT —
+   * it is idempotent and re-runnable. The UI RECOMPUTES under the user's real
+   * intent from the same file; it never re-inspects.
    *
    * `configVersion` is the value read HERE; APPLY binds to it (C3/F4).
    */

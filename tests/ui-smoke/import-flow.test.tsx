@@ -206,16 +206,25 @@ function installMock(inspection: ImportInspection = DEFAULT_INSPECTION, current:
 }
 
 /**
- * `current` is the machine state GET_STATE reports. The inspector diffs the SAME
- * state in production (an inspection is intent-independent and computed against
- * the live state), so a case that diffs a different basis must pass it here too —
- * otherwise the UI's own recompute and the injected inspection would disagree.
+ * `current` is the machine state GET_STATE reports, and `pkgText` is the file the
+ * input yields. In production the inspection is computed from the SAME file and
+ * the SAME live state (its computation is intent-independent; its result is under
+ * the default intent). So a case that diffs a different basis or package must pass
+ * them here too — otherwise the UI's own recompute and the injected inspection
+ * would disagree (and that mismatch would mask a real divergence).
  */
 async function openImportSection(
   inspection: ImportInspection = DEFAULT_INSPECTION,
   current: SyncState = CURRENT,
   pkgText: string = FILE_TEXT,
 ) {
+  // G1: the three inputs must describe ONE situation. `dimensions` is
+  // intent-independent (derived from which dimensions the package carries), so a
+  // file that does not match the injected inspection is caught HERE instead of
+  // silently letting every assertion in the case drift from a mismatched basis.
+  expect(computeDiff(JSON.parse(pkgText) as ExportPackage, current).dimensions).toEqual(
+    inspection.dimensions,
+  );
   fileText = pkgText;
   installMock(inspection, current);
   const { SettingsApp } = await import('@ui/settings/App');
@@ -358,6 +367,33 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(dialog.textContent).toMatch(/delete 2 slots/i);
   });
 
+  it('a BOTH-SIDES row is reachable both ways: uncheck ⇒ kept, check ⇒ replaced (not a delete)', async () => {
+    // The core of the new control: on a both-sides row BOTH directions change
+    // something. Slot 2 differs (file title "FILE-S2" vs target "S2"), so it is
+    // `replaced` by default; unchecking keeps the target, and checking restores
+    // the take. A both-sides row is NOT a deletion in either direction.
+    await openImportSection();
+    await selectFile();
+
+    const s2 = screen.getByRole('checkbox', { name: 'Take S2' });
+    expect(s2).toBeChecked(); // default: take the file ⇒ replaced
+
+    // Uncheck ⇒ keep ⇒ the row is retained.
+    fireEvent.click(s2);
+    expect(screen.getByRole('checkbox', { name: 'Take S2' })).not.toBeChecked();
+    const keptRow = screen.getByTestId('import-dim-slots')
+      .querySelector('ul.tbs-settings__import-records > li')?.parentElement?.textContent ?? '';
+    expect(keptRow).toMatch(/kept/);
+
+    // Re-check ⇒ replaced again.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Take S2' }));
+    expect(screen.getByRole('checkbox', { name: 'Take S2' })).toBeChecked();
+
+    // Neither direction is a DELETION: both-sides never enters the count.
+    const dialog = await openConfirmDialog();
+    expect(dialog.textContent).toMatch(/delete no records/i);
+  });
+
   it('a file-only row is accepted and cannot be declined (added is always applied)', async () => {
     // `added` cannot honour `keep`: the package's own records are always applied,
     // so the control is checked and DISABLED rather than a dead toggle.
@@ -472,7 +508,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
   });
 
   it('a dimension the package did NOT carry has no selector (A2)', async () => {
-    await openImportSection(SLOTS_ONLY_INSPECTION);
+    await openImportSection(SLOTS_ONLY_INSPECTION, CURRENT, JSON.stringify(PKG_SLOTS_ONLY));
     await selectFile();
 
     expect(screen.getByTestId('import-absent-rules')).toBeTruthy();
