@@ -1231,3 +1231,228 @@ implementation_log:
       [流程纪律] 本轮 `ac621ee`/`f44ef5c`/`1377fec` **三笔提交均未在团队消息中报告**
       ⇒ 裁定：每次 commit 后必须回报新 hash + 摘要（即使纯注释）；复审一律以 `git rev-parse HEAD` 为真值。
     status: RESOLVED
+
+  - date: 2026-10-06
+    item: T14b/T21 侦察三项裁定（F-1 授权删服务层 / F-2 守卫必须迁移 / F-3 覆盖须迁移）
+    detail: |
+      [F-2 · 核实成立，最严重] `isValidMatchSettings`（import-export-service.ts:540-548）是
+      `matchSettings` **形状校验的唯一强制点**，唯一调用点 = legacy `generatePreview:218`；
+      新路径 `isExportPackage`（export-package.ts:345-353）**只校验 schemaVersion/generator/exportedAt/scope**，
+      而 `packageToSyncPatch:317` 原样传播、`import-diff.ts:396` 的 `switchDirection` 亦为**无校验赋值**
+      （TS 断言信任）⇒ 删 legacy 后，非法 shape 会经 inspect→APPLY **写入目标机**，且
+      `resolve-switch.ts:51-53` 按字面量比较 ⇒ 非法值**静默落空**（正是 D14/E 条要防的"静默损坏"）。
+      覆盖面：`import-export-service.test.ts:427/446/458`（T1 RED ④ 三例）**全部经 legacy**。
+      裁定 **(i) 迁移而非记账**：形状校验归 **`export-package.ts`**（与 `PortableSettings` 同 owner），
+      新增导出 `isValidPortableSettings`（**独立函数**，**不得**塞进 `isExportPackage` —— 其 "structural
+      only" 契约要保留）；服务层在 `inspect`（:150 后）与 `applyImport`（:395 后）**两处**调用；
+      不通过 ⇒ **整包拒绝**（`IMPORT_INVALID` + 与 legacy 同义消息）—— `settings` 是整包属性，
+      不存在"半个 matchSettings"。**验收须双路径可失败**：非法 `matchSettings` 与非法 `switchDirection`
+      各一例，**必须执 `inspect` 与 `applyImport`（真实导出签名）两个面**；仅执 inspect ⇒ 漏 APPLY 通道（假绿）。
+      [F-1 · 核实成立] 只删协议面**不足以**使 `types.ts` 四旧类型归 0：`exportConfig:72` /
+      `generatePreview:182-297` / `commitImport:299+`（各被 legacy case 调用）、`applyBulkDecision:553`
+      （**零生产调用方**，仅测试消费）、`isValidMatchSettings:540` 仍有生产消费。
+      ⇒ **授权同批删除整块 legacy 服务层**（约 200 行）**+ 其唯一测试面**；否则 W5 归 0 不可达。
+      [F-3 · 核实成立] `import-export-service.test.ts` 全体用例经 legacy 三方法；新路径已覆盖
+      TOCTOU/D15、stale version、危险 regex；**净减 2 项覆盖**：① 非法 matchSettings 被拒（=F-2）；
+      ② "preview 只读、未确认不写"（:475-496）⇒ 后者裁定**迁移**为：`inspect` 后断言 store 无写入、
+      `applyImport` 后才写。
+      附：删除后 legacy 专属断言（contract LEGACY_ACTIONS / messages.test.ts / full-suite:132/139 /
+      routing）**转为"不得存在"持续守卫**（对称 `import-preview-removed.test.ts`）。
+      次序：本提交（原子）**必须在 `_context-output/` 文档提交之后**（已由 f44a536 落地）。
+    status: RESOLVED
+
+  - date: 2026-10-06
+    item: F-2 守卫形状终裁（全族四字段 + settings 缺席语义 + 判据双路径反证）
+    detail: |
+      [严重度校准 · 采纳 reviewer] 真正的旧导出文件被 `isExportPackage` 的 `schemaVersion` 闸拦住
+      （legacy `exportConfig:79` 产 `version: 1`、**无 `schemaVersion`** ⇒ `undefined !== 1` ⇒ 拒）
+      ⇒ 按字面"旧文件可长驱直入"不成立。残余面 = **schemaVersion:1 但形状非法的"半新/伪造包"** ⇒ **MEDIUM**。
+      [残余缺口的机制依据 · 我实补] `resolve-switch.ts:54` **`return resolveCombination4(input)`**
+      ⇒ 非法 `tabIdMode/ruleCheckMode` **静默落入 Position 策略**、无报错（FIX-C/C8「形状未校验 → 静默降级」同族）。
+      [守卫 = `isValidPortableSettings`，覆盖 PortableSettings **全族四字段**]
+      `matchSettings`（三枚举）· `switchDirection`（`applyIntent:396` 无校验写入）·
+      `autoBindGlobal`（legacy 曾归一化 `:268 data.autoBindGlobal !== false`，新路径 `:319` 原样传播）·
+      `slotStrategies`（`:320` 原样传播；`import-diff.ts:403-405` `Object.entries` 后 `.find(s => s.id === Number(id))`）。
+      【机制更正 2026-10-06 · 采纳 reviewer】我原写"**幽灵槽位缺口**"**作废**（两条均抵销）：
+      `.find` 只命中**已存在**的 slot ⇒ 号键**造不出槽位**；而会造槽位的是 `pkg.slots`、**已被 D14 partition
+      逐记录拦**（`domain-rules.ts:37-38` `VALID_SLOT_MIN=1/MAX=10`、`:65-69`）⇒ **无幽灵槽位**。
+      **正确的两条失败面**（断言语义须按此写，**不得把"幽灵槽位"写进测试名** —— 否则固化假机制，
+      本迭代"测试诚实性"同族）：
+      ① **孤儿键 = 静默 no-op** —— `{11:'inherit'}` 无人读 ⇒ 用户"选了策略却不生效"、无失败无披露；
+      ② **非法值 = 写入真实槽位** —— `.find` 命中后把 `'bogus'`/畸形对象写进 `slot.strategy`，
+         下游按字面量解析 ⇒ **静默落空**（FIX-C 判据 #8 同族）。
+      键规则：JSON 键为字符串 ⇒ 只接受 **规范十进制整数字面量 1..10**（`"1.0"`/`"01"`/`"-1"`/`"11"` 各写一例消灭边界）。
+      [调用点] `inspect:156` 后 + `applyImport:406` 后（二者各自 `JSON.parse`、**互不共享** ⇒ 须**双路径**调用）；
+      不通过 ⇒ 整包拒绝（`IMPORT_INVALID`）。**不塞进 `isExportPackage`**（保留其 structural-only 契约；
+      `tolerant` 仍在校验之后运行 —— 顺序已核）。
+      [settings **缺席**语义 = 合法，但须锁死] 依据：**API 层已有表示** —— `ExportPackage.scope.settings`（A2/A3）
+      + `types.ts:311/336` `ImportInspection.dimensions: DimensionPresence`（`import-diff.ts:131`
+      `settings: pkg.settings !== undefined`）；`App.tsx:2450` `carried(d) = inspection?.dimensions[d]`
+      ⇒ UI **正是从 API 读的**，`App.tsx:2576-2581` 渲染 `import-absent-{dim}`。
+      【机制更正 2026-10-06 · 采纳 reviewer】我原写"**服务层 API 结果不表示 settings 未携带**"**作废**
+      （实测不成立 —— 表示存在且 UI 在用）。**窄缺口**仅在 `ImportApplyResult`（`types.ts:345-355`）
+      **无 `dimensions`** ⇒ **只消费 APPLY 结果的调用方**（非 UI）无法判缺席。
+      **裁定**：**不设 API OPEN**（现有消费者是 UI、从 INSPECT 拿 `dimensions`；APPLY 结果只作回执）
+      —— 采纳 reviewer 的选项 ②（不为假想消费者加字段）。
+      **第 14 项断言须写在 API 真值上**：`inspect().inspection.dimensions.settings === false`
+      （**而非只断言 UI 文案** —— `dimensions` 缺席则 UI 的 `import-absent-*` 根本渲染不出来）。
+      [悬空注释] `isExportPackage` 自陈 "the D14 validator (T3) is a separate concern"，
+      而该 standalone 校验器**并不存在**（D14 实体 = `domain-rules.ts` 的逐记录 partition）⇒ 前瞻性/未兑现，
+      **正是 F-2 温床**；本次修正须让注释指向 `isValidPortableSettings`，不留悬空承诺。
+      [判据 · 双路径 + 反证] 非法 `matchSettings` 与非法 `switchDirection` 各一例，**inspect 与 applyImport
+      各断言一次**；可失败性反证 = 临时**只**在 `inspect` 加校验 ⇒ **applyImport 的 `switchDirection` 那条须红**
+      （同时证"双路径"与"整族"）。
+    status: RESOLVED
+
+  - date: 2026-10-06
+    item: 裁定 5/6 —— 入口健壮性（绝不崩）+ 非法 slotStrategies 整包拒绝 + #15 判据形态更正
+    detail: |
+      [事实] `inspect`/`applyImport` 的 try/catch **都只包 `JSON.parse`**；之后 `computeDiff:193/:259`
+      （`for (const portable of pkg.slots/rules)`）、`import-diff.ts:403`（`Object.entries(…slotStrategies)`）
+      均**无兜底**；`slots/rules` 为 `?:` 可选、只挡 `undefined`（`import-diff.ts:129-130`）**不挡错型**。
+      ⇒ 非法**形状**（非非法 JSON）会**抛异常**。
+      [裁定 5 · 入口拒绝，绝不崩] **收紧 `isExportPackage`**（保留 structural-only，只加容器类型）：
+      `slots/rules` 若在须 `Array.isArray`；`settings/shortcuts` 若在须非 null 非数组对象。
+      **理由（我查出、reviewer 与我先前都未提）**：`isExportPackage` 有**第三个生产调用方 = UI**
+      （`App.tsx:19` import / `:120` `if (!isExportPackage(parsed)) return null`，即 D7 的 parseExportPackage）
+      ⇒ 一处收紧、**三处受益**（inspect / applyImport / UI 走 unknown 计数而非崩）。
+      【定级更正 2026-10-06 · 采纳 reviewer】我原写"`applyImport` 可能**清槽后部分写入**"**作废**：
+      实测 `applyImport` 抛点（`computeDiff:205` / `applyIntent:208` / `partition:212-219` /
+      `keysToClear` 循环 `:228-236`）**全在唯一写入 `clearAndWriteWithCompensation:241` 之前**
+      （至少早 120 行）⇒ **崩溃发生在任何变更之前 ⇒ 干净失败、store 未变**；
+      `:241` 之后的步骤（`counts` 纯算术、`isMissingIcon` 读 `finalSafe`）**不消费畸形 `pkg`**、无抛点。
+      ⇒ **无"清槽后部分写入"窗口**，亦**无 inspect/APPLY 的不对称** —— 两条都经 `worker-orchestrator.ts:484`
+      落成同一个 `INTERNAL_ERROR`、store 都不变。这是 **A11/C4「写入放最后」的设计效果（好消息）**。
+      **"store 未变（ZERO modification）"判据保留**（且会通过），但**不得**论证成"防部分写入"
+      （否则复审会去追一个不存在的窗口）。
+      既有测试 `tests/unit/shared/export-package-map.test.ts:138` 期望面须扩充（`slots:'x'`/`slots:{}`/`rules:'x'` 三拒绝例）。
+      [裁定 6 · 非法 `slotStrategies` ⇒ **整包拒绝**] 理由三条：① 与 `matchSettings` 一致；
+      ② 它是**单值全局设置 map**、非逐记录 ⇒ **D15「跳过该记录 + 披露」语义不适用**；
+      ③ 若"跳过坏条目"，导入时该槽可能**尚不存在**（A3 未携带）⇒ 记忆点无处挂、语义悬空，
+      且需新增披露通道（否则又是"替你决定不告诉你"）。
+      [注] `isValidMatchSettings`（legacy）**从不覆盖 `slotStrategies`** ⇒ 它是**唯一「连 legacy 都没有守卫」
+      的设置字段** ⇒ 第 14/15 项是**必要项，非加固项**。
+      [#15 判据形态更正（防退化为结构断言）] "非法包 ⇒ 返回 `IMPORT_INVALID` 而非抛异常"**字面不成立**：
+      经 `worker-orchestrator.ts:484` `.catch`，抛出**并不**变成 `IMPORT_INVALID`，而是 **`INTERNAL_ERROR`**
+      （`handleMessage` 本就设计为"绝不挂起调用方"）。⇒ **决定性证据 = 起始态行为**（崩 ⇒ 经编排器成
+      `INTERNAL_ERROR`），**不是**"缺少校验点"（后者校验器一加即变）。
+      [#15 行为型 RED/GREEN · 采纳 reviewer 的更准形态]
+      RED（基线）：畸形**容器**（如 `slots:'x'`）经**编排器边界** ⇒ `errorCode === 'INTERNAL_ERROR'`、store 未变；
+      GREEN（修复）：同输入经编排器 ⇒ `errorCode === 'IMPORT_INVALID'`、store 未变。
+      **必须经编排器边界**（直调 service 在基线会抛 ⇒ 测不出 `INTERNAL_ERROR`）。该形态**比"返回显式错误、
+      无抛出"更可判别**：它同时证明**守卫在 `computeDiff` 之前生效**（否则仍是 `INTERNAL_ERROR`）。
+      [#16 拆两半写死（采纳 reviewer）]
+      ① `isExportPackage` 容器类型收紧 —— 含**既有正例保绿**：`export-package-map.test.ts:131-139`
+      中 `{schemaVersion:1,generator:{},exportedAt:'x',scope:{}}` **现被接受**，收紧后**仍应通过**
+      （无 `slots/rules/settings/shortcuts` = 全缺席 = 合法）⇒ **该正例不得被误伤**；
+      ② 经编排器的 `INTERNAL_ERROR → IMPORT_INVALID` 行为型 RED/GREEN + store 未变。
+      ⇒ #15 与 #16 不重叠、各自可失败。
+    status: RESOLVED
+
+  - date: 2026-10-06
+    item: T14b/T21 落盘 —— 1e1d277（主体）+ e244eb2（四项补齐）
+    detail: |
+      [1e1d277 · chore(protocol): retire the legacy import/export trio] 10 文件 +275/−822。
+      三动作 `src/` **归 0**；W5 四旧类型 `src/` **归 0**；四 legacy 方法（`exportConfig`/`generatePreview`/
+      `commitImport`/`applyBulkDecision`）+ `isValidMatchSettings` 生产面**零残留**；
+      `_Unknown`/`_NotAnAction`/`_bidirectional`（worker-orchestrator.ts:111-113）**原样未放宽**；
+      legacy 断言**翻转为"不得存在"持续守卫**（三条独立：运行时 `claimed===false` + 两处源码字面量；
+      `known/declared` 计数 50→47）。F-2 双路径已落、**④ 反证已做**（只删 APPLY 侧 ⇒ 2 failed | 8 passed）。
+      ⚠️ 我实测发现**四项未落**（见下），故非终态。
+      [e244eb2 · fix(import): guard the whole settings family and container shapes] 5 文件 +289/−43。
+      四项补齐（我逐条实测确认）：
+      ① **校验器 4/4**：`export-package.ts:425` `isValidPortableSettings` 覆盖 `matchSettings`（抽为同文件私有
+         `isValidMatchSettingsShape` = 单一所有者）+ `switchDirection` + `autoBindGlobal`（`typeof boolean`，
+         `:430`）+ `slotStrategies`（`:434-438` 键 `isCanonicalSlotKey` = `/^(?:[1-9]|10)$/` ⇒ 拒 `"01"/"1.0"/"-1"/"0"/"11"`；
+         值 ∈ `'inherit'` ∪ 合法 matchSettings）；
+      ② **容器校验（裁定 5）**：新增 `isStructurallyAPackage`（`:358`，**唯一真源**，`isExportPackage` 仅转调
+         ⇒ 无平行实现），`slots/rules` 若在须 `Array.isArray`、`settings/shortcuts` 若在须非 null 非数组对象
+         （`:343` `isPlainObject`）；**缺席仍合法** ⇒ `export-package-map.test.ts:138` 正例**保绿**（我实测），
+         并补六拒绝例；
+      ③ **#15 行为型**（经编排器边界）：新文件 `tests/integration/worker-import-export-rejection.test.ts`
+         （4 类畸形 × INSPECT/APPLY = 8 例，断言 `IMPORT_INVALID` **非** `INTERNAL_ERROR` + store `toEqual` 前一态）；
+         **反证**：去掉容器校验 ⇒ 8 例回落 `INTERNAL_ERROR`；
+      ④ **悬空注释已改**：`export-package.ts:376` 改为 "SEPARATE concern; see `isValidPortableSettings`"。
+      [顺序要点 · executor 自述并经我核实] `settings` 守卫在 `isExportPackage` **之前**（`inspect:108-113` /
+      `applyImport:203-207`）⇒ 每类非法只被检查一次；且 `inspect:108` 有 `parsed !== null && typeof === 'object'`
+      前置 ⇒ **`JSON.parse('null')` 不抛**（我核过，避免"守卫自身崩"）。
+      [更正 A 落实] 用例名**不含"幽灵槽位"**，改为 `⑥ rejects an ORPHAN slot key (…a silent no-op)` /
+      `⑤ rejects an invalid slotStrategies VALUE on BOTH paths`。
+      [更正 B / #14] 断言锚到 **`inspect().inspection.dimensions.settings === false`**（API 真值，非仅 UI 文案）。
+      [更正 C] "store 未变"断言保留，**注释/用例名不写"防部分写入"**（无该窗口）。
+      [门禁实测（我复跑）] `tsc` **0**；全量 **150 files / 1218 tests / 0 fail**；关键三文件
+      `export-package-map`(8) + `import-export-service`(19) + `worker-import-export-rejection`(8) 全绿；
+      锚点：三动作 `src/` **0**、W5 四类型 `src/` **0**。
+      [净测试变化] `1e1d277` −10（legacy 专属 + 迁移合并，判为正当；已要求补迁移映射注释）；
+      `e244eb2` +8（行为型新文件）⇒ 1210 → 1200 → 1218。
+    status: RESOLVED
+
+  - date: 2026-10-06
+    item: 终审波前置修正 —— 计划 Q1=A 陈旧判据全面对齐（采纳 reviewer HIGH）+ rev473 门禁补入 + F1 历史孤儿口径
+    detail: |
+      [HIGH · reviewer 发现，我全面处理] 计划 DoD `:166/:167` + Must-NOT `:200` + Q1 条目 + Final Checklist 等
+      **约 40 处仍按 Q1=A**，而设计 A6 节点 `revisions:` **共六条**（`:428` Q1=A → `:431` R1 → `:440` R2 →
+      `:459` R2 落地范围扩至 `local.tabOverrides` → **`:473` 配方身份保真升级为跨面统一不变量** →
+      `:487` 修正 T14 strip 判据）。⇒ 若照原文跑 F1–F4，会**假红/假绿**。
+      【我第一轮只改 F1 节 3 处、并误写"两次修订/`:421-456`"——reviewer 更正：**六条**、引用应到 `:500`。
+      我认账并已修正计数与范围。】
+      [已处置] ① 计划顶部加**全局取代声明**（Q1=A 一律以声明为准），含 R1 决定性理由（投递路径不经 UI、
+      `apply-fields.ts` 拒 SVG ⇒ UI 侧渲染必致**两个渲染器并存**）与 R2 落点（`resolveIconReferences` 读取时物化）；
+      ② 逐处改写门禁行（带"作废"标注，可溯源）：DoD `:172/:173/:175`、Must Have `:184`、Must NOT `:205/:206`、
+      Final Checklist 反例块、`:2847/:2848`；③ **正向化**为三条约束：配方渲染**只**经 `RecipeRenderer`、
+      **回退不得产 SVG**（= `:454-455` 原文要求）、**UI 侧不得有第二套渲染器**（单一渲染器）。
+      [采纳 reviewer 两条判据缺陷] ④ `rg "renderIconToDataUri" src/background/` **会因一条注释假红**
+      （`recipe-renderer.ts:26`）⇒ 改 `rg "renderIconToDataUri\("`（匹配**调用**）；
+      ⑤ `rg "export-panel" .` 会因**本计划文档自身**提及假红 ⇒ 改 `rg "export-panel" src/ vite.config.ts`（限定代码）。
+      [我更正 reviewer 一处] ⑥ **vite 入口数 = 6（非 7）** —— 原文"7"含已由 T20b 删除的 `import-preview`；
+      Q2=B-2 的实质（未新增）以"当前 6 键 = T20b 后基线"核对（我读 `vite.config.ts:30-37` 实为 6 键）。
+      [范围注明两项（reviewer 建议）] ⑦ `pendingUndo` 反例项**只限 `import-export-service.ts`**（我实测 0 命中），
+      与 `:487` 对 `setPendingUndo` 的**显式豁免同向不冲突**；⑧ 位图反例项限定该文件（`recipe-renderer.ts` 产 PNG 是 R1 授权）。
+      [🔴 我补入 rev473 门禁（先前正交清单遗漏）] 计划 F1 加固块新增第 ③ 条：**必核 `decisions.yaml:473`
+      「配方身份保真统一不变量」（迭代内交付门禁）** —— 覆盖三条 UI 路径（编辑往返 / 撤销回放 / **链上 Use**），
+      并要求编辑器播种经 `iconSourceToIconConfig`（**唯一反向入口**）。F1 须**逐路径取证**，未达成者**按迭代门禁处理**（不走"历史孤儿"豁免）。
+      [证据新鲜度加固] ⑨ `evidence/final-qa/` 现存 `final-gate-*(2026-09-28)`、`P1–P12(09-29)`、
+      `f3-recipe-png.png(10-05)` ⇒ **全部早于本迭代实现**；裁定**仅接受 mtime 晚于实现提交且与 HEAD 一致**的证据，
+      陈旧者**须重产**、**不得**计入 [N/N]（防"文件存在"被虚假满足）。
+      [A3 三态加固] ⑩ `counts` 是**文件携带维度**计数（缺失数组 ≠ 空数组）⇒ F1 须逐字段核对，
+      防"未携带被判成删除全部"。
+      [F1 历史孤儿口径（我裁定）] executor 扫出的 `src/ui/shared/use-expand-row.ts`（设计点名的唯一实现却未接线）
+      与 `src/ui/shared/use-draft-state.ts`（创建后**连测试都无**）**均早于本迭代** ⇒ **不计入本迭代 F1 判定**、
+      **不阻断**，但**具名登记**、**另立后续任务**（处置建议：前者接线或删除+改设计账；后者删除）。
+      F1 结论须**分两栏**：「本迭代 [N/N]」与「历史孤儿（登记，不阻断）」。
+      [T14b/T21] reviewer 终局 **PASS**（17/17 + 两补项：`JSON.parse('null')` 不崩、无过度拒绝），
+      并确认 `e244eb2..HEAD`（dfec27f/84eeb0f）对测试**纯注释** ⇒ 不引入弱断言。
+    status: RESOLVED
+
+  - date: 2026-10-06
+    item: F1 Plan Compliance Audit 结论（本迭代 9/10）+ rev473 站点④真缺陷 + 我两次误判的更正
+    detail: |
+      [F1 判定（reviewer，HEAD 84eeb0f）] **本迭代 9/10** —— 唯一未达成 = **rev473 路径③ 的站点④**。
+      分栏：栏一 本迭代（①rev473 2/3、②A3 三态 ✅探针实证、③证据新鲜度 ❌全过期、④反例+锚点 ✅全 0、
+      ⑤门禁 ✅独立复现 150·1218·0）；栏二 历史孤儿 2 处（登记、不阻）。
+      [rev473 路径③ = 2/3 达成] `onApplyTier` 于 `src/` 共 **4 站点**：
+      settings `:2050`(title) / `:2075`(icon，**传 owner** ⇒ ✅) ；
+      sidebar `:1005`(图标模态，**传 owner** → `:1009 resolveSourceForOwner?.(owner)` ⇒ ✅) ；
+      **sidebar `:1223`(新规则模态，丢 `_owner` ⇒ ❌)**。违规链（我逐行复核）：
+      `:1223` → `:1146 applyChainValueToDraft(field, value)` → **`:1151 value.startsWith('data:')`**
+      → **`:1153 setIconConfig({ dataUri: value })`** → `rule-form-submit.ts:85 iconConfigToIconSource`
+      → `icon-source.ts:33-34 { type:'upload', value:dataUri }` ⇒ **配方身份被销毁**（C1/rev473 不变量破坏）。
+      可复现：**新规则模态对"配方"记录点 Use → 保存** ⇒ 配方降级为 upload、配方字段丢失、导出不再可复现。
+      修法（**不涉 A6**）：把 `resolveSourceForOwner` 接进该模态 + `applyChainValueToDraft(field, value, owner?)`
+      首选源分支（与站点 `:1005-1010` 同构）。
+      [我两次误判的更正] ① 我先判"路径③ 结构性未达成、需改链上模型" ⇒ **过头**（`owner` 是**并行参数**、
+      `TierValue.value` 仍 `string` ⇒ **不改 A6 即可恢复源**；站点 ②/③ 即为证）；② 我随后判"3/3 达成"
+      ⇒ **漏站点**（只看 settings，漏 sidebar 新规则模态）。两次根因同为**未穷举站点**。
+      ⇒ **撤回"A6 张力"**（rev473 与 A6 共存；rev473 宜补一句"经 owner 旁路恢复源，值模型不变"）。
+      [另一 MEDIUM（保留）] `settings/App.tsx:1662-1663`：`owner===null`/`site` 时回退前缀推断 —— `site` 层
+      承载**快照字符串、无 `IconSource` 可恢复** ⇒ 不会降级配方；`:1659-1660` JSDoc **已承认**（具名可接受）。
+      裁定**保留**（移除需改 `field-chain` 契约），但**须补测锁定**（防扩散到有源层）。
+      [证据新鲜度实测] `final-F1-guardrails/final-gate-*` = **2026-09-28**、`P1–P12` = **09-29**、
+      `f3-recipe-png.png` = **10-05**；实现提交 = **10-06 11:20–11:44** ⇒ **无一晚于实现提交**
+      （`task-15/18/19-*.txt` 10-05 23:xx 亦早于 10-06 终提交）⇒ **须重产**，重产后方可计入 [N/N]。
+      F3 场景须按当前 HEAD 重跑（executor 域；待其回报浏览器工具可用性）。
+      [A3 三态实测] PROBE A 未携带 slots ⇒ `diff.records=[]`、`deletedSlots=0`（无"删除全部"）；
+      PROBE B 携带空 slots+overwrite ⇒ `deletedSlots=2` ⇒ **"未携带" ≠ "空数组"** 成立 ✓。
+      [待办] ① executor 修站点④（RED 先行）+ site 分支锁定测试（同批）；② 修后 reviewer 复核 F1 → 10/10；
+      ③ 重产 F3 证据；④ 历史孤儿另立任务；⑤ rev473 补"owner 旁路"说明。
+    status: RESOLVED

@@ -5,6 +5,35 @@
 > **状态**: Ready for Execution（**0 项 [DECISION NEEDED]** —— 用户已裁定 **Q1=A**（配方在 **UI 侧**渲染 PNG）/ **Q2=B-2**（**`settings/App.tsx` 内独立导出 section**，不新增 HTML 页面与构建入口）；计划层默认裁决 D-1/D-2 已被这两项裁定覆盖，见 §Pre-Planning Review 与 §Open Questions）
 > **修订记录（v2 · 2026-10-05，依 sw-plan-reviewer REJECT 意见）**: ① 同步 Q1=A / Q2=B 裁定（BLOCKER 1/2）· ② Wave 4 拆 4a/4b + T9 依赖登记（HIGH 3）· ③ 关键路径统一为一条（MEDIUM 1）· ④ T14 行号引用更正（MEDIUM 2）· ⑤ 验证口径统一为「ui-smoke(jsdom) 结构断言 + 浏览器 skill 自动化」（LOW）
 > **修订记录（v3 · 2026-10-05，Q2 口径裁定为 B-2）**: B-1/B-2 口径已由用户裁定为 **B-2** —— 独立导出面板 = **`settings/App.tsx` 内独立导出 section**，**不新增 HTML 页面、不新增构建入口**（`vite.config.ts` 保持 **7** 入口）。据此：TL;DR/Concrete Deliverables/Must Have/DoD/Open Questions/RK-9/Wave 说明/依赖矩阵/Agent Dispatch/T19 整块/Commit 20/提交顺序约束/Final Checklist 全部同步；`import-preview` 孤儿页（F1）与 `2026-07-14-ui-ux-design.md:150-156` 的"设置页 5 分区含导入导出"作为 B-2 依据。**Q1=A 相关内容未改动。**
+>
+> **🔴🔴 全局取代声明（2026-10-06 · 覆盖全文，逐处列出见下）**
+>
+> **凡本计划中出现「Q1=A」「渲染落点 = UI 侧」「background 原样上送（不渲染）」「`renderIconToDataUri` 于
+> `src/background/` → 0」「vite 入口数 = 7」之处，一律以本节为准，其余为历史陈述、不再执行。**
+>
+> ① **渲染落点：Q1=A 已被取代 —— Q1=A → R1 → R2**（`decisions.yaml:426-500` 的 `revisions:` **共六条**：
+>    `:428` Q1=A → `:431` R1 → `:440` R2 → `:459` R2 落地范围扩至 `local.tabOverrides` →
+>    **`:473` 配方身份保真升级为跨面统一不变量（迭代内交付门禁）** → `:487` 修正 T14 strip 判据；
+>    代码 `1b1541b`(R1)/`12e116c`(R2)）：
+>    - **R1**：渲染改为 **background** 用 **`OffscreenCanvas`** 产 PNG（**取代 Q1=A**）。决定性理由：
+>      **投递路径不经任何 UI 页面**（内容脚本导航驱动），且 `apply-fields.ts` 在 page 侧只收字符串、**拒 SVG**
+>      ⇒ UI 侧渲染"只能修好可见面，并迫使投递侧再设渲染器 ⇒ 两个渲染器并存"。
+>    - **R2（最终形态）**：落点由 `resolveForDisplay` 改为 **`resolveIconReferences`（读取时物化）**。
+>    - 实施真值 = **R2**：`src/background/recipe-renderer.ts`（`RecipeRenderer`）由 `icon-service.ts:16/179`、
+>      `storage-repository.ts:30/131` **生产消费**。
+>    - ⇒ **正向判据**（替代原反例）：① **投递路径**（`getSyncState` → `resolveIconReferences`）的配方渲染
+>      **只**经 `RecipeRenderer`；② **回退路径不得产 SVG**（= `:454-455` 原文要求）；
+>      ③ **UI 的 `renderIconToDataUri`（`IconEditor.tsx:66`）是正当的编辑器预览/播种渲染器，不得判为违规**
+>      —— 我原写的"UI 不得有第二套渲染器"**过强、已作废**（design 反对的是"**投递侧另设**渲染器"，
+>      非"UI 编辑器渲染器"）；**真正的约束**是：**不得把其产物持久化为 `type:'upload'`**
+>      （即 FIX-C `icon-source-reverse.test.ts` 已守的"物化配方仍视为配方、`dataUri` 必须 `undefined`"）。
+>    - ⇒ **反例判据须收紧**：原 `rg "renderIconToDataUri" src/background/` → 0 **会因一条注释假红**；
+>      如仍要核，须写 **`rg "renderIconToDataUri\(" src/background/`**（匹配**调用**）。
+>    - ⇒ **不得**把 R1/R2 的 background 渲染判为 **scope creep**（F4 已于该节补注）。
+> ② **vite 入口数 = 6（非 7）** —— 原文"7"含 `import-preview`，该页已由 **T20b 删除**；Q2=B-2 的实质
+>    （**未新增**页面/入口）以"**当前 6 键 = T20b 后基线**"核对。
+> ③ **本计划 `:166/:167/:172/:173/:184/:200/:205/:206/:175/:1847/:1848` 等门禁行已就地改写**（见各处「作废」标注）；
+>    其余叙述段（T12/T13/T19 相关、RK-4、Q1 条目、Commit 表）**保留原文以便溯源**，但**一律按本节解读**。
 > **上游设计（四层闭合，0 OPEN，44 项决策：38 RESOLVED / 2 取代 / 4 作废）**:
 > - 主文档 `_context-output/designs/2026-10-04-import-export-design.md`
 > - 决策清单 `_context-output/designs/2026-10-04-import-export-decisions.yaml`
@@ -163,10 +192,20 @@
 - [ ] 反例搜索无命中：`rg "EXPORT_CONFIG|IMPORT_PREVIEW|IMPORT_COMMIT" src/` → 0
 - [ ] 反例搜索无命中：`rg "\[local:" src/` → 0（包装已移除）
 - [ ] 反例搜索无命中：`rg "data:image/(png|jpeg|webp)" src/background/import-export-service.ts` → 0（包内禁位图）
-- [ ] 反例搜索无命中：`rg "renderIconToDataUri" src/background/` → 0（**Q1=A**：渲染只在 UI 侧；background 不注入渲染器、不调 canvas）
-- [ ] 断言 background 对 `type:'template'` **原样上送**（T12 测试：`getSyncState()` 返回配方对象形状不变，且**不新增**配方渲染）
-      ⚠️ **注**：`getPlaceholder()`（`icon-service.ts:386`）**本就产** `data:image/svg+xml`（静态灰底 "?"，既有代码）→ **不可**用"background 内 `svg+xml` → 0"作反例（会误报既有占位符）；约束只针对"**配方渲染**"。原因见 §T12 与"新发现自洽问题"。
-- [ ] **settings 页内存在独立导出 section**（含维度勾选 + 记录展开 + 包摘要）；**反例搜索**：`rg "export-panel" .` → 0（不得新增页面与入口）；`vite.config.ts` 入口数仍为 **7**（**Q2=B-2**）
+      （仅限该文件；`recipe-renderer.ts` 产 PNG 是 **R1** 授权行为，不受此限）
+- ~~[ ] 反例搜索无命中：`rg "renderIconToDataUri" src/background/` → 0（**Q1=A**…）~~ **【作废 2026-10-06：Q1=A 已被 R1/R2 取代】**
+      改判：**`RecipeRenderer`（`src/background/recipe-renderer.ts`）必须被生产消费**（`icon-service.ts` +
+      `storage-repository.ts`）；**配方渲染只经 `OffscreenCanvas` 产 PNG**；**回退路径不得产 SVG**；
+      **UI 侧不得出现第二套配方渲染器**（单一渲染器）。⚠️ 判据须写 **`renderIconToDataUri\(`**（调用）或排除注释
+      —— 现有唯一命中是其**注释**（`recipe-renderer.ts:26`），按字面会**假红**。
+- ~~[ ] 断言 background 对 `type:'template'` **原样上送**…~~ **【作废 2026-10-06：与 R2 冲突】**
+      改判：`getSyncState` → `resolveIconReferences`（**R2 落点**）对 `type:'template'` **物化 PNG**
+      （`RecipeRenderer.renderForResolution`），并**只**在真实 service worker 可用 canvas。
+      ⚠️ **注（仍有效）**：`getPlaceholder()`（`icon-service.ts`）**本就产** `data:image/svg+xml`（静态灰底 "?"，既有代码）
+      → **不可**用"background 内 `svg+xml` → 0"作反例（会误报既有占位符）；约束只针对"**配方渲染**"。
+- [ ] **settings 页内存在独立导出 section**（含维度勾选 + 记录展开 + 包摘要）；**反例搜索**（收紧版）：
+      `rg "export-panel" src/ vite.config.ts` → 0（**限定代码**；`rg … .` 会因本计划文档自身 8 处散文提及而**假红**）；
+      `vite.config.ts` 入口数 = **6**（**Q2=B-2**；~~7~~ 含已由 T20b 删除的 `import-preview`）
 - [ ] 保真测试证明：`keep existing` 路径下目标机 `rules` 数组逐条不变（T9）
 - [ ] 补偿测试证明：注入 sync 写失败 → local 图标键**恢复原值**、`configVersion` **不变**（T16）
 
@@ -191,13 +230,21 @@
 ### Must NOT Have (Guardrails)
 
 - [ ] **不实现导入撤销**（A8）——无快照、无 `pendingUndo` 用于导入、无 C5/C6/C7 遗留
+      ⚠️ **范围注明**：本反例项**只限 `src/background/import-export-service.ts`**（我实测其内 0 命中），
+      与 `storage-repository.setPendingUndo` **无关** —— 后者由 `decisions.yaml:487` **显式豁免**
+      （`pendingUndo` 非 `LocalState`、5s TTL、不导出、`restoreSlot→saveSlot→writeSync` 会 strip ⇒ 无持久污染）。
+      两者**同向不冲突**。
 - [ ] **包内禁原始位图**（C1）——无 `data:` bitmap、无体积开关、无 `MAX_OUTPUT_SIZE` 偿还
 - [ ] **不提供 manifest 清单**（A1）、**不提供 `EXPORT_DESCRIBE` 第四动作**（A11/YAGNI）、**不做强制备份**（A9）
 - [ ] **不做旧导出文件兼容 / 迁移**（G1）——无 legacy 判别、无静默纠正
 - [ ] **不增删维度**（D5）——恰为槽位/规则/策略/快捷键
 - [ ] **不把 `preview` 由 UI 回传作为权威**（C4）——UI 只传意图
-- [ ] **不新增 permission / npm 依赖**（C8/G1）——**Q1=A 明令否决**"background PNG 编码"（会触碰本 guardrail）
-- [ ] **不在 background 渲染配方**（**Q1=A**）——`src/background/` 内不得出现 `renderIconToDataUri`；`type:'template'` 不得被 background 渲染（`generateTemplateIcon` 的 SVG 路径不得服务于配方；`getPlaceholder()` 静态占位不受此限）
+- [ ] **不新增 permission / npm 依赖**（C8/G1）—— 该条**不变**；但 ~~"Q1=A 明令否决 background PNG 编码"~~ **作废**：
+      R1/R2 用 **`OffscreenCanvas`**（MV3 平台 API，**不新增依赖**）⇒ 不触碰本 guardrail。
+- ~~[ ] **不在 background 渲染配方**（**Q1=A**）…~~ **【作废 2026-10-06：与 R1/R2 冲突】**
+      改判为三条**正向**约束：① 配方渲染**只**经 `RecipeRenderer`（`OffscreenCanvas` → PNG）；
+      ② **回退路径不得产 SVG**（否则投递侧 `apply-fields.ts` 的 page 闸门会静默丢弃）；
+      ③ `generateTemplateIcon` 的 SVG 路径**不得**再服务于配方；`getPlaceholder()` 静态占位**不受此限**。
 - [ ] **不修改设计文档**、**不修改与本计划无关的 `src/` 模块**
 - [ ] **不引入通用序列化框架**（防 premature abstraction）——映射层只服务本包 schema
 
@@ -2627,11 +2674,88 @@ Max Concurrent: 7（Wave 3）
 - [ ] F1. **Plan Compliance Audit**（recommended: `oracle`）
 
   Read the plan end-to-end executing:
-  - **Must Have 逐项验证**：三动作存在、映射层独立、裸引用、配方持久化（**background 原样上送**）、消费方判定、清空槽、版本绑定、逐维模式、三态、域违规披露、恒定弹窗、重合提示、commands.update、**独立导出 section（Q2=B-2）**
-  - **Must NOT Have 反例搜索**：`rg "EXPORT_CONFIG|IMPORT_PREVIEW|IMPORT_COMMIT" src/` → 0；`rg "\[local:" src/` → 0；`rg "data:image/(png|jpeg|webp)" src/background/import-export-service.ts` → 0；`rg "pendingUndo" src/background/import-export-service.ts` → 0；**`rg "renderIconToDataUri" src/background/` → 0（Q1=A）**；**`rg "export-panel" .` → 0 且 `vite.config.ts` 入口数仍为 7（Q2=B-2：未新增页面/入口）**
-  - ⚠️ **反例搜索注意**：**不得**用 `rg "data:image/svg\+xml" src/background/` 作反例 —— `getPlaceholder()`（`icon-service.ts:386`）**本就产**该前缀（既有静态占位），会误报；Q1=A 的约束只针对"**配方渲染**"（`type:'template'` 不得被 background 渲染）
+  - **Must Have 逐项验证**：三动作存在、映射层独立、裸引用、配方持久化、消费方判定、清空槽、版本绑定、逐维模式、三态、域违规披露、恒定弹窗、重合提示、commands.update、**独立导出 section（Q2=B-2）**
+  - **Must NOT Have 反例搜索**：`rg "EXPORT_CONFIG|IMPORT_PREVIEW|IMPORT_COMMIT" src/` → 0；`rg "\[local:" src/` → 0；`rg "data:image/(png|jpeg|webp)" src/background/import-export-service.ts` → 0；`rg "pendingUndo" src/background/import-export-service.ts` → 0；**`rg "export-panel" .` → 0 且 `vite.config.ts` 入口数 = 6（Q2=B-2：未新增页面/入口；见下方⚠️入口数更正）**
+
+  > **🔴 实施期修订（2026-10-06，我裁定）：Q1=A 已被设计层取代 —— 原文两条核对项作废**
+  >
+  > 设计 `decisions.yaml:421-456` 记录了两次修订：**Q1=A（UI 侧渲染）→ R1（background 用 `OffscreenCanvas`
+  > 产 PNG，取代 Q1=A；理由：投递路径不经任何 UI 页面、且 `apply-fields.ts` 的 page 侧闸门拒 SVG）
+  > → R2（落点由 `resolveForDisplay` 改为 `resolveIconReferences`，读取时物化）**。
+  > 实施真值 = **R2**（`src/background/recipe-renderer.ts` 的 `RecipeRenderer` 被
+  > `icon-service.ts:16/179` 与 `storage-repository.ts:30/131` 消费）。
+  >
+  > ⇒ **作废的原核对项**（若照原样执行，F1/F4 会**误判 REJECT**）：
+  > - ~~「`rg "renderIconToDataUri" src/background/` → 0（Q1=A）」~~ ⇒ 现**允许** background 渲染；
+  >   正确的反向核对是：**`RecipeRenderer` 必须被生产消费**（`icon-service.ts` + `storage-repository.ts`）且
+  >   **UI 侧不得出现第二套配方渲染**（单一渲染器）。
+  > - ~~⚠️「Q1=A 的约束只针对配方渲染」~~ ⇒ 该注意仍**部分有效**：`getPlaceholder()`（`icon-service.ts`）
+  >   **本就产** `data:image/svg+xml` ⇒ **仍不得**用 `rg "data:image/svg+xml" src/background/` 作反例（会误报）；
+  >   但"配方不得被 background 渲染"**已不成立**，改判为：**配方必须由 `RecipeRenderer` 产 PNG**、
+  >   且其**回退路径不得产 SVG**（回退产 PNG 占位或 undefined）。
+  >
+  > **⚠️ 入口数更正**：`vite.config.ts` 的 `input` 键实为 **6**（`background` / `content` / `sidebar` /
+  > `settings` / `recovery` / `conflict-confirm`）—— 原文 v3 写"保持 7"**计入了已删的 `import-preview`**（T20b）。
+  > ⇒ **Q2=B-2 的实质（未新增页面/入口）以"当前 6 键 = T20b 后基线"核对**，不得按 7 判。
   - **Evidence 验证**：`_context-output/evidence/` 各任务证据文件存在
   - **Deliverable 验证**：逐条对照 Concrete Deliverables
+
+  > **🔴 实施期加固（2026-10-06，我裁定 —— 防两条假绿）**：
+  > ① **证据新鲜度**：`_context-output/evidence/final-qa/` 现存 `final-gate-*.txt`（**2026-09-28**）、
+  >    `P1–P12.txt`（**2026-09-29**）、`f3-recipe-png.png`（**2026-10-05**）——**全部早于**本迭代的
+  >    T18/T19/T20/T22/T14b/T21 提交。⇒ "证据文件存在"**不得**据此判定；
+  >    仅接受 **mtime 晚于本迭代实现提交**（且内容与当前 HEAD 一致）的证据；
+  >    陈旧的 `final-qa/*` 须**重新产出**（覆盖或新目录），不得计入 [N/N]。
+  > ② **A3 三态计数**：`types.ts:326-331` 的 `counts: { added, replaced, kept, deleted, skipped }`
+  >    是**文件携带维度**的计数（缺失数组 ≠ 空数组）。⇒ 一份"**未携带** `slots`"的包不得在
+  >    `counts.deleted` 上体现"删除了所有槽位"；F1 须**逐字段核对**该三态语义（A3）。
+  > ③ **🔴 必核 `decisions.yaml:473`（配方身份保真统一不变量）—— 迭代内交付门禁**（先前清单遗漏）：
+  >    不变量 = **唯一持久物必须是 `IconSource` 本身，不得由渲染值反推**；覆盖三条 UI 路径：
+  >    ① 编辑往返（sidebar `seedIconFieldSource` / `onApplyTier`；settings `openEdit` / `applyTierValue`）
+  >    ② 撤销回放（settings `handleUndo`，快照须存**原始 `IconSource`**，原 `string-only` 须加宽）
+  >    ③ **链上 Use**（`applyTierValue`/`onApplyTier`：**不得**取 `value` 而丢 `type`）
+  >    并要求编辑器播种**必须经 `iconSourceToIconConfig`**（"已存在、零调用者 → 接线为**唯一反向入口**"）。
+  >    ⇒ F1 须**逐路径取证**（每路径：达成 / 未达成 + 文件:行 + `git grep` 证据），
+  >    **未达成者按迭代门禁处理（不属"历史孤儿"豁免）**；判据不得只看单点符号存在。
+  >
+  >    **MEDIUM 残留裁定**（`App.tsx:1662-1663` site 层前缀回退）：**保留**（移除需改 `chain` 契约、超本迭代）；
+  >    但**须补 1 条单测锁定该分支**（否则是"**未被测的具名例外**"，复活无人拦 —— F1 主题），
+  >    并在 `icon-source-reverse.test.ts` 邻域注明"**唯一**允许前缀推断的分支 + 理由（site 无源可恢复）"；
+  >    F1 结论须**具名列出**该残留（**不阻断**本迭代）。
+  >
+  >    **🔴 F1 取证结论（v2 · reviewer 实读函数体 + 我独立复核确认；推翻我的 v1"3/3 达成"）：路径③ = 2/3 达成 + 1 未达成（真缺陷）**
+  >    - **路径③ ✅ 达成（我先前预判"未达成"被推翻，我认账）**：`value: string` 是**密钥而非载荷** ——
+  >      真实源由 **`owner` 旁路**恢复。证据链（我逐行读）：
+  >      `App.tsx:1656-1657` `iconSeedForTier(value, owner)` → `iconSourceForOwner(owner, sourceCtxRef.current)`；
+  >      `icon-source.ts` 的 `iconSourceForOwner` **按 `owner.kind` 精确恢复完整 `IconSource`（含 `type`）**：
+  >      `override`→`tabOverrides[].favicon`、`slot`→`slots[].uiMarker.icon`、`rule`→`rules[].favicon`、**`site`→`null`**；
+  >      `owner` 确实被传递：`icon-field-editor.tsx:54` `onApplyTier(kind, value, owner)` → `App.tsx:2075`；
+  >      `App.tsx:1648-1654` 的 **FIX-C (i) JSDoc 明写**该机制（"record 的 `value` 只是字符串…`owner` 由
+  >      `IconFieldEditor` 提供，故可恢复 ORIGINAL source"）。
+  >      ⇒ **未走前缀推断 ⇒ 技法上等同**（本条**不**构成 A6 冲突，我先前提的"张力"**撤回**）。
+  >    - **路径① ✅ 达成**：`icon-source.ts` 三函数是**一条流水线的三层、非平行实现** ——
+  >      `iconSourceForOwner`(恢复) → `canonicalIconSource`(归一化) → `iconSourceToDraft`(表单态) →
+  >      **`iconSourceToDraft` 内部委派 `iconSourceToIconConfig`**（组合关系）；且 `iconSourceToDraft` 按
+  >      **`source.type` 分派**（JSDoc 明文 "dispatch on `type`, NEVER on the value's shape"）。
+  >    - **路径② ✅ 达成**：`UndoLayerWrite.icon?: IconSource`（`undo-bar.tsx:38`）⇒ 快照已非 string-only。
+  >    - **🔴 真缺陷（`rev473` 迭代门禁未达成 · 站点④）**：`onApplyTier` 在 `src/` 共 **4 个**站点，
+  >      **站点④ `sidebar/App.tsx:1223`（新规则模态）丢弃 `_owner`** ⇒ 违规链（我逐行复核）：
+  >      `:1223` `(_kind, value, _owner, field) => applyChainValueToDraft(field, value)`
+  >      → `:1146 applyChainValueToDraft(field, value)` → **`:1151 value.startsWith('data:')`**（前缀推断）
+  >      → **`:1153 setIconConfig({ dataUri: value })`**（把**物化 PNG 当真实上传**）
+  >      → `rule-form-submit.ts:82 resolveDraftFavicon` → `icon-source.ts:33-34 iconConfigToIconSource`
+  >      的 `if (config.dataUri) return { type:'upload', ... }` ⇒ **配方身份被销毁**。
+  >      ⇒ **用户在新规则模态对一条"配方"记录点 `Use` → 保存 ⇒ 配方降级为 upload、**
+  >      **背景/文本/文本色丢失、导出不再可复现**（= `icon-source.ts:4-7` 文件头描述的 C1 原始失败）。
+  >      **已达成的 2/3**：① settings `:2075`（传 owner → `iconSourceForOwner` 恢复）✓；
+  >      ② sidebar `:1005`（传 owner → `:1009 resolveSourceForOwner?.(owner)`）✓。
+  >    - **✅ A6 张力不成立（我先前"需改链上模型"的判断撤回）**：`owner` 是**并行参数**、
+  >      `TierValue.value` 仍为 `string` ⇒ **不改 A6 即可恢复源**（站点 ②/③ 即为证）⇒ **A6 与 rev473 共存**。
+  >      ⇒ rev473 宜补一句说明："经 `owner` 旁路恢复源，值模型不变（A6 保全）"。
+  >    - **🟡 另一处 MEDIUM（具名、有意保留）**：`settings/App.tsx:1662-1663` —— `owner===null`/`site` 时
+  >      回退 `value.startsWith('data:')`（FIX-C #8 残留形态）。**影响有限**：`site` 层承载**快照字符串**、
+  >      **无 `IconSource` 可恢复** ⇒ 不会把配方降级为 upload；`:1659-1660` JSDoc **已承认**（具名可接受）。
+  >      ⇒ **保留**（移除需改 `field-chain` 契约），但**须补测锁定**（防扩散到有源层）。
 
   Output: `Must Have [N/N] | Must NOT Have [N/N] | Tasks [N/N] | Evidence [N/N] | VERDICT: APPROVE/REJECT`
 
@@ -2662,6 +2786,10 @@ Max Concurrent: 7（Wave 3）
   - **Spec-Implementation 映射**：逐任务读 "What to do" + `git diff`，1:1 核对
   - **完整性**：设计 4 维度全实现，无遗漏
   - **Anti-Creep**：无 manifest / 无 EXPORT_DESCRIBE / 无强制备份 / 无撤销 / 无迁移逻辑
+  - ⚠️ **不得把 R1/R2 的 background 渲染判为 scope creep**：设计 `decisions.yaml:421-456` 已由
+    Q1=A → **R1**（background `OffscreenCanvas` 产 PNG）→ **R2**（落点 `resolveIconReferences`）两次修订；
+    实施真值 = R2。`recipe-renderer.ts` + `icon-service.ts`/`storage-repository.ts` 的接线**属授权范围**。
+    而 manifest / `package.json` 的**权限、host_permission、command、依赖**仍须**零新增**（该条不变）。
   - **Must NOT Do 合规**：逐任务核对
   - **Cross-Task 污染**：检测任务越界改他人文件
   - **Unaccounted 变更**：标记未列入任何任务的被改文件
@@ -2789,7 +2917,7 @@ npm run test:ui-smoke    # Expected: ALL PASS
 npm run build:chrome     # Expected: 成功（入口数仍为 7，未新增 export-panel 入口 — Q2=B-2）
 npm run build:firefox    # Expected: 成功
 rg "EXPORT_CONFIG|IMPORT_PREVIEW|IMPORT_COMMIT" src/   # Expected: 0 命中
-rg "renderIconToDataUri" src/background/               # Expected: 0 命中（Q1=A：渲染只在 UI 侧）
+rg "renderIconToDataUri\(" src/background/             # Expected: 0 命中（R1/R2：background 渲染经 RecipeRenderer，不调 UI 的 canvas 函数）
 rg "\[local:" src/                                     # Expected: 0 命中
 ```
 
@@ -2804,5 +2932,8 @@ rg "\[local:" src/                                     # Expected: 0 命中
 - [ ] User explicitly approved completion
 - [ ] Evidence directory `_context-output/evidence/` populated
 - [ ] 设计一致性修订未被回退（`2026-07-14-…-decisions.yaml` REVISED 标记保留）
-- [ ] **Q1=A 已落地**：background **不渲染**配方；`rg "renderIconToDataUri" src/background/` → 0；配方在 **UI 侧**渲染为 PNG
-- [ ] **Q2=B-2 已落地**：**独立导出 section**存在（位于 `src/ui/settings/App.tsx`，含维度勾选 + 记录展开 + 包摘要）；`rg "export-panel" .` → 0；`vite.config.ts` 入口数仍为 7
+- [ ] **渲染落点（R1/R2）已落地**：`RecipeRenderer` 被 `icon-service.ts` + `storage-repository.ts` **生产消费**；
+      `rg "renderIconToDataUri\(" src/background/` → 0；**回退不产 SVG**；**UI 侧无第二套配方渲染器**
+      （~~Q1=A：background 不渲染~~ **作废**，见本节顶部实施期更正）
+- [ ] **Q2=B-2 已落地**：**独立导出 section**存在（位于 `src/ui/settings/App.tsx`，含维度勾选 + 记录展开 + 包摘要）；
+      `rg "export-panel" src/ vite.config.ts` → 0（限定代码）；`vite.config.ts` 入口数 = **6**
