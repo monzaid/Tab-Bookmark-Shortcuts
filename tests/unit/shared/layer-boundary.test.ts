@@ -103,6 +103,11 @@ describe('layer boundary', () => {
       // A `//` inside a STRING is not a comment: a regex strip truncated the line
       // here, hiding the import that follows it. The escape the guard must close.
       "const p = 'https://x'; import { A } from '@ui/evil';",
+      // Same class, other string spellings the machine must also survive:
+      //   E: a backtick template (the whole literal is string content)
+      //   F: an ESCAPED quote — the machine must not end the string at `\'`
+      'const p = `https://x`; import { A } from \'@ui/evil\';',
+      "const p = 'a \\' // b'; import { A } from '@ui/evil';",
     ];
     const MUST_NOT_FLAG = [
       '// see @ui/x for details',

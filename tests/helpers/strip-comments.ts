@@ -60,8 +60,14 @@ export function stripComments(source: string): string {
 }
 
 /*
- * KNOWN ESCAPES (not covered here, stated so the limit is a checked fact):
+ * KNOWN ESCAPES (not covered here, stated so the limit is a checked fact; these
+ * are NOT pinned as assertions - a "must leak" test would spec the defect):
  *   - a template literal's interpolation is treated as string content, so REAL
- *     code inside it is not seen. Covering that needs an actual parser, not a
- *     text pass - treat it as a signal to change strategy, not a patch.
+ *     code inside it is not seen.
+ *   - a REGEX LITERAL's contents are treated as code, so a `//` inside one
+ *     (e.g. /https?:\/\//, not rare in this repo) still starts a line comment and
+ *     hides an import after it. Not caught by the old regex either.
+ *   - any other form that needs real lexing rather than a text pass.
+ * Covering these needs an actual parser - treat that as a signal to change
+ * strategy, not a patch.
  */
