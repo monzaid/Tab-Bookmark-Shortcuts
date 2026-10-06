@@ -806,6 +806,7 @@ import type { IconConfig } from '@ui/components/IconEditor';
 import { IconFieldEditor } from '@ui/shared/icon-field-editor';
 import type { IconFieldValue } from '@ui/shared/icon-field-editor';
 import { canonicalIconSource, iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft } from '@ui/shared/icon-source';
+import { fromIconFieldValue } from '@ui/shared/icon-mode-adapter';
 import { wildcardToRegex } from '@shared/url-utils';
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import type { FieldMode } from '@ui/shared/field-editor';
@@ -1047,11 +1048,17 @@ interface CreateRuleModalProps {
   iconChain?: ChainResult;
   /** Items 2 / 6: clear ONE chain RECORD's own value. */
   onClearTier?: (owner: TierOwner, field: 'title' | 'icon') => void;
+  /**
+   * FIX-C (i): the SAME owner→source resolution the icon modal uses, so a
+   * `Use chain` of a RECIPE record copies the recipe instead of its derived
+   * render (which would re-save as an upload and destroy it — C1 / rev473).
+   */
+  resolveSourceForOwner?: (owner: TierOwner) => IconSource | null;
   onSave: (data: { url: string; matchType: 'exact' | 'regex'; title?: string; favicon?: IconSource; priority: number }) => Promise<{ success: boolean; message?: string }>;
   onCancel: () => void;
 }
 
-function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = '', defaultMatchType, titleChain: liveTitleChain, iconChain: liveIconChain, onClearTier, onSave, onCancel }: CreateRuleModalProps) {
+function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = '', defaultMatchType, titleChain: liveTitleChain, iconChain: liveIconChain, onClearTier, resolveSourceForOwner, onSave, onCancel }: CreateRuleModalProps) {
   // DT4: the four prefills are snapshotted ONCE on open, from the chain-derived
   // values the caller supplies (no per-keystroke re-seed, no implicit fallback).
   const [url, setUrl] = useState(defaultUrl);
@@ -1143,11 +1150,23 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
    * Custom Icon tab; anything else is treated as an Icon URL — the same
    * convention `IconFieldEditor` uses when it applies a record.
    */
-  const applyChainValueToDraft = useCallback((field: 'title' | 'icon', value: string) => {
+  const applyChainValueToDraft = useCallback((field: 'title' | 'icon', value: string, owner?: TierOwner | null) => {
     if (field === 'title') {
       setTitleMode({ kind: 'set', value });
       return;
     }
+    // FIX-C (i) / rev473: prefer the record's ORIGINAL source. A recipe's `value`
+    // is the DERIVED render (R2 materializes it at read time), so dispatching on
+    // the value's shape would reopen it as an upload and destroy the recipe (C1).
+    const source = owner ? resolveSourceForOwner?.(owner) ?? null : null;
+    if (source) {
+      const seeded = fromIconFieldValue(iconSourceToDraft(canonicalIconSource(source)));
+      setIconMode(seeded.mode);
+      setIconConfig(seeded.iconConfig);
+      return;
+    }
+    // No stored source (the site tier carries none): the value's shape is all
+    // that is knowable. This is the ONLY permitted prefix guess.
     if (value.startsWith('data:')) {
       setIconMode({ kind: 'set', value: '' });
       setIconConfig({ dataUri: value });
@@ -1155,7 +1174,7 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
       setIconMode({ kind: 'set', value });
       setIconConfig(undefined);
     }
-  }, []);
+  }, [resolveSourceForOwner]);
 
   return (
     // P4: same Dialog primitive as the icon modal (Escape / Tab trap / focus
@@ -1220,7 +1239,7 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         //
         // The new-rule surface has no preview pane, so `<FieldMode>` is the only
         // place the value can land.
-        onApplyTier={(_kind, value, _owner, field) => { applyChainValueToDraft(field, value); }}
+        onApplyTier={(_kind, value, owner, field) => { applyChainValueToDraft(field, value, owner); }}
       />
 
         {saveError && (
@@ -2497,6 +2516,7 @@ export function SidebarApp() {
         {...(titleChain ? { titleChain } : {})}
         {...(faviconChain ? { iconChain: faviconChain } : {})}
         onClearTier={(owner, field) => { void handleClearChainTier(owner, field); }}
+        resolveSourceForOwner={resolveSourceForOwner}
         onSave={handleCreateGlobalRule}
         onCancel={() => { setShowRuleModal(false); setRulePrefill(null); }}
       />
