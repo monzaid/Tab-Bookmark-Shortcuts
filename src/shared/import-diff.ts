@@ -1,8 +1,11 @@
 /**
  * Import diff, intent application and match-overlap detection (T8).
  *
- * All four functions are PURE: they read their arguments, never touch storage
- * and never mutate an input.
+ * All four functions are PURE IN THEIR INPUTS: they read their arguments, never
+ * touch storage and never mutate an input. They are NOT fully deterministic,
+ * though — `applyIntent` stamps a NEW record's `createdAt`/`updatedAt` from the
+ * wall clock (via `packageToSyncPatch`), so two calls can differ by a
+ * millisecond. Tests that compare two runs must pin the clock.
  *
  * Semantics (locked by the design):
  *   - §3.2 — the dimension mode governs ONLY the "file-missing, target-has"
@@ -380,8 +383,10 @@ export function computeDiff(
 // ─── applyIntent (A1 / A4 / C4) ──────────────────────────────────────────────
 
 /**
- * Produce the FINAL state the intent would create — a pure derivation, never a
- * write. The caller (T10) binds this to a version and persists it.
+ * Produce the FINAL state the intent would create — a no-write derivation (it
+ * never persists; the caller (T10) binds it to a version and saves it). It is
+ * pure in its INPUTS but not clock-independent: new records get their timestamps
+ * from `new Date()` inside `packageToSyncPatch`.
  *
  * The mapping of package records into stored shapes is delegated to
  * `packageToSyncPatch` so the server has exactly ONE mapping implementation.

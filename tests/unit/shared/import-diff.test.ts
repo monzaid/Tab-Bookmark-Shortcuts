@@ -12,7 +12,7 @@
  *
  * All four functions are pure: no storage, no mutation of their inputs.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   computeDiff,
   applyIntent,
@@ -243,15 +243,36 @@ describe('T8: applyIntent — produces the final state, both sides decided by di
     expect(statusOf(diff, 'slot', 2)).toBe('kept');
   });
 
-  it('is pure — never mutates the package or the current state', () => {
+  it('never mutates its inputs; new records are stamped from the clock', () => {
+    // The CLOCK is pinned. `packageToSyncPatch` stamps a NEW record's
+    // createdAt/updatedAt from `new Date()`, so two calls that straddle a
+    // millisecond produce different values and a bare `toEqual` flakes. Freezing
+    // time makes the equality a real invariant again — and the next assertion
+    // keeps the stamping itself as a CHECKED fact rather than an undeclared side.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-05T00:00:00.000Z'));
+
     const currentBefore = JSON.stringify(CURRENT);
     const fileBefore = JSON.stringify(FILE);
     const a = applyIntent(FILE, CURRENT, defaultImportIntent());
     const b = applyIntent(FILE, CURRENT, defaultImportIntent());
+
+    // Invariance: neither input is mutated (the original intent of this case).
     expect(JSON.stringify(CURRENT)).toBe(currentBefore);
     expect(JSON.stringify(FILE)).toBe(fileBefore);
-    expect(a).toEqual(b);
     expect(a).not.toBe(CURRENT);
+
+    // Determinism: same input, same output — now that the clock cannot move.
+    expect(a).toEqual(b);
+
+    // The contract, pinned: slot 4 is file-only (new), so it carries the clock.
+    expect(a.slots.find((s) => s.id === 4)?.createdAt).toBe('2026-10-05T00:00:00.000Z');
+
+    vi.useRealTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('applies carried settings; leaves them alone when not carried', () => {
