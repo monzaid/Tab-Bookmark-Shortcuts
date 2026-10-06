@@ -408,6 +408,23 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     });
   });
 
+  it('lists slots by slot NUMBER with the number in the label, whatever order the file used', async () => {
+    // The file carries its slots in a NON-numeric order. A fixed 1–10 set shown
+    // in file order is unscannable, and a bare title does not say which slot a
+    // row is — so both the order and the identity must come from the number.
+    const reversed: ExportPackage = {
+      ...PKG,
+      slots: [...(PKG.slots ?? [])].reverse(),
+    };
+    await openImportSection(makeInspection(reversed, CURRENT));
+    await selectFile();
+
+    const rows = screen.getByTestId('import-dim-slots')
+      .querySelectorAll('ul.tbs-settings__import-records > li > span:first-child');
+    const labels = Array.from(rows).map((el) => el.textContent ?? '');
+    expect(labels).toEqual(['Slot 1 — S1', 'Slot 2 — S2', 'Slot 3 — S3']);
+  });
+
   it('a version conflict re-checks the file instead of dead-ending on a bare server string (F4)', async () => {
     await openImportSection();
     await selectFile();

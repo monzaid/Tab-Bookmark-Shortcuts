@@ -2272,7 +2272,7 @@ function ExportSection() {
         <details className="tbs-settings__export-records" data-testid="export-records-slots">
           <summary>Slots ({records.slots.length})</summary>
           <ul>
-            {records.slots.map((slot) => (
+            {bySlotId(records.slots).map((slot) => (
               <li key={slot.id}>
                 <label>
                   <input
@@ -2281,7 +2281,7 @@ function ExportSection() {
                     checked={!excludedSlots.includes(slot.id)}
                     onChange={() => { toggleExcluded('slot', slot.id); }}
                   />
-                  {slot.titleSnapshot || `Slot ${String(slot.id)}`}
+                  {slotLabel(slot.id, slot.titleSnapshot)}
                 </label>
               </li>
             ))}
@@ -2375,6 +2375,24 @@ const RECORD_BADGE: Record<ImportRecordStatus, StatusBadgeProps['status']> = {
   deleted: 'error',
   skipped: 'inactive', // UNREACHABLE for records (count key only).
 };
+
+/**
+ * A slot's display label. The slot NUMBER is always shown: slots are a fixed
+ * 1–10 set and the number is how users refer to them, so a bare title made a
+ * file-ordered list unreadable ("which one is slot 3?"). A title decorates the
+ * identity, it never replaces it.
+ */
+function slotLabel(id: number, title: string | null | undefined): string {
+  return title ? `Slot ${String(id)} — ${title}` : `Slot ${String(id)}`;
+}
+
+/**
+ * Slots in slot-number order. Display-only — the diff's and the export's own
+ * record order is deliberately untouched (those are data orders, not views).
+ */
+function bySlotId<T extends { id: number | string }>(rows: readonly T[]): T[] {
+  return [...rows].sort((a, b) => Number(a.id) - Number(b.id));
+}
 
 function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot' | 'rule', id: number | string) => void }) {
   const [importing, setImporting] = useState(false);
@@ -2624,6 +2642,10 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
             const records = inspection.diff.records.filter((r) =>
               dim === 'slots' ? r.kind === 'slot' : dim === 'rules' ? r.kind === 'rule' : false,
             );
+            // Display order only: slots are a numbered 1–10 set, so showing them
+            // in the file's order made the list unscannable. The diff's own
+            // record order (which tests may rely on) is deliberately untouched.
+            const shown = dim === 'slots' ? bySlotId(records) : records;
             const isRecordDimension = dim === 'slots' || dim === 'rules';
             return (
               <section key={dim} className="tbs-settings__import-dim" data-testid={`import-dim-${dim}`}>
@@ -2647,11 +2669,16 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
                         <option value="overwrite">Overwrite</option>
                       </select>
                     </label>
-                    {isRecordDimension && records.length > 0 && (
+                    {isRecordDimension && shown.length > 0 && (
                       <ul className="tbs-settings__import-records">
-                        {records.map((r) => (
+                        {shown.map((r) => (
                           <li key={`${r.kind}-${String(r.id)}`}>
-                            <span>{r.label}</span>
+                            {/* The identity always includes the slot number; the
+                                `aria-label`s below stay on the diff's `r.label`
+                                so the control names are unchanged. */}
+                            <span>
+                              {r.kind === 'slot' ? slotLabel(Number(r.id), r.label) : r.label}
+                            </span>
                             <StatusBadge status={RECORD_BADGE[r.status]} label={r.status} />
                             {/* Reuse the shared Button so the actions match every
                                 other button on the page; the `aria-label`s are the
