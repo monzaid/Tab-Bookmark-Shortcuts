@@ -256,9 +256,11 @@ describe('import fields expansion', () => {
     // reject `flex:0 1 100%`, or to accept `inline-size`) is a legitimate
     // improvement and will turn this case red on purpose. Update the row that
     // stopped holding — do not read it as a behaviour change in the stylesheet.
-    expect(FULL_WIDTH.test('inline-size: 100%')).toBe(false);
-    expect(FULL_WIDTH.test('width : 100%')).toBe(false);
-    expect(FULL_WIDTH.test('flex:0 1 100%')).toBe(true);
+    // Each row carries WHY it holds, so a red names the limit that moved —
+    // a bare `expected true to be false` would not say which behaviour changed.
+    expect(FULL_WIDTH.test('inline-size: 100%'), 'the logical equivalent of width is not matched').toBe(false);
+    expect(FULL_WIDTH.test('width : 100%'), 'a space before the colon is not matched').toBe(false);
+    expect(FULL_WIDTH.test('flex:0 1 100%'), 'canonical form differs only in flex-grow (0 vs 1)').toBe(true);
   });
 
   it('does not tint the record status as plain text (the status is a badge now)', () => {
