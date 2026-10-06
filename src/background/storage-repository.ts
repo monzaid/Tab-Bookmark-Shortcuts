@@ -1037,7 +1037,11 @@ export class StorageRepository {
       }
     }
     // The resolution memo may now be stale for these keys (a clear arrives as a
-    // `remove`, which does not broadcast `onChanged` in every adapter).
+    // `remove`, which does not broadcast `onChanged` in every adapter). Dropping
+    // it is a CONTRACT, not redundancy: the T22 judgment test
+    // (`tests/integration/import-apply-result.test.ts`, a REPLACED record whose
+    // key is also present on the target) fails if this line is removed. Run that
+    // file, not just the caller's, when refactoring this method.
     this.iconResolutionCache.clear();
 
     // ③ Write the sync config through the single version-bound writer.
