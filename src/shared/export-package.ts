@@ -110,6 +110,12 @@ export interface ExportPackage {
  * Scope is deliberate: only the package root and each `slots[]` / `rules[]`
  * item are walked. Deeper interiors (`urlMatch`, `marker`, `icon`) are NOT
  * inspected — a bounded report, not a schema walker.
+ *
+ * Deferred (T22 follow-up): the "defaulted" half of C8 — a field the reader
+ * filled from a derived default rather than the file — is NOT reported. It
+ * needs design input on which derived defaults (`packageToSyncPatch`'s
+ * cross-machine defaults) are worth surfacing; the strict-reject path (D14)
+ * already covers a *required* field being absent.
  */
 const ROOT_KEYS = {
   schemaVersion: true, generator: true, exportedAt: true, scope: true,
