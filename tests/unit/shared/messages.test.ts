@@ -55,10 +55,7 @@ function handleUiAction(request: UiRequest): string {
     case 'RECOVERY_NEXT_MATCH': return 'recovery-next';
     case 'RECOVERY_PREV_MATCH': return 'recovery-prev';
     case 'RECOVERY_DISMISS': return 'recovery-dismiss';
-    case 'EXPORT_CONFIG': return 'export';
-    case 'IMPORT_PREVIEW': return 'import-preview';
-    case 'IMPORT_COMMIT': return 'import-commit';
-    // T14a: the redesigned trio (legacy cases above stay until T14b).
+    // T14a: the redesigned trio (the legacy cases were deleted in T14b).
     case 'EXPORT_PACKAGE': return 'export-package';
     case 'IMPORT_INSPECT': return 'import-inspect';
     case 'IMPORT_APPLY': return 'import-apply';
@@ -276,7 +273,7 @@ describe('T2: Domain model and message contract', () => {
         'SET_TAB_OVERRIDE', 'REMOVE_TAB_OVERRIDE', 'SET_GLOBAL_STRATEGY',
         'SET_SLOT_STRATEGY', 'UPDATE_SLOT_UI_MARKER',
         'RECOVERY_OPEN_URL', 'RECOVERY_NEXT_MATCH', 'RECOVERY_DISMISS',
-        'EXPORT_CONFIG', 'IMPORT_PREVIEW', 'IMPORT_COMMIT',
+        'EXPORT_PACKAGE', 'IMPORT_INSPECT', 'IMPORT_APPLY',
         'GET_DIAGNOSTICS', 'CLEAR_DIAGNOSTICS', 'EXPORT_DIAGNOSTICS',
         'GET_STATE', 'GET_DASHBOARD', 'GET_COMMANDS',
         'DOWNLOAD_ICON', 'UPLOAD_ICON',
@@ -302,7 +299,7 @@ describe('T2: Domain model and message contract', () => {
       };
 
       const requiresVersion = ['SAVE_SLOT', 'CREATE_RULE', 'UPDATE_RULE', 'DELETE_RULE',
-        'SET_GLOBAL_STRATEGY', 'SET_SLOT_STRATEGY', 'UPDATE_SLOT_UI_MARKER', 'IMPORT_COMMIT'];
+        'SET_GLOBAL_STRATEGY', 'SET_SLOT_STRATEGY', 'UPDATE_SLOT_UI_MARKER', 'IMPORT_APPLY'];
 
       const needsVersion = requiresVersion.includes(writeRequest.action);
       const hasVersion = 'configVersion' in writeRequest && writeRequest.configVersion !== undefined;

@@ -78,12 +78,9 @@ const KNOWN_ACTIONS = [
   'RECOVERY_NEXT_MATCH',
   'RECOVERY_PREV_MATCH',
   'RECOVERY_DISMISS',
-  'EXPORT_CONFIG',
-  'IMPORT_PREVIEW',
-  'IMPORT_COMMIT',
-  // T14a: the redesigned trio. Registered here in the same change as the union
-  // (G-D) so a message is not "compiled in the union but rejected at runtime".
-  // The legacy trio above is deleted in T14b (merged into T21).
+  // T14a/A10/A11: the redesigned trio. Registered here in the same change as
+  // the union (G-D) so a message is not "compiled in the union but rejected at
+  // runtime". The legacy trio was deleted in T14b (merged into T21).
   'EXPORT_PACKAGE',
   'IMPORT_INSPECT',
   'IMPORT_APPLY',
@@ -785,18 +782,6 @@ export class WorkerOrchestrator {
         await this.recoveryService.dismiss(request.payload.recoveryId);
         return { success: true };
 
-      // ─── Import/Export ───────────────────────────────────────────────
-      case 'EXPORT_CONFIG':
-        return this.importExportService.exportConfig();
-
-      case 'IMPORT_PREVIEW':
-        return this.importExportService.generatePreview(request.payload.json);
-
-      case 'IMPORT_COMMIT': {
-        const version = request.configVersion ?? this.repo.getConfigVersion();
-        return this.importExportService.commitImport(request.payload.preview, request.payload.slotDecisions, version);
-      }
-
       // ─── Import/Export — redesigned trio (T17 / A10 / A11) ──────────────
       case 'EXPORT_PACKAGE':
         return this.importExportService.exportPackage(request.payload.scope);
@@ -805,8 +790,8 @@ export class WorkerOrchestrator {
         return this.importExportService.inspect(request.payload.file);
 
       case 'IMPORT_APPLY': {
-        // F4: the version is REQUIRED. The legacy case above (IMPORT_COMMIT)
-        // defaulted to the current version, which made the optimistic lock pass
+        // F4: the version is REQUIRED. The retired commit action defaulted to
+        // the current version, which made the optimistic lock pass
         // unconditionally — a stale preview could overwrite newer config. A
         // missing/non-numeric version is refused rather than defaulted.
         const expectedVersion = request.configVersion;

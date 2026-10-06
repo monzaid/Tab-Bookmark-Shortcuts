@@ -11,8 +11,6 @@ import type {
   UrlMatchDefinition,
   SlotUiMarker,
   IconSource,
-  ImportPreview,
-  ImportSlotConflict,
   ExportScope,
   ImportIntent,
   ImportInspection,
@@ -208,31 +206,11 @@ export interface RecoveryDismissRequest extends RequestBase {
   payload: { recoveryId: string };
 }
 
-// Import/Export operations
-export interface ExportConfigRequest extends RequestBase {
-  action: 'EXPORT_CONFIG';
-}
-
-export interface ImportPreviewRequest extends RequestBase {
-  action: 'IMPORT_PREVIEW';
-  payload: { json: string };
-}
-
-export interface ImportCommitRequest extends RequestBase {
-  action: 'IMPORT_COMMIT';
-  payload: {
-    preview: ImportPreview;
-    slotDecisions: ImportSlotConflict[];
-  };
-}
-
 // ─── Import/Export — redesigned protocol (T14a / A10 / A11) ──────────────────
 //
-// Three actions, one semantic each. ADDITIVE for now: the legacy trio above
-// stays registered until T14b (merged into T21) deletes it, because settings and
-// the integrated tests still call it. Each new action is added to `UiRequest`
-// AND `KNOWN_ACTIONS` in the same change (G-D: never "compiles, rejected at
-// runtime").
+// Three actions, one semantic each. Each action is added to `UiRequest` AND
+// `KNOWN_ACTIONS` in the same change (G-D: never "compiles, rejected at
+// runtime"). The legacy trio was deleted in T14b (merged into T21).
 
 /** A10/A11: produce a package for the selected scope. Read-only. */
 export interface ExportPackageRequest extends RequestBase {
@@ -448,9 +426,6 @@ export type UiRequest =
   | RecoveryNextMatchRequest
   | RecoveryPrevMatchRequest
   | RecoveryDismissRequest
-  | ExportConfigRequest
-  | ImportPreviewRequest
-  | ImportCommitRequest
   | ExportPackageRequest
   | ImportInspectRequest
   | ImportApplyRequest
@@ -523,19 +498,9 @@ export interface ResolveMatchUrlResponse {
 
 
 
-export interface ImportPreviewResponse {
-  action: 'IMPORT_PREVIEW';
-  result: { success: true; preview: ImportPreview } | { success: false; errorCode: DomainErrorCode; message: string };
-}
-
 export interface GetDiagnosticsResponse {
   action: 'GET_DIAGNOSTICS';
   result: { success: true; entries: DiagnosticEntry[] } | { success: false; errorCode: DomainErrorCode; message: string };
-}
-
-export interface ExportConfigResponse {
-  action: 'EXPORT_CONFIG';
-  result: { success: true; json: string } | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
 // ─── Import/Export — redesigned protocol responses (T14a) ────────────────────

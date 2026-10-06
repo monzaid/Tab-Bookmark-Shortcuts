@@ -5,11 +5,11 @@
  * IMPORT_COMMIT) with three, one-semantic-each actions:
  *   EXPORT_PACKAGE(scope) · IMPORT_INSPECT(file) · IMPORT_APPLY(file, intent)
  *
- * T14a is ADDITIVE ONLY: the new contracts, their KNOWN_ACTIONS entries and the
- * message-client wrappers are introduced while the legacy actions remain
- * registered (they still have live callers in settings + tests). T14b deletes
- * the legacy trio (merged into T21), so this file deliberately does NOT assert
- * their absence.
+ * T14b/T21 (this file): the legacy trio is DELETED. The assertion that used to
+ * pin it as "stays registered" is INVERTED into a CONTINUOUS guard that it is
+ * not registered and not declared anywhere in the protocol — a one-off `rg` at
+ * commit time would not stop it from being reintroduced (F1: orphans must not
+ * return).
  *
  * The runtime half drives the REAL whitelist gate via `handleMessage` (same
  * private-access pattern as known-actions.test.ts) rather than `routeMessage`,
@@ -56,9 +56,21 @@ describe('T14a: import/export protocol — three new actions', () => {
     });
   }
 
-  it('the legacy trio stays registered (additive phase — T14b deletes it)', () => {
+  // T14b/T21: INVERTED from "stays registered". Three independent assertions so
+  // each failure names its own cause — runtime gate, whitelist source, contract
+  // source — rather than one diff that could hide which side regressed.
+  it('the legacy trio is NOT registered and NOT declared (T14b — must not return)', () => {
     for (const action of LEGACY_ACTIONS) {
-      expect(gate(action, {}).claimed).toBe(true);
+      expect(gate(action, {}).claimed).toBe(false);
+    }
+    // The action literals must be absent from the whitelist AND from every
+    // request/response contract (comments may still NAME them in prose, so this
+    // matches the quoted literal, not the bare word).
+    const orchestratorSrc = readFileSync('src/background/worker-orchestrator.ts', 'utf8');
+    const messagesSrc = readFileSync('src/shared/messages.ts', 'utf8');
+    for (const action of LEGACY_ACTIONS) {
+      expect(orchestratorSrc).not.toContain(`'${action}'`);
+      expect(messagesSrc).not.toContain(`'${action}'`);
     }
   });
 
@@ -85,11 +97,12 @@ describe('T14a: import/export protocol — three new actions', () => {
       for (const m of line.matchAll(/'([A-Z][A-Z0-9_]*)'/g)) declared.add(m[1]);
     }
 
-    expect(known.size).toBe(50);
+    // T14b/T21: 50 → 47 after the legacy trio left the whitelist and contracts.
+    expect(known.size).toBe(47);
     // Symmetric sentinel: the reverse difference below would also catch an empty
-    // `declared`, but this names the failure directly ("declared is not 50")
+    // `declared`, but this names the failure directly ("declared is not 47")
     // instead of leaving it to a filter diff.
-    expect(declared.size).toBe(50);
+    expect(declared.size).toBe(47);
     expect([...declared].filter((a) => !known.has(a)).sort()).toEqual([]); // in union, not whitelisted
     expect([...known].filter((a) => !declared.has(a)).sort()).toEqual([]); // whitelisted, not in union
   });

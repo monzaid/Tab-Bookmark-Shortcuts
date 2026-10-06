@@ -214,42 +214,9 @@ export interface DiagnosticEntry {
 
 // ─── Import/Export (sync config only) ────────────────────────────────────────
 
-export interface ExportPayload {
-  version: number;
-  exportedAt: string; // ISO 8601
-  slots: SlotDefinition[];
-  rules: PageRule[];
-  matchSettings: MatchRuleSettings;
-  switchDirection: SwitchDirection;
-  autoBindGlobal: boolean;
-  configVersion: number;
-}
-
-export type ImportSlotDecision = 'import' | 'existing';
-
-export interface ImportSlotConflict {
-  slotId: number;
-  existing: SlotDefinition | null;
-  imported: SlotDefinition;
-  decision: ImportSlotDecision;
-}
-
-export interface ImportPreview {
-  valid: boolean;
-  error?: DomainErrorCode;
-  slotConflicts: ImportSlotConflict[];
-  newSlots: SlotDefinition[];
-  rules: PageRule[];
-  matchSettings: MatchRuleSettings;
-  switchDirection: SwitchDirection;
-  autoBindGlobal: boolean;
-  configVersion: number;
-  /**
-   * D15: records skipped because they violate a domain constraint. A bad record
-   * no longer rejects the whole package; it is disclosed here instead.
-   */
-  domainViolations: DomainViolation[];
-}
+// (T14b/T21: the legacy export-payload / slot-decision / slot-conflict /
+// import-preview types were deleted — the redesigned protocol carries
+// `ExportPackage` / `ImportInspection` / `ImportApplyResult`.)
 
 // ─── Import / Export — Iteration types (T2) ──────────────────────────────────
 //

@@ -351,3 +351,35 @@ export function isExportPackage(value: unknown): value is ExportPackage {
   if (!v.scope || typeof v.scope !== 'object') return false;
   return true;
 }
+
+/**
+ * Strict shape guard for the `settings` dimension — the successor to the legacy
+ * `generatePreview` check that enforced Ruling 4 ("a legacy export file is NOT
+ * importable"). An absent `settings` is legal (the dimension was simply not
+ * carried); a PRESENT one must be well-formed.
+ *
+ * Deliberately NOT folded into `isExportPackage`: `tolerant` reporting is
+ * structural and must run on a structurally-sound package, so this is a
+ * SEPARATE pass applied after the structural gate. `settings` is an
+ * all-or-nothing global axis — there is no "half a matchSettings".
+ *
+ * The whole `PortableSettings` family is covered, not just `matchSettings`:
+ * `applyIntent` assigns `switchDirection` under a bare TS assertion, so an
+ * out-of-enum value would otherwise be trusted and written (`resolve-switch`
+ * compares literals and would silently fall through).
+ */
+export function isValidPortableSettings(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+
+  const ms = v.matchSettings as Record<string, unknown> | undefined;
+  if (!ms || typeof ms !== 'object') return false;
+  // Ported verbatim from the legacy guard: the enum members ARE the contract.
+  if (!(ms.tabIdMode === 'exists' || ms.tabIdMode === 'no-exists')) return false;
+  if (!(ms.ruleCheckMode === 'match' || ms.ruleCheckMode === 'no-match')) return false;
+  if (!(ms.priority === 'tabId' || ms.priority === 'rule-check' || ms.priority === 'none')) return false;
+
+  if (!(v.switchDirection === 'next' || v.switchDirection === 'previous')) return false;
+
+  return true;
+}

@@ -1,25 +1,22 @@
 /**
- * Import/Export Service — JSON config export, import preview, and single-commit.
+ * Import/Export Service — the redesigned three-action protocol (A10/A11).
  *
- * - Export: sync config only (slots, rules, global strategy, configVersion)
- *   with local icon placeholder references (NOT data URIs)
- * - Import: parse plaintext JSON, generate full-replace or merge preview
- * - Per-slot existing/imported decision with select-all
- * - Single commit through the single-write service
- * - Does NOT export local bindings, cursors, recovery, overrides, snapshots, data URIs
- * - Does NOT write config before confirmation
+ * - EXPORT_PACKAGE: the transfer package for the selected scope (icons carried
+ *   as URL / bare `local-icon:` reference / recipe — never a bitmap).
+ * - IMPORT_INSPECT: parse a file and diff it against the current state, READ-ONLY.
+ * - IMPORT_APPLY (the ONLY writer): recompute the result server-side from the
+ *   FILE STRING + the user's INTENT and write it in one version-bound mutation.
+ *
+ * The legacy export/preview/commit trio and its service methods were deleted in
+ * T14b/T21; the Ruling-4 settings validation the legacy preview used to provide
+ * now lives in `isValidPortableSettings`.
  */
 
 import type { StorageRepository } from './storage-repository';
 import type {
   SlotDefinition,
   PageRule,
-  MatchRuleSettings,
-  ExportPayload,
   ExportScope,
-  ImportPreview,
-  ImportSlotConflict,
-  ImportSlotDecision,
   ImportIntent,
   ImportInspection,
   ImportApplyResult,
@@ -29,9 +26,8 @@ import type {
 } from '@shared/types';
 import { defaultImportIntent } from '@shared/types';
 import { applyIntent, computeDiff, findMatchOverlaps } from '@shared/import-diff';
-import { isExportPackage, syncStateToPackage, PACKAGE_FIELD_ALLOWLIST } from '@shared/export-package';
+import { isExportPackage, isValidPortableSettings, syncStateToPackage, PACKAGE_FIELD_ALLOWLIST } from '@shared/export-package';
 import { partitionByDomainRules, type DomainRecord, type DomainRejection } from './domain-rules';
-import { iconToPortable, portableToIcon } from '@shared/export-package';
 
 // ─── Narrow collaborator seams (no adapter/service coupling) ─────────────────
 
@@ -63,55 +59,14 @@ export class ImportExportService {
     private icons: MissingIconProbe,
   ) {}
 
-  // ─── Export ────────────────────────────────────────────────────────────
-
-  /**
-   * Export sync configuration as JSON string.
-   * Excludes all local-only data (bindings, cursors, recovery, overrides, data URIs).
-   */
-  async exportConfig(): Promise<{ success: true; json: string } | { success: false; errorCode: string; message: string }> {
-    try {
-      const sync = await this.repo.getSyncState();
-
-      // C2: icons are carried as URL / BARE `local-icon:` reference / recipe —
-      // never the retired legacy local wrapper and never a bitmap.
-      const payload: ExportPayload = {
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        slots: sync.slots.map((slot) => ({
-          ...slot,
-          uiMarker: {
-            ...slot.uiMarker,
-            icon: slot.uiMarker.icon
-              ? portableToIcon(iconToPortable(slot.uiMarker.icon, `icon:slot-${String(slot.id)}`))
-              : undefined,
-          },
-        })),
-        rules: sync.rules.map((rule) => ({
-          ...rule,
-          favicon: rule.favicon ? portableToIcon(iconToPortable(rule.favicon, `icon:${rule.id}`)) : undefined,
-        })),
-        matchSettings: sync.matchSettings,
-        switchDirection: sync.switchDirection,
-        autoBindGlobal: sync.autoBindGlobal,
-        configVersion: sync.configVersion,
-      };
-
-      return { success: true, json: JSON.stringify(payload, null, 2) };
-    } catch {
-      return { success: false, errorCode: 'INTERNAL_ERROR', message: 'Failed to export configuration' };
-    }
-  }
-
   // ─── Export Package (A11 — EXPORT_PACKAGE) ─────────────────────────────
 
   /**
    * A11: produce the transfer package for the selected scope.
    *
-   * Unlike `exportConfig` (the legacy payload), the package is the independent
-   * transport schema (A4): internal fields such as `configVersion` / timestamps
-   * do not leak into the file, and each icon is carried as URL / bare reference
-   * / recipe object.
+   * The package is the independent transport schema (A4): internal fields such
+   * as `configVersion` / timestamps do not leak into the file, and each icon is
+   * carried as URL / bare reference / recipe object.
    */
   async exportPackage(
     scope: ExportScope,
@@ -150,6 +105,12 @@ export class ImportExportService {
     if (!isExportPackage(parsed)) {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Not a valid export package' };
     }
+    // Ruling 4 succession: a present `settings` dimension must be well-formed
+    // (the legacy `generatePreview` was the only enforcer; removing it without
+    // this would let a legacy-shaped file through — see `isValidPortableSettings`).
+    if (parsed.settings !== undefined && !isValidPortableSettings(parsed.settings)) {
+      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Missing or invalid matchSettings — legacy export files are not supported' };
+    }
 
     const current = await this.repo.getSyncState();
     const intent = defaultImportIntent();
@@ -173,100 +134,6 @@ export class ImportExportService {
     };
   }
 
-  // ─── Import Preview ────────────────────────────────────────────────────
-
-  /**
-   * Parse imported JSON and generate a preview with conflict resolution options.
-   * Does NOT write anything until commit is called.
-   */
-  async generatePreview(json: string): Promise<
-    { success: true; preview: ImportPreview } |
-    { success: false; errorCode: string; message: string }
-  > {
-    // Parse JSON
-    let payload: unknown;
-    try {
-      payload = JSON.parse(json);
-    } catch {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Invalid JSON format' };
-    }
-
-    // Validate structure
-    const data = payload as Record<string, unknown>;
-    if (!data || typeof data !== 'object') {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Import data must be an object' };
-    }
-
-    if (data.version !== 1) {
-      return { success: false, errorCode: 'IMPORT_VERSION_MISMATCH', message: `Unsupported import version: ${data.version}` };
-    }
-
-    if (!Array.isArray(data.slots)) {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Missing or invalid slots array' };
-    }
-
-    if (!Array.isArray(data.rules)) {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Missing or invalid rules array' };
-    }
-
-    const rawSlots = data.slots as SlotDefinition[];
-    const rawRules = data.rules as PageRule[];
-
-    // Ruling 4 (2026-09-30): legacy export files are NO LONGER importable.
-    // Validate the new `matchSettings` shape; a missing/invalid shape is rejected
-    // as IMPORT_INVALID. We deliberately do NOT read the legacy strategy field.
-    if (!this.isValidMatchSettings(data.matchSettings)) {
-      return {
-        success: false,
-        errorCode: 'IMPORT_INVALID',
-        message: 'Missing or invalid matchSettings — legacy export files are not supported',
-      };
-    }
-    const importedMatchSettings = data.matchSettings;
-    const importedVersion = (data.configVersion as number) ?? 0;
-
-    // D15: partition by domain constraints. A bad record is skipped + disclosed
-    // (no longer a whole-package rejection). Warn-tier regexes stay importable.
-    const partition = this.partitionRecords(rawSlots, rawRules);
-    const importedSlots = partition.slots;
-    const importedRules = partition.rules;
-
-    // Get current state for conflict detection
-    const currentSync = await this.repo.getSyncState();
-
-    // Detect per-slot conflicts
-    const slotConflicts: ImportSlotConflict[] = [];
-    const newSlots: SlotDefinition[] = [];
-
-    for (const imported of importedSlots) {
-      const existing = currentSync.slots.find((s) => s.id === imported.id);
-      if (existing) {
-        slotConflicts.push({
-          slotId: imported.id,
-          existing,
-          imported,
-          decision: 'import', // Default to import
-        });
-      } else {
-        newSlots.push(imported);
-      }
-    }
-
-    const preview: ImportPreview = {
-      valid: true,
-      slotConflicts,
-      newSlots,
-      rules: importedRules,
-      matchSettings: importedMatchSettings,
-      switchDirection: data.switchDirection === 'previous' ? 'previous' : 'next',
-      autoBindGlobal: data.autoBindGlobal !== false,
-      configVersion: importedVersion,
-      domainViolations: partition.rejected,
-    };
-
-    return { success: true, preview };
-  }
-
   /**
    * D15: split imported records into accepted / skipped-by-domain-constraint.
    */
@@ -288,74 +155,6 @@ export class ImportExportService {
       slots: slots.filter((s) => acceptedSlotIds.has(s.id)),
       rejected: [...rulePartition.rejectedWithReason, ...slotPartition.rejectedWithReason],
     };
-  }
-
-  // ─── Import Commit ─────────────────────────────────────────────────────
-
-  /**
-   * Commit an import with per-slot decisions through the single-write service.
-   * All changes are applied in ONE version increment.
-   */
-  async commitImport(
-    preview: ImportPreview,
-    slotDecisions: ImportSlotConflict[],
-    expectedVersion: number,
-  ): Promise<{ success: true; configVersion: number } | { success: false; errorCode: string; message: string }> {
-    if (!preview.valid) {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Cannot commit invalid preview' };
-    }
-
-    // T31 (B4-3) / D15: re-partition HERE rather than trusting `preview.valid`.
-    // The preview is caller-supplied and may have been built by hand or mutated
-    // between PREVIEW and COMMIT, so the earlier check is only a UX guard — this
-    // is the enforcement point (closes the TOCTOU window). Unlike the old gate, a
-    // bad record is SKIPPED, not a whole-commit rejection.
-    const partition = this.partitionRecords(
-      [...preview.newSlots, ...preview.slotConflicts.map((c) => c.imported)],
-      preview.rules,
-    );
-    const safeSlotIds = new Set(partition.slots.map((s) => s.id));
-    const safeRules = partition.rules;
-
-    const result = await this.repo.writeSync(expectedVersion, (state) => {
-      // Apply slot decisions
-      for (const conflict of slotDecisions) {
-        if (conflict.decision === 'import') {
-          if (!safeSlotIds.has(conflict.slotId)) continue; // D15: skip unsafe
-          const idx = state.slots.findIndex((s) => s.id === conflict.slotId);
-          if (idx >= 0) {
-            state.slots[idx] = conflict.imported;
-          } else {
-            state.slots.push(conflict.imported);
-          }
-        }
-        // 'existing' — keep current, do nothing
-      }
-
-      // Add new (non-conflicting) slots
-      for (const newSlot of preview.newSlots) {
-        if (!safeSlotIds.has(newSlot.id)) continue; // D15: skip unsafe
-        if (!state.slots.find((s) => s.id === newSlot.id)) {
-          state.slots.push(newSlot);
-        }
-      }
-
-      // Replace rules entirely with the domain-safe imported rules
-      state.rules = safeRules;
-
-      // Update global settings (tri-knob model)
-      state.matchSettings = preview.matchSettings;
-      state.switchDirection = preview.switchDirection;
-      state.autoBindGlobal = preview.autoBindGlobal;
-
-      return state;
-    });
-
-    if (!result.success) {
-      return { success: false, errorCode: result.errorCode, message: result.message };
-    }
-
-    return { success: true, configVersion: result.configVersion };
   }
 
   // ─── Apply (server-authoritative) ──────────────────────────────────────
@@ -394,6 +193,11 @@ export class ImportExportService {
     }
     if (!isExportPackage(parsed)) {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Not a valid export package' };
+    }
+    // Ruling 4 succession, APPLY side — INSPECT and APPLY parse the file
+    // independently, so validating only one would leave the other writable.
+    if (parsed.settings !== undefined && !isValidPortableSettings(parsed.settings)) {
+      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Missing or invalid matchSettings — legacy export files are not supported' };
     }
 
     // 2. Recompute the diff against the CURRENT state, from the file alone.
@@ -532,25 +336,4 @@ export class ImportExportService {
     return items;
   }
 
-  /**
-   * Shape guard for the new `matchSettings` field. Returns false for anything
-   * that is not a well-formed `MatchRuleSettings` (including the legacy
-   * legacy-strategy-only payloads), so legacy export files are rejected.
-   */
-  private isValidMatchSettings(value: unknown): value is MatchRuleSettings {
-    if (!value || typeof value !== 'object') return false;
-    const v = value as Record<string, unknown>;
-    return (
-      (v.tabIdMode === 'exists' || v.tabIdMode === 'no-exists') &&
-      (v.ruleCheckMode === 'match' || v.ruleCheckMode === 'no-match') &&
-      (v.priority === 'tabId' || v.priority === 'rule-check' || v.priority === 'none')
-    );
-  }
-
-  /**
-   * Apply a decision to all conflicts (select all import / all existing).
-   */
-  applyBulkDecision(conflicts: ImportSlotConflict[], decision: ImportSlotDecision): ImportSlotConflict[] {
-    return conflicts.map((c) => ({ ...c, decision }));
-  }
 }

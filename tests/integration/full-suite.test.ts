@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { WorkerOrchestrator } from '@background/worker-orchestrator';
 import type { NormalizedTab, NormalizedWindow } from '@adapters/contract';
+import type { SyncState } from '@shared/types';
+import { defaultImportIntent } from '@shared/types';
+import { syncStateToPackage } from '@shared/export-package';
 
 /**
  * T24: Full integration suite — cross-module compatibility regression.
@@ -109,36 +112,39 @@ describe('T24: Integration suite — cross-module compatibility', () => {
     });
   });
 
-  describe('Full chain: import → version → single commit', () => {
-    it('should import config with single version increment', async () => {
+  describe('Full chain: import → version → single apply', () => {
+    it('should inspect then apply with a single version increment', async () => {
       // Save a slot first (version → 1)
       await route('SAVE_SLOT', { slotId: 1, urlMatch: { type: 'exact', value: 'https://existing.com' }, titleSnapshot: 'Existing', faviconSnapshot: '' }, 0);
 
-      // Generate import preview
-      const importJson = JSON.stringify({
-        version: 1,
-        exportedAt: '2026-06-01T00:00:00Z',
+      // T14b/T21: the legacy PREVIEW+COMMIT pair is replaced by the redesigned
+      // INSPECT (read-only) + APPLY (the only writer, version-bound).
+      const source: SyncState = {
+        configVersion: 99,
+        matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'no-match', priority: 'tabId' },
+        switchDirection: 'next',
+        autoBindGlobal: true,
         slots: [
           { id: 1, urlMatch: { type: 'exact', value: 'https://imported.com' }, strategy: 'inherit', uiMarker: {}, titleSnapshot: 'Imported', faviconSnapshot: '', createdAt: '', updatedAt: '' },
           { id: 5, urlMatch: { type: 'exact', value: 'https://new.com' }, strategy: 'inherit', uiMarker: {}, titleSnapshot: 'New', faviconSnapshot: '', createdAt: '', updatedAt: '' },
         ],
         rules: [],
-        matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'no-match', priority: 'tabId' },
-        switchDirection: 'next',
-        autoBindGlobal: true,
-        configVersion: 99,
-      });
+      };
+      const file = JSON.stringify(syncStateToPackage(source, { slots: true, settings: true }));
 
-      const previewResult = await route('IMPORT_PREVIEW', { json: importJson }) as Record<string, unknown>;
-      expect(previewResult.success).toBe(true);
+      const inspected = await route('IMPORT_INSPECT', { file }) as Record<string, unknown>;
+      expect(inspected.success).toBe(true);
+      const inspection = inspected.inspection as { configVersion: number };
+      // C3/F4: APPLY binds to the version INSPECT read.
+      expect(inspection.configVersion).toBe(1);
 
-      // Commit with decisions
-      const preview = previewResult.preview as { slotConflicts: Array<{ slotId: number; decision: string }> };
-      const decisions = preview.slotConflicts.map((c) => ({ ...c, decision: 'import' }));
-
-      const commitResult = await route('IMPORT_COMMIT', { preview: previewResult.preview, slotDecisions: decisions }, 1) as Record<string, unknown>;
-      expect(commitResult.success).toBe(true);
-      expect(commitResult.configVersion).toBe(2); // Single increment from 1→2
+      const applied = await route(
+        'IMPORT_APPLY',
+        { file, intent: defaultImportIntent() },
+        inspection.configVersion,
+      ) as Record<string, unknown>;
+      expect(applied.success).toBe(true);
+      expect(applied.configVersion).toBe(2); // Single increment from 1→2
     });
   });
 
