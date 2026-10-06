@@ -19,8 +19,10 @@ import type { ExportPackage, PortableSettings, PortableSlotDef } from '@shared/e
  * entry points (INSPECT and APPLY parse the file independently, so covering one
  * would leave the other writable).
  *
- * REMOVED-CASE MAPPING (the suite is smaller by design — each legacy case either
- * moved or became obsolete; none was dropped for convenience):
+ * REMOVED-CASE MAPPING — the file went from 20 cases to 19: every removed legacy
+ * case either MOVED (the invariant now lives on the redesigned path) or became
+ * OBSOLETE (its model no longer exists); none was dropped for convenience. The
+ * removals are also partly OFFSET by newly added structural/dual-path cases.
  *   generatePreview: malformed JSON       → `structural gate` here
  *   generatePreview: unknown version /
  *                    missing slots array  → `structural gate` here (schemaVersion gate)
