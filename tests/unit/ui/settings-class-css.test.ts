@@ -85,11 +85,21 @@ describe('settings classes ↔ stylesheets', () => {
     const css = stylesheets();
     expect(css.length).toBeGreaterThan(0);
 
-    // Scope non-emptiness: a wrong UI_ROOT, a broken walk, or a changed prefix
-    // would otherwise scan nothing and pass. Four files use the prefix today, so
-    // the floor is 4 — a drop below that means the scan stopped seeing its input.
+    // Two separate non-emptiness checks, and neither is a COUNT:
+    //  (1) the walk found files at all — a broken UI_ROOT or a wrong prefix would
+    //      otherwise scan nothing and pass vacuously;
+    //  (2) it found at least one USER — the scan must be looking at real input.
+    // Deliberately NOT `>= N`: the current number of users is not a fact the guard
+    // may depend on. Merging two files, or a file legitimately ceasing to use the
+    // prefix, would turn a bare count into a false failure — the same "unmoored
+    // count" this iteration keeps catching. Scope is guaranteed STRUCTURALLY (the
+    // walk covers every .ts/.tsx under src/ui, so a user cannot be out of range),
+    // so presence is all this needs to assert.
+    const scanned = walk(UI_ROOT).filter((f) => /\.tsx?$/.test(f));
+    expect(scanned.length).toBeGreaterThan(0);
+
     const sources = sourcesUsingPrefix();
-    expect(sources.length).toBeGreaterThanOrEqual(4);
+    expect(sources.length).toBeGreaterThanOrEqual(1);
 
     const offenders = sources.flatMap((f) => undefinedClasses(readFileSync(f, 'utf8'), css));
     expect(offenders).toEqual([]);
