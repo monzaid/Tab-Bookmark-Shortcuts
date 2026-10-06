@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Portable export package — independent transfer schema + bidirectional mapping.
  *
  * A14: the package deliberately does NOT mirror `SyncState`. It carries only
@@ -338,48 +338,104 @@ function markerFromPortable(marker: PortableSlotMarker): SlotUiMarker {
 
 // ─── Shape guard ─────────────────────────────────────────────────────────────
 
+/** A non-null, non-array object. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
- * Is this value shaped like a package AT ALL? Structural only — the D14
- * validator (T3) is a separate concern.
+ * The structural gate as a predicate — SINGLE SOURCE OF TRUTH so a caller that
+ * must order the passes differently (the import service checks `settings`
+ * first, to collapse every invalid shape onto one explicit refusal) reuses it
+ * instead of re-encoding the checks.
+ *
+ * Structural only (see `isExportPackage`): field ENUMS are NOT checked here.
+ * Container TYPES are: an optional dimension, if present, must be an array /
+ * plain object. Without that, a malformed container (`slots: 'x'`) reaches
+ * `computeDiff` and THROWS — an unhandled exception at the worker boundary
+ * (`INTERNAL_ERROR`) instead of a clean `IMPORT_INVALID` refusal.
+ */
+function isStructurallyAPackage(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  if (value.schemaVersion !== SCHEMA_VERSION) return false;
+  if (!isPlainObject(value.generator)) return false;
+  if (typeof value.exportedAt !== 'string') return false;
+  if (!isPlainObject(value.scope)) return false;
+  // An ABSENT dimension is legal (A2: "not carried"). A present one must be
+  // the right container type.
+  if (value.slots !== undefined && !Array.isArray(value.slots)) return false;
+  if (value.rules !== undefined && !Array.isArray(value.rules)) return false;
+  if (value.settings !== undefined && !isPlainObject(value.settings)) return false;
+  if (value.shortcuts !== undefined && !isPlainObject(value.shortcuts)) return false;
+  return true;
+}
+
+/**
+ * Is this value shaped like a package AT ALL? Structural only — per-field
+ * validation (both the record-level domain rules AND the settings family) is a
+ * SEPARATE concern; see `isValidPortableSettings`.
  */
 export function isExportPackage(value: unknown): value is ExportPackage {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  if (v.schemaVersion !== SCHEMA_VERSION) return false;
-  if (!v.generator || typeof v.generator !== 'object') return false;
-  if (typeof v.exportedAt !== 'string') return false;
-  if (!v.scope || typeof v.scope !== 'object') return false;
-  return true;
+  return isStructurallyAPackage(value);
+}
+
+/** The enum members of `MatchRuleSettings` ARE the contract (legacy-ported). */
+function isValidMatchSettingsShape(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  return (
+    (value.tabIdMode === 'exists' || value.tabIdMode === 'no-exists') &&
+    (value.ruleCheckMode === 'match' || value.ruleCheckMode === 'no-match') &&
+    (value.priority === 'tabId' || value.priority === 'rule-check' || value.priority === 'none')
+  );
+}
+
+/**
+ * A slot-id key must be the CANONICAL decimal literal for 1..10 — matching the
+ * record-level D14 range. `"01"`, `"1.0"`, `"-1"`, `"0"`, `"11"` are all
+ * rejected: a non-canonical key silently addresses no slot (`packageToSyncPatch`
+ * indexes by `slot.id`), so accepting it would be a "chosen but never applied"
+ * no-op — or, for `"-1"`/`"1.0"`, a `Number()` coercion that does NOT round-trip.
+ */
+function isCanonicalSlotKey(key: string): boolean {
+  return /^(?:[1-9]|10)$/.test(key);
 }
 
 /**
  * Strict shape guard for the `settings` dimension — the successor to the legacy
  * `generatePreview` check that enforced Ruling 4 ("a legacy export file is NOT
- * importable"). An absent `settings` is legal (the dimension was simply not
- * carried); a PRESENT one must be well-formed.
+ * importable"). An ABSENT `settings` is legal (the dimension was simply not
+ * carried — A2/D6, and the UI says so via `import-absent-settings`); a PRESENT
+ * one must be well-formed for the ENTIRE family:
+ *
+ *   matchSettings   enum members
+ *   switchDirection enum members
+ *   autoBindGlobal  boolean          (legacy normalised it; the new path wrote it raw)
+ *   slotStrategies  keys = canonical 1..10, values = 'inherit' | valid matchSettings
+ *
+ * `slotStrategies` is the one settings field even the LEGACY guard never
+ * covered: `applyIntent` walks it and writes each value onto
+ * `slot.strategy` without checking, so an invalid value is persisted and then
+ * silently ignored by the literal-comparing resolver.
  *
  * Deliberately NOT folded into `isExportPackage`: `tolerant` reporting is
  * structural and must run on a structurally-sound package, so this is a
- * SEPARATE pass applied after the structural gate. `settings` is an
- * all-or-nothing global axis — there is no "half a matchSettings".
- *
- * The whole `PortableSettings` family is covered, not just `matchSettings`:
- * `applyIntent` assigns `switchDirection` under a bare TS assertion, so an
- * out-of-enum value would otherwise be trusted and written (`resolve-switch`
- * compares literals and would silently fall through).
+ * SEPARATE pass. `settings` is an all-or-nothing global axis — there is no
+ * "half a matchSettings".
  */
 export function isValidPortableSettings(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
+  if (!isPlainObject(value)) return false;
 
-  const ms = v.matchSettings as Record<string, unknown> | undefined;
-  if (!ms || typeof ms !== 'object') return false;
-  // Ported verbatim from the legacy guard: the enum members ARE the contract.
-  if (!(ms.tabIdMode === 'exists' || ms.tabIdMode === 'no-exists')) return false;
-  if (!(ms.ruleCheckMode === 'match' || ms.ruleCheckMode === 'no-match')) return false;
-  if (!(ms.priority === 'tabId' || ms.priority === 'rule-check' || ms.priority === 'none')) return false;
+  if (!isValidMatchSettingsShape(value.matchSettings)) return false;
+  if (!(value.switchDirection === 'next' || value.switchDirection === 'previous')) return false;
+  if (typeof value.autoBindGlobal !== 'boolean') return false;
 
-  if (!(v.switchDirection === 'next' || v.switchDirection === 'previous')) return false;
+  const slotStrategies = value.slotStrategies;
+  if (!isPlainObject(slotStrategies)) return false;
+  for (const [key, strategy] of Object.entries(slotStrategies)) {
+    if (!isCanonicalSlotKey(key)) return false;
+    if (strategy === 'inherit') continue;
+    if (!isValidMatchSettingsShape(strategy)) return false;
+  }
 
   return true;
 }

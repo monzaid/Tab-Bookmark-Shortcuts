@@ -137,4 +137,22 @@ describe('T1: export package mapping', () => {
     expect(isExportPackage({ schemaVersion: 1 })).toBe(false);
     expect(isExportPackage({ schemaVersion: 1, generator: {}, exportedAt: 'x', scope: {} })).toBe(true);
   });
+
+  it('isExportPackage rejects a wrong CONTAINER type, but not an ABSENT dimension', () => {
+    const base = { schemaVersion: 1, generator: {}, exportedAt: 'x', scope: {} };
+
+    // Absent dimensions stay legal (A2: "not carried") — the positive case above
+    // must not be collateral damage of the container tightening.
+    expect(isExportPackage(base)).toBe(true);
+    expect(isExportPackage({ ...base, slots: [], rules: [] })).toBe(true);
+
+    // A PRESENT dimension must be the right container: otherwise the malformed
+    // value reaches `computeDiff` and THROWS instead of failing cleanly.
+    expect(isExportPackage({ ...base, slots: 'x' })).toBe(false);
+    expect(isExportPackage({ ...base, slots: {} })).toBe(false);
+    expect(isExportPackage({ ...base, rules: 'x' })).toBe(false);
+    expect(isExportPackage({ ...base, settings: 'x' })).toBe(false);
+    expect(isExportPackage({ ...base, settings: [] })).toBe(false);
+    expect(isExportPackage({ ...base, shortcuts: 5 })).toBe(false);
+  });
 });

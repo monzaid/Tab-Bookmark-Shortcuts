@@ -102,14 +102,17 @@ export class ImportExportService {
     } catch {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Invalid JSON format' };
     }
+    // `settings` FIRST: it is the shorter gate and it subsumes the container
+// checks for `parsed.settings`, so an invalid settings shape still yields the
+// precise "settings" refusal rather than the generic package one.
+    if (parsed !== null && typeof parsed === 'object' && 'settings' in parsed) {
+      const settings = (parsed as { settings?: unknown }).settings;
+      if (settings !== undefined && !isValidPortableSettings(settings)) {
+        return { success: false, errorCode: 'IMPORT_INVALID', message: 'Invalid settings in the export package' };
+      }
+    }
     if (!isExportPackage(parsed)) {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Not a valid export package' };
-    }
-    // Ruling 4 succession: a present `settings` dimension must be well-formed
-    // (the legacy `generatePreview` was the only enforcer; removing it without
-    // this would let a legacy-shaped file through — see `isValidPortableSettings`).
-    if (parsed.settings !== undefined && !isValidPortableSettings(parsed.settings)) {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Missing or invalid matchSettings — legacy export files are not supported' };
     }
 
     const current = await this.repo.getSyncState();
@@ -183,21 +186,26 @@ export class ImportExportService {
     { success: true; configVersion: number; result: ImportApplyResult } |
     { success: false; errorCode: string; message: string }
   > {
-    // 1. Parse + structural guard. The strict D14 validator is a separate
-    //    concern; the shape guard is the minimum needed to recompute safely.
+    // 1. Parse + shape guards. Per-record domain rules and the settings family
+    //    are separate concerns (the legacy `generatePreview` owned the latter;
+    //    `isValidPortableSettings` is its successor). Every refusal below happens
+    //    BEFORE any mutation, so a malformed file fails cleanly (store unchanged).
     let parsed: unknown;
     try {
       parsed = JSON.parse(file);
     } catch {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Invalid JSON format' };
     }
+    // `settings` FIRST (shorter gate; APPLY and INSPECT parse the file
+    // independently, so the same guard is needed on both sides).
+    if (parsed !== null && typeof parsed === 'object' && 'settings' in parsed) {
+      const settings = (parsed as { settings?: unknown }).settings;
+      if (settings !== undefined && !isValidPortableSettings(settings)) {
+        return { success: false, errorCode: 'IMPORT_INVALID', message: 'Invalid settings in the export package' };
+      }
+    }
     if (!isExportPackage(parsed)) {
       return { success: false, errorCode: 'IMPORT_INVALID', message: 'Not a valid export package' };
-    }
-    // Ruling 4 succession, APPLY side — INSPECT and APPLY parse the file
-    // independently, so validating only one would leave the other writable.
-    if (parsed.settings !== undefined && !isValidPortableSettings(parsed.settings)) {
-      return { success: false, errorCode: 'IMPORT_INVALID', message: 'Missing or invalid matchSettings — legacy export files are not supported' };
     }
 
     // 2. Recompute the diff against the CURRENT state, from the file alone.

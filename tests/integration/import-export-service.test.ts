@@ -190,6 +190,70 @@ describe('T14b/T21: import service (redesigned protocol)', () => {
 
     it('does not require the settings dimension at all (an uncarried axis is legal)', async () => {
       const file = pkgFile({ rules: [rule('r-only', 'https://only.example/')] });
+      const inspected = await service.inspect(file);
+      const applied = await apply(file);
+      expect(inspected.success).toBe(true);
+      expect(applied.success).toBe(true);
+      // Locked to the API TRUTH, not the UI wording: the UI renders
+      // `import-absent-settings` only because this flag is false. Asserting the
+      // copy alone would pass even if the flag disappeared.
+      if (!inspected.success) return;
+      expect(inspected.inspection.dimensions.settings).toBe(false);
+    });
+
+    it('④ rejects an invalid autoBindGlobal on BOTH paths', async () => {
+      const file = pkgFile({
+        settings: SETTINGS_DIM({ autoBindGlobal: 'yes' as unknown as boolean }),
+      });
+      const inspected = await service.inspect(file);
+      const applied = await apply(file);
+      expect(inspected.success).toBe(false);
+      expect(applied.success).toBe(false);
+      if (!inspected.success) expect(inspected.errorCode).toBe('IMPORT_INVALID');
+      if (!applied.success) expect(applied.errorCode).toBe('IMPORT_INVALID');
+    });
+
+    it('⑤ rejects an invalid slotStrategies VALUE on BOTH paths', async () => {
+      // `.find` matches the real slot, so `'bogus'` would be WRITTEN onto
+      // `slot.strategy` and then silently ignored by the literal comparator.
+      const file = pkgFile({
+        slots: [portableSlot(3, 'https://s3.example/')],
+        settings: SETTINGS_DIM({ slotStrategies: { 3: 'bogus' } as unknown as Record<number, 'inherit'> }),
+      });
+      const inspected = await service.inspect(file);
+      const applied = await apply(file);
+      expect(inspected.success).toBe(false);
+      expect(applied.success).toBe(false);
+    });
+
+    it('⑥ rejects an ORPHAN slot key (a strategy nobody reads = a silent no-op)', async () => {
+      const file = pkgFile({
+        rules: [rule('r-only', 'https://only.example/')],
+        settings: SETTINGS_DIM({ slotStrategies: { 11: 'inherit' } }),
+      });
+      expect((await service.inspect(file)).success).toBe(false);
+      expect((await apply(file)).success).toBe(false);
+    });
+
+    // The key must be the CANONICAL decimal literal for 1..10. A non-canonical
+    // key addresses no slot (`packageToSyncPatch` indexes by `slot.id`), so it is
+    // accepted-then-ignored — the "chosen but never applied" gap.
+    for (const key of ['1.0', '01', '-1', '0', '11']) {
+      it(`⑦ rejects the non-canonical slot key "${key}"`, async () => {
+        const file = pkgFile({
+          rules: [rule('r-only', 'https://only.example/')],
+          settings: SETTINGS_DIM({ slotStrategies: { [key]: 'inherit' } as unknown as Record<number, 'inherit'> }),
+        });
+        expect((await service.inspect(file)).success).toBe(false);
+        expect((await apply(file)).success).toBe(false);
+      });
+    }
+
+    it('accepts a canonical slot key with a legal strategy value (no over-rejection)', async () => {
+      const file = pkgFile({
+        rules: [rule('r-only', 'https://only.example/')],
+        settings: SETTINGS_DIM({ slotStrategies: { 10: 'inherit', 5: SETTINGS_B } }),
+      });
       expect((await service.inspect(file)).success).toBe(true);
       expect((await apply(file)).success).toBe(true);
     });
