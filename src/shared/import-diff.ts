@@ -190,7 +190,17 @@ function changedFields(before: Facets, after: Facets): ImportFieldDiff[] {
  */
 const NO_FACETS: Facets = { title: null, icon: null, urlMatch: null, matchType: null };
 
-/** The match definition as two facets: the URL text and the mode name. */
+/**
+ * The match definition as two facets: the URL text and the mode name.
+ *
+ * Facet convention (what a facet CARRIES): `ImportFieldValue` is defined as a
+ * RENDERABLE form, so a facet may be display-ready. Concretely, `title` and
+ * `urlMatch` carry the raw value (the renderer touches nothing) while
+ * `matchType` is NAMED HERE, in the producer — the mode is presentation-only
+ * (`'exact'` has no meaning to a reader) and naming it at the boundary is what
+ * keeps the diff and the rule form from drifting apart. The raw mode is not
+ * lost: it stays on the record the diff was computed from.
+ */
 function matchFacets(urlMatch: UrlMatchDefinition): {
   urlMatch: ImportFieldValue | null;
   matchType: ImportFieldValue | null;

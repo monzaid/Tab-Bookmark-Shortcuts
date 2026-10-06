@@ -187,15 +187,19 @@ describe('import fields expansion', () => {
    * makes the fix hold (cf. `sidebar-source-hover.test.tsx`).
    */
   it('gives the Fields panel its own full-width row and lets long values wrap', () => {
+    // The PROPERTY FAMILY, not one spelling: a full-width flex child may be
+    // written `flex-basis:100%`, `flex:1 1 100%` or `width:100%`, and an
+    // assertion that named only one would red on a correct rewrite (a change
+    // detector, not an invariant guard). What must hold is the EFFECT.
     const panel = block(/\.tbs-settings__import-fields\s*\{([^}]*)\}/);
     expect(panel).not.toBe('');
-    expect(panel).toMatch(/flex-basis:\s*100%/);
+    expect(panel).toMatch(/flex-basis:\s*100%|flex\s*:[^;]*\b100%|width:\s*100%/);
     expect(panel).toMatch(/min-width:\s*0\b/);
 
     const list = block(/\.tbs-settings__import-fields\s+ul\s*\{([^}]*)\}/);
     expect(list).not.toBe('');
     expect(list).toMatch(/min-width:\s*0\b/);
-    expect(list).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(list).toMatch(/overflow-wrap:\s*anywhere|word-break:\s*break-word/);
   });
 
   it('does not tint the record status as plain text (the status is a badge now)', () => {
