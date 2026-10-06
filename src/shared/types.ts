@@ -299,11 +299,23 @@ export function defaultImportIntent(): ImportIntent {
   };
 }
 
+/**
+ * A field value in a RENDERABLE form — never an internal comparison string, so
+ * the diff's internal representation cannot leak into a consumer (A14/D9).
+ * `null` (on `ImportFieldDiff`) means "this side has no value", which is
+ * distinct from a value that happens to be empty.
+ */
+export type ImportFieldValue =
+  | { kind: 'text'; value: string }
+  | { kind: 'url'; value: string }
+  | { kind: 'local-ref'; key: string }
+  | { kind: 'recipe'; bgColor: string; text: string; textColor: string };
+
 /** Per-field change detail inside a record (A12). */
 export interface ImportFieldDiff {
   field: 'title' | 'icon';
-  before: string | null;
-  after: string | null;
+  before: ImportFieldValue | null;
+  after: ImportFieldValue | null;
   changed: boolean;
 }
 

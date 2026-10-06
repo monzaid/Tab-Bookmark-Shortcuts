@@ -2591,7 +2591,7 @@ function ImportExportSection() {
                                 <ul>
                                   {r.fields.map((f) => (
                                     <li key={f.field} data-testid={`import-field-${r.kind}-${String(r.id)}-${f.field}`}>
-                                      {formatFieldDiffLine(f)}
+                                      {formatFieldDiffLine(f, r.status)}
                                     </li>
                                   ))}
                                 </ul>

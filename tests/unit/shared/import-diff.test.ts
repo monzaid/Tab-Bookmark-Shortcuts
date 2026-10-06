@@ -145,9 +145,16 @@ describe('T8: computeDiff — mode governs only "file-missing, target-has"', () 
     const diff = computeDiff(FILE, CURRENT);
     const row = diff.records.find((r) => r.kind === 'slot' && r.id === 2);
     const title = row?.fields.find((f) => f.field === 'title');
-    expect(title).toEqual({ field: 'title', before: 'S2', after: 'FILE-S2', changed: true });
+    expect(title).toEqual({
+      field: 'title',
+      before: { kind: 'text', value: 'S2' },
+      after: { kind: 'text', value: 'FILE-S2' },
+      changed: true,
+    });
     const icon = row?.fields.find((f) => f.field === 'icon');
-    expect(icon?.changed).toBe(false); // neither side carries an icon
+    // Neither side carries an icon ⇒ both facets are `null` (no value), and the
+    // value is STRUCTURED (never an internal comparison signature).
+    expect(icon).toEqual({ field: 'icon', before: null, after: null, changed: false });
   });
 
   it('a dimension that was NOT carried contributes no rows', () => {

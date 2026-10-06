@@ -34,6 +34,7 @@ import type {
   ImportDiff,
   ImportRecordDiff,
   ImportFieldDiff,
+  ImportFieldValue,
   ImportRecordStatus,
   DimensionPresence,
   MatchOverlap,
@@ -43,29 +44,64 @@ import type { ExportPackage, PortableIcon } from './export-package';
 import { packageToSyncPatch, iconToPortable } from './export-package';
 import { defaultImportIntent } from './types';
 
-// ─── Signature helpers ───────────────────────────────────────────────────────
+// ─── Facet helpers ───────────────────────────────────────────────────────────
+//
+// A facet is the RENDERABLE form of one field value (ImportFieldValue). The
+// comparison key (`facetKey`) is a private string built ONLY for equality — it
+// never enters a contract, so no consumer can render (or re-parse) it.
+//
+// `portableIconFacet` and `facetKey` are deliberately ADJACENT: they are the two
+// halves of one decision (what the value IS / when two values are EQUAL), so a
+// change to the carried shape cannot update one and silently miss the other.
 
-/** Canonical string for a portable icon — the ONLY shape both sides map into. */
-function portableIconSignature(icon: PortableIcon | undefined): string {
-  if (!icon) return '';
+/** The ONLY mapping from a carried icon into a renderable facet. */
+function portableIconFacet(icon: PortableIcon | undefined): ImportFieldValue | null {
+  if (!icon) return null;
   switch (icon.kind) {
     case 'url':
-      return `url:${icon.url ?? ''}`;
+      return { kind: 'url', value: icon.url ?? '' };
     case 'local-ref':
-      return `local-ref:${icon.ref ?? ''}`;
+      return { kind: 'local-ref', key: icon.ref ?? '' };
     case 'recipe':
-      return `recipe:${icon.bgColor ?? ''}|${icon.text ?? ''}|${icon.textColor ?? ''}`;
+      return {
+        kind: 'recipe',
+        bgColor: icon.bgColor ?? '',
+        text: icon.text ?? '',
+        textColor: icon.textColor ?? '',
+      };
   }
 }
 
 /**
- * Canonical string for a STORED icon, normalised through the SAME portable form
- * the export uses — so a stored `upload`/bare-ref and a portable `local-ref` for
- * the same key compare EQUAL (no false "changed").
+ * A STORED icon as a facet, normalised through the SAME portable form the export
+ * uses — so a stored `upload`/bare-ref and a portable `local-ref` for the same
+ * key compare EQUAL (no false "changed").
  */
-function storedIconSignature(icon: IconSource | null | undefined, iconKey: string): string {
-  if (!icon) return '';
-  return portableIconSignature(iconToPortable(icon, iconKey));
+function storedIconFacet(
+  icon: IconSource | null | undefined,
+  iconKey: string,
+): ImportFieldValue | null {
+  return icon ? portableIconFacet(iconToPortable(icon, iconKey)) : null;
+}
+
+/** An empty text facet is "no value" (`null`), not an empty string. */
+function textFacet(s: string): ImportFieldValue | null {
+  return s === '' ? null : { kind: 'text', value: s };
+}
+
+/** The ONLY equality rule. Private: never a contract shape, never rendered. */
+function facetKey(v: ImportFieldValue | null): string {
+  if (v === null) return '';
+  switch (v.kind) {
+    case 'text':
+      return v.value;
+    case 'url':
+      return `url:${v.value}`;
+    case 'local-ref':
+      return `local-ref:${v.key}`;
+    case 'recipe':
+      return `recipe:${v.bgColor}|${v.text}|${v.textColor}`;
+  }
 }
 
 /** Per-record override for a record, or `undefined` when none was given (A4). */
@@ -100,38 +136,37 @@ function presence(pkg: ExportPackage): DimensionPresence {
 // ─── Field-level facets (A12) ────────────────────────────────────────────────
 
 interface Facets {
-  title: string;
-  icon: string;
+  title: ImportFieldValue | null;
+  icon: ImportFieldValue | null;
 }
 
 function slotFacets(slot: SlotDefinition): Facets {
   return {
-    title: slot.uiMarker.customTitle ?? slot.titleSnapshot,
-    icon: storedIconSignature(slot.uiMarker.icon, `icon:slot-${String(slot.id)}`),
+    title: textFacet(slot.uiMarker.customTitle ?? slot.titleSnapshot),
+    icon: storedIconFacet(slot.uiMarker.icon, `icon:slot-${String(slot.id)}`),
   };
 }
 
 function ruleFacets(rule: PageRule): Facets {
   return {
-    title: rule.title ?? '',
-    icon: storedIconSignature(rule.favicon, `icon:${rule.id}`),
+    title: textFacet(rule.title ?? ''),
+    icon: storedIconFacet(rule.favicon, `icon:${rule.id}`),
   };
 }
 
-function fieldDiff(field: 'title' | 'icon', before: string, after: string): ImportFieldDiff {
-  return {
-    field,
-    before: before === '' ? null : before,
-    after: after === '' ? null : after,
-    changed: before !== after,
-  };
+function fieldDiff(
+  field: 'title' | 'icon',
+  before: ImportFieldValue | null,
+  after: ImportFieldValue | null,
+): ImportFieldDiff {
+  return { field, before, after, changed: facetKey(before) !== facetKey(after) };
 }
 
 /** The two "unchanged" facets for a kept row (A12 keeps the shape stable). */
 function keptFields(before: Facets): ImportFieldDiff[] {
   return [
-    { field: 'title', before: before.title || null, after: before.title || null, changed: false },
-    { field: 'icon', before: before.icon || null, after: before.icon || null, changed: false },
+    { field: 'title', before: before.title, after: before.title, changed: false },
+    { field: 'icon', before: before.icon, after: before.icon, changed: false },
   ];
 }
 
@@ -158,8 +193,10 @@ export function computeDiff(
     for (const portable of pkg.slots) {
       const existing = currentById.get(portable.id);
       const afterTitle = portable.marker.customTitle ?? portable.titleSnapshot;
-      const afterIcon = portableIconSignature(portable.marker.icon);
-      const afterFacets: Facets = { title: afterTitle, icon: afterIcon };
+      const afterFacets: Facets = {
+        title: textFacet(afterTitle),
+        icon: portableIconFacet(portable.marker.icon),
+      };
 
       if (!existing) {
         records.push({
@@ -168,15 +205,17 @@ export function computeDiff(
           label: portable.titleSnapshot || `Slot ${String(portable.id)}`,
           status: 'added',
           fields: [
-            { field: 'title', before: null, after: afterTitle || null, changed: afterTitle !== '' },
-            { field: 'icon', before: null, after: afterIcon || null, changed: afterIcon !== '' },
+            fieldDiff('title', null, afterFacets.title),
+            fieldDiff('icon', null, afterFacets.icon),
           ],
         });
         continue;
       }
 
       const before = slotFacets(existing);
-      const differs = before.title !== afterTitle || before.icon !== afterIcon;
+      const differs =
+        facetKey(before.title) !== facetKey(afterFacets.title) ||
+        facetKey(before.icon) !== facetKey(afterFacets.icon);
       // "Both sides" is decided by the diff, NOT by the mode (§3.2). The default
       // is to take the file (D8); only an explicit `keep` override protects it.
       const override = overrideFor(intent, 'slot', portable.id);
@@ -207,10 +246,7 @@ export function computeDiff(
         label: existing.titleSnapshot || `Slot ${String(existing.id)}`,
         status: deleted ? 'deleted' : 'kept',
         fields: deleted
-          ? [
-              { field: 'title', before: before.title || null, after: null, changed: before.title !== '' },
-              { field: 'icon', before: before.icon || null, after: null, changed: before.icon !== '' },
-            ]
+          ? [fieldDiff('title', before.title, null), fieldDiff('icon', before.icon, null)]
           : keptFields(before),
       });
     }
@@ -223,7 +259,10 @@ export function computeDiff(
     for (const portable of pkg.rules) {
       const existing = currentById.get(portable.id);
       const afterTitle = portable.title ?? '';
-      const afterIcon = portableIconSignature(portable.favicon);
+      const afterFacets: Facets = {
+        title: textFacet(afterTitle),
+        icon: portableIconFacet(portable.favicon),
+      };
 
       if (!existing) {
         records.push({
@@ -232,15 +271,17 @@ export function computeDiff(
           label: portable.title ?? portable.urlMatch.value,
           status: 'added',
           fields: [
-            { field: 'title', before: null, after: afterTitle || null, changed: afterTitle !== '' },
-            { field: 'icon', before: null, after: afterIcon || null, changed: afterIcon !== '' },
+            fieldDiff('title', null, afterFacets.title),
+            fieldDiff('icon', null, afterFacets.icon),
           ],
         });
         continue;
       }
 
       const before = ruleFacets(existing);
-      const differs = before.title !== afterTitle || before.icon !== afterIcon;
+      const differs =
+        facetKey(before.title) !== facetKey(afterFacets.title) ||
+        facetKey(before.icon) !== facetKey(afterFacets.icon);
       const override = overrideFor(intent, 'rule', portable.id);
       const status: ImportRecordStatus = override === 'keep' ? 'kept' : differs ? 'replaced' : 'kept';
 
@@ -252,7 +293,10 @@ export function computeDiff(
         fields:
           status === 'kept'
             ? keptFields(before)
-            : [fieldDiff('title', before.title, afterTitle), fieldDiff('icon', before.icon, afterIcon)],
+            : [
+                fieldDiff('title', before.title, afterFacets.title),
+                fieldDiff('icon', before.icon, afterFacets.icon),
+              ],
       });
     }
 
@@ -268,10 +312,7 @@ export function computeDiff(
         label: existing.title ?? existing.urlMatch.value,
         status: deleted ? 'deleted' : 'kept',
         fields: deleted
-          ? [
-              { field: 'title', before: before.title || null, after: null, changed: before.title !== '' },
-              { field: 'icon', before: before.icon || null, after: null, changed: before.icon !== '' },
-            ]
+          ? [fieldDiff('title', before.title, null), fieldDiff('icon', before.icon, null)]
           : keptFields(before),
       });
     }

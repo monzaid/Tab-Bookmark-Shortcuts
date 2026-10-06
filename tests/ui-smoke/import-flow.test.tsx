@@ -30,7 +30,8 @@ import type {
   PageRule,
   UrlMatchDefinition,
 } from '@shared/types';
-import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
+import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
+import type { ImportIntent } from '@shared/types';
 import { computeDiff } from '@shared/import-diff';
 import type { ExportPackage, PortableSlotDef, PortableRule } from '@shared/export-package';
 
@@ -78,7 +79,10 @@ const CURRENT: SyncState = {
 const FILE_SLOT_2: PortableSlotDef = {
   id: 2,
   urlMatch: exact('https://s2.example/'),
-  marker: {},
+  // A recipe icon so the icon facet genuinely CHANGES vs slot 2's (icon-less)
+  // target: that makes the arrow branch render a real value, so the
+  // "no raw signature in the DOM" assertion cannot pass vacuously.
+  marker: { icon: { kind: 'recipe', bgColor: '#123456', text: 'FS', textColor: '#abcdef' } },
   titleSnapshot: 'FILE-S2',
   faviconSnapshot: '',
 };
@@ -103,9 +107,14 @@ const PKG_SLOTS_ONLY: ExportPackage = {
 
 const FILE_TEXT = JSON.stringify(PKG);
 
-/** Build an inspection from the REAL diff (default intent), never by hand. */
-function makeInspection(pkg: ExportPackage, current: SyncState, version = 5): ImportInspection {
-  const diff = computeDiff(pkg, current);
+/** Build an inspection from the REAL diff, never by hand. */
+function makeInspection(
+  pkg: ExportPackage,
+  current: SyncState,
+  version = 5,
+  intent?: ImportIntent,
+): ImportInspection {
+  const diff = computeDiff(pkg, current, intent);
   return {
     diff,
     dimensions: diff.dimensions,
@@ -282,7 +291,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await selectFile();
 
     // Slot 1 is file-missing; incremental keeps it unless explicitly taken.
-    expect((screen.getByTestId('import-mode-slots') as HTMLSelectElement).value).toBe('incremental');
+    expect(screen.getByTestId('import-mode-slots')).toHaveValue('incremental');
     fireEvent.click(screen.getByRole('button', { name: 'Take S1' }));
 
     const dialog = await openConfirmDialog();
@@ -302,10 +311,45 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(titleLine.textContent).toMatch(/Title: S2 → FILE-S2/);
 
     const iconLine = screen.getByTestId('import-field-slot-2-icon');
-    expect(iconLine.textContent).toMatch(/Icon: unchanged/i);
+    // The icon genuinely changed (recipe added) ⇒ the arrow branch renders a
+    // REAL value, so the anti-leak assertion below is not vacuous.
+    expect(iconLine.textContent).toMatch(/Icon: None → Recipe icon/i);
 
     // D9: no raw diff signature may reach the DOM.
     expect(fieldsBox.textContent).not.toMatch(/recipe:|local-ref:|url:/);
+    expect(fieldsBox.textContent).not.toMatch(/\|/);
+  });
+
+  it('T20a: added rows carry the value and never say "unchanged" (A12/D9)', async () => {
+    // Rule r4 is file-only ⇒ `added` in the real (default-intent) diff.
+    await openImportSection();
+    await selectFile();
+
+    const addedTitle = screen.getByTestId('import-field-rule-r4-title').textContent;
+    expect(addedTitle).toMatch(/Title: added/i);
+    expect(addedTitle).not.toMatch(/unchanged/i);
+
+    const addedIcon = screen.getByTestId('import-field-rule-r4-icon').textContent;
+    expect(addedIcon).toBe('Icon: added'); // no value ⇒ bare form
+  });
+
+  it('T20a: deleted rows report "removed" with the last value, never "→ None" (A12/D9)', async () => {
+    // A real diff computed under slots:overwrite — the same call the service
+    // makes — so slots 1 & 3 are genuinely `deleted`.
+    const base = defaultImportIntent();
+    const overwriteSlots = {
+      ...base,
+      dimensionModes: { ...base.dimensionModes, slots: 'overwrite' as const },
+    };
+    await openImportSection(makeInspection(PKG, CURRENT, 5, overwriteSlots));
+    await selectFile();
+
+    const title = screen.getByTestId('import-field-slot-1-title').textContent;
+    expect(title).toBe('Title: removed (S1)');
+
+    const icon = screen.getByTestId('import-field-slot-1-icon').textContent;
+    expect(icon).toBe('Icon: removed'); // no value ⇒ bare form
+    expect(icon).not.toMatch(/unchanged|None/);
   });
 
   it('a dimension the package did NOT carry has no selector (A2)', async () => {
