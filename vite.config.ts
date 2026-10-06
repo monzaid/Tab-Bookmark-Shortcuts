@@ -33,7 +33,6 @@ export default defineConfig({
         sidebar: resolve(__dirname, 'src/ui/sidebar/index.html'),
         settings: resolve(__dirname, 'src/ui/settings/index.html'),
         recovery: resolve(__dirname, 'src/ui/recovery/index.html'),
-        'import-preview': resolve(__dirname, 'src/ui/import-preview/index.html'),
         'conflict-confirm': resolve(__dirname, 'src/ui/conflict-confirm/index.html'),
       },
       output: {

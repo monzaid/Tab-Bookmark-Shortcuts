@@ -14,7 +14,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const WHITELIST = ['sidebar', 'settings', 'recovery', 'import-preview', 'conflict-confirm'] as const;
+const WHITELIST = ['sidebar', 'settings', 'recovery', 'conflict-confirm'] as const;
 
 const readEntry = (page: string) =>
   readFileSync(resolve(process.cwd(), `src/ui/${page}/index.html`), 'utf-8');

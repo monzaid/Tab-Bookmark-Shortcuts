@@ -80,7 +80,7 @@
 - [x] 21 commands declared in all three manifests
 - [x] Service Worker (Chrome/Edge) / background scripts (Firefox)
 - [x] Content script at document_start
-- [x] All React page entries (sidebar, settings, recovery, import-preview, candidate-selector)
+- [x] All React page entries (sidebar, settings, recovery, conflict-confirm)
 - [x] No default_popup (sidebar is main entry)
 - [x] sync/local storage separation enforced
 - [x] No telemetry, no cloud upload, no cross-browser operations

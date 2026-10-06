@@ -28,9 +28,11 @@ describe('U1 (P10) — candidate-selector page fully removed', () => {
     expect(read('vite.config.ts')).not.toContain('candidate-selector');
   });
 
-  it('should keep exactly 5 ui-smoke page cases (was 6)', () => {
+  it('should keep exactly 4 ui-smoke page cases (import-preview retired by T20b)', () => {
     const source = read('tests/ui-smoke/pages.smoke.test.tsx');
-    expect(countOccurrences(source, 'it(')).toBe(5);
+    // Precision preserved (not weakened to >0): the count is updated because the
+    // orphan import-preview entry was removed by T20b, dropping 5 → 4.
+    expect(countOccurrences(source, 'it(')).toBe(4);
   });
 
   it('should keep exactly 8 recovery-window cases and drop all candidate imports', () => {

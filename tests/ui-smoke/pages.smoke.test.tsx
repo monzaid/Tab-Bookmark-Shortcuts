@@ -98,31 +98,6 @@ describe('ui-smoke — five page entries render', () => {
     });
   });
 
-  it('import-preview renders its heading and summary', async () => {
-    const { ImportPreviewTable } = await import('@ui/import-preview/App');
-    render(
-      <ImportPreviewTable
-        preview={{
-          valid: true,
-          slotConflicts: [],
-          newSlots: [],
-          rules: [],
-          matchSettings: { tabIdMode: 'exists', ruleCheckMode: 'match', priority: 'tabId' },
-          switchDirection: 'next',
-          autoBindGlobal: true,
-          configVersion: 0,
-          domainViolations: [],
-        }}
-        onCommit={vi.fn()}
-        onCancel={vi.fn()}
-      />,
-    );
-    await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /import preview/i })).toBeTruthy();
-      expect(screen.getByRole('status')).toBeTruthy();
-    });
-  });
-
   it('conflict-confirm renders both choices', async () => {
     const { ConflictConfirm } = await import('@ui/conflict-confirm/App');
     render(

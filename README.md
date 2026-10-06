@@ -97,8 +97,6 @@ src/
     sidebar/              — Side Panel (main entry)
     settings/             — Settings page (+ Data Dashboard)
     recovery/             — Recovery window
-    import-preview/       — Import preview page
-    candidate-selector/   — Cross-window candidate selector
 manifests/        — Base + browser-specific manifest overlays
 scripts/          — Build / merge / validate / package scripts
 tests/
