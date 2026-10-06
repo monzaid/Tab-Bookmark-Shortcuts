@@ -425,6 +425,29 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(labels).toEqual(['Slot 1 — S1', 'Slot 2 — S2', 'Slot 3 — S3']);
   });
 
+  it('an untitled slot shows its number ONCE (the diff label already is "Slot N")', async () => {
+    // The diff falls back to `Slot N` when a record has no title, so composing
+    // "number + label" naively yields "Slot 5 — Slot 5". Slots with no title are
+    // exactly the ones where the number carries the whole identity.
+    const untitled: SyncState = {
+      ...CURRENT,
+      slots: [{ ...curSlot(1, '') }, { ...curSlot(2, '') }],
+    };
+    // The file side of slot 2 carries no title either, so the diff falls back to
+    // its placeholder for BOTH sides of the row.
+    const untitledPkg: ExportPackage = {
+      ...PKG,
+      slots: [{ ...FILE_SLOT_2, titleSnapshot: '' }],
+    };
+    await openImportSection(makeInspection(untitledPkg, untitled));
+    await selectFile();
+
+    const slots = screen.getByTestId('import-dim-slots');
+    expect(slots.textContent).not.toMatch(/Slot 1 — Slot 1/);
+    const rows = slots.querySelectorAll('ul.tbs-settings__import-records > li > span:first-child');
+    expect(Array.from(rows).map((el) => el.textContent)).toEqual(['Slot 1', 'Slot 2']);
+  });
+
   it('a version conflict re-checks the file instead of dead-ending on a bare server string (F4)', async () => {
     await openImportSection();
     await selectFile();

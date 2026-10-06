@@ -2376,14 +2376,29 @@ const RECORD_BADGE: Record<ImportRecordStatus, StatusBadgeProps['status']> = {
   skipped: 'inactive', // UNREACHABLE for records (count key only).
 };
 
+/** `Slot N` — the placeholder the diff and the export both fall back to. */
+function slotPlaceholder(id: number): string {
+  return `Slot ${String(id)}`;
+}
+
 /**
- * A slot's display label. The slot NUMBER is always shown: slots are a fixed
+ * A slot row's identity. The slot NUMBER is always shown: slots are a fixed
  * 1–10 set and the number is how users refer to them, so a bare title made a
  * file-ordered list unreadable ("which one is slot 3?"). A title decorates the
  * identity, it never replaces it.
+ *
+ * The diff's own label ALREADY falls back to `Slot N` when a record has no
+ * title, so that placeholder must not be repeated (`Slot 5 — Slot 5`).
  */
+function slotRowLabel(id: number, label: string): string {
+  const base = slotPlaceholder(id);
+  return label === base ? base : `${base} — ${label}`;
+}
+
+/** The same identity for the export list, which holds a title rather than a label. */
 function slotLabel(id: number, title: string | null | undefined): string {
-  return title ? `Slot ${String(id)} — ${title}` : `Slot ${String(id)}`;
+  const base = slotPlaceholder(id);
+  return title ? `${base} — ${title}` : base;
 }
 
 /**
@@ -2677,7 +2692,7 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
                                 `aria-label`s below stay on the diff's `r.label`
                                 so the control names are unchanged. */}
                             <span>
-                              {r.kind === 'slot' ? slotLabel(Number(r.id), r.label) : r.label}
+                              {r.kind === 'slot' ? slotRowLabel(Number(r.id), r.label) : r.label}
                             </span>
                             <StatusBadge status={RECORD_BADGE[r.status]} label={r.status} />
                             {/* Reuse the shared Button so the actions match every
