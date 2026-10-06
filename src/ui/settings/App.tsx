@@ -34,6 +34,7 @@ import { UndoBar } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
 import { getMessageClient } from '@ui/shared/message-client';
+import { formatFieldDiffLine } from '@ui/shared/import-field-format';
 import { MatchSettingsHelp } from './MatchSettingsHelp';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -2581,6 +2582,21 @@ function ImportExportSection() {
                             >
                               Take
                             </button>
+                            {/* A12: record level by default, field level on
+                                demand. The values are DECODED (import-field-format)
+                                — raw diff signatures never reach the DOM (D9). */}
+                            {r.fields.length > 0 && (
+                              <details className="tbs-settings__import-fields" data-testid={`import-fields-${r.kind}-${String(r.id)}`}>
+                                <summary>Fields</summary>
+                                <ul>
+                                  {r.fields.map((f) => (
+                                    <li key={f.field} data-testid={`import-field-${r.kind}-${String(r.id)}-${f.field}`}>
+                                      {formatFieldDiffLine(f)}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </details>
+                            )}
                           </li>
                         ))}
                       </ul>

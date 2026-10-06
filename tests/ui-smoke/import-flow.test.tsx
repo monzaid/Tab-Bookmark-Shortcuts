@@ -289,6 +289,25 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(dialog.textContent).toMatch(/delete 1 slots/i);
   });
 
+  it('T20a: a record row expands to field-level lines, decoded not raw (A12/D9)', async () => {
+    await openImportSection();
+    await selectFile();
+
+    // Slot 2 is "both sides, replaced": title differs, icon unchanged — real
+    // `fields` produced by `computeDiff`, not hand-written.
+    const fieldsBox = screen.getByTestId('import-fields-slot-2');
+    expect(fieldsBox.textContent).toMatch(/Fields/i);
+
+    const titleLine = screen.getByTestId('import-field-slot-2-title');
+    expect(titleLine.textContent).toMatch(/Title: S2 → FILE-S2/);
+
+    const iconLine = screen.getByTestId('import-field-slot-2-icon');
+    expect(iconLine.textContent).toMatch(/Icon: unchanged/i);
+
+    // D9: no raw diff signature may reach the DOM.
+    expect(fieldsBox.textContent).not.toMatch(/recipe:|local-ref:|url:/);
+  });
+
   it('a dimension the package did NOT carry has no selector (A2)', async () => {
     await openImportSection(SLOTS_ONLY_INSPECTION);
     await selectFile();
