@@ -142,56 +142,165 @@ describe('T14: sidebar create-rule modal', () => {
   });
 
   /**
-   * rev473 / FIX-C (i): `Use` on a recipe RECORD must copy the RECIPE, not its
-   * derived render.
+   * RED-1 / rev473: the SLOT-ROW entry must prefill the modal with the slot's
+   * ORIGINAL icon source, so a recipe opens as a recipe.
    *
-   * The chain's `value` for a recipe is the materialized PNG (R2), so applying
-   * it must recover the ORIGINAL `IconSource` through the record's `owner`.
-   * This surface used to drop `owner` and guess from `value.startsWith('data:')`,
-   * which reopened the recipe as an UPLOAD and destroyed it on save (C1).
+   * This entry is used (rather than the current-page `+` button) because the
+   * current-page chain depends on an ASYNC tab query whose result oscillates
+   * between effect passes; the slot row reads `slot.uiMarker.icon` directly.
    *
-   * STRUCTURAL (not a render comparison): we assert the persisted payload keeps
-   * `type:'template'` with intact recipe fields — a jsdom render comparison
-   * would pass even with the old bug (the PNG is a valid icon).
+   * STRUCTURAL (not a render comparison): a jsdom render comparison would pass
+   * even with the old bug (the materialized PNG is a valid icon).
    */
-  it('Use on a recipe record keeps the RECIPE (never flattens it to an upload)', async () => {
+  it('RED-1 prefills from a SLOT row recipe source (opens on Custom, recipe fields intact)', async () => {
     const PNG = 'data:image/png;base64,U0xPVFJFTkRFUg==';
-    const RECIPE = {
-      id: 'r-recipe',
-      urlMatch: { type: 'exact', value: 'https://example.com/page' },
-      priority: 50,
-      title: 'Recipe Rule',
-      // The BACKEND materializes a recipe's value at read time (R2): the field
-      // carries the rendered PNG while the recipe identity stays intact.
-      favicon: { type: 'template', value: PNG, backgroundColor: '#2563EB', text: 'A', textColor: '#FFFFFF' },
-      enabled: true,
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
+    const SLOT_RECIPE = {
+      ...SLOT_S,
+      uiMarker: {
+        customTitle: 'Slot S Title',
+        // The BACKEND materializes a recipe's value at read time (R2): the value
+        // is the rendered PNG while the recipe identity stays intact.
+        icon: { type: 'template', value: PNG, backgroundColor: '#2563EB', text: 'A', textColor: '#FFFFFF' },
+      },
     };
-    mockSendMessage.mockResolvedValue(stateWith([RECIPE], []));
+    mockSendMessage.mockResolvedValue(stateWith([], [SLOT_RECIPE]));
+    render(<SidebarApp />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'More options for slot 5' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Add to Global Rules' }));
+    const dialog = await screen.findByRole('dialog', { name: /New Global Page Rule/ });
+
+    const selectedTabs = () => {
+      const list = within(dialog).getByRole('tablist', { name: 'Icon source' });
+      return Array.from(list.querySelectorAll('[role="tab"]'))
+        .filter((t) => t.getAttribute('aria-selected') === 'true')
+        .map((t) => t.textContent?.trim());
+    };
+    await waitFor(() => { expect(selectedTabs()).toEqual(['Custom Icon']); });
+    expect(within(dialog).getByLabelText('Custom background color')).toHaveValue('#2563eb');
+    expect(within(dialog).getByLabelText('Icon text or emoji')).toHaveValue('A');
+    expect(within(dialog).getByLabelText('Custom text color')).toHaveValue('#ffffff');
+  });
+
+  /**
+   * RED-2 / rev473: `Reset` must restore the CONFIG too, not just the mode — the
+   * same recipe as the prefill. Before the fix it restored `{kind:'set'}` with no
+   * config, so the recipe fields went blank and a save would flatten the recipe.
+   */
+  it('RED-2 Reset restores the recipe CONFIG, not just the mode', async () => {
+    const PNG = 'data:image/png;base64,U0xPVFJFTkRFUg==';
+    const SLOT_RECIPE = {
+      ...SLOT_S,
+      uiMarker: {
+        customTitle: 'Slot S Title',
+        icon: { type: 'template', value: PNG, backgroundColor: '#2563EB', text: 'A', textColor: '#FFFFFF' },
+      },
+    };
+    mockSendMessage.mockResolvedValue(stateWith([], [SLOT_RECIPE]));
+    render(<SidebarApp />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'More options for slot 5' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Add to Global Rules' }));
+
+    // Re-queried each time: React replaces the dialog subtree on re-render, so a
+    // captured node would go stale (the "Unable to find" trap).
+    const dlg = () => screen.getByRole('dialog', { name: /New Global Page Rule/ });
+    await waitFor(() => { expect(within(dlg()).getByLabelText('Custom text color')).toHaveValue('#ffffff'); });
+    // Perturb the draft, then Reset.
+    fireEvent.change(within(dlg()).getByLabelText('Icon text or emoji'), { target: { value: 'Z' } });
+    fireEvent.click(within(dlg()).getByLabelText('Reset to the value this editor opened with'));
+
+    await waitFor(() => { expect(within(dlg()).getByLabelText('Icon text or emoji')).toHaveValue('A'); });
+    expect(within(dlg()).getByLabelText('Custom text color')).toHaveValue('#ffffff');
+  });
+
+  /**
+   * RED-5 lock (fallback preserved): a slot with NO stored source but a
+   * data-URI snapshot must still seed as an upload on save — the LAST-RESORT
+   * branch's semantics are unchanged by this work. It locks the fallback so it
+   * cannot be silently broken while touching the source branch above it.
+   *
+   * Asserts the STORAGE type only (the view shows `Custom` for any config).
+   */
+  it('RED-5 lock: a SOURCELESS data-URI prefill stays an upload on save', async () => {
+    const PNG = 'data:image/png;base64,U09VUkNFTA==';
+    // No `uiMarker.icon` ⇒ no source ⇒ the snapshot string is the fallback.
+    const SLOT_SNAP = { ...SLOT_S, faviconSnapshot: PNG };
+    mockSendMessage.mockResolvedValue(stateWith([], [SLOT_SNAP]));
+    render(<SidebarApp />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'More options for slot 5' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Add to Global Rules' }));
+    const dlg = () => screen.getByRole('dialog', { name: /New Global Page Rule/ });
+
+    await waitFor(() => { expect(within(dlg()).getByRole('button', { name: 'Save' })).toBeEnabled(); });
+    fireEvent.click(within(dlg()).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockSendMessage.mock.calls.map((c) => (c[0] as { action?: string }).action)).toContain('CREATE_RULE');
+    });
+    const call = mockSendMessage.mock.calls.find((c) => (c[0] as { action?: string }).action === 'CREATE_RULE');
+    expect((call?.[0] as { payload?: { favicon?: { type?: string } } }).payload?.favicon?.type).toBe('upload');
+  });
+
+  /**
+   * RED-6 (prefill + upload): seeding from an UPLOAD source must keep it an
+   * upload on save. This is the guard for the `iconSourceToIconConfig` choice —
+   * the lossy `iconSourceToDraft`/`fromIconFieldValue` pair carries NO config,
+   * and `resolveDraftFavicon` then classifies the draft as `type:'url'`.
+   *
+   * Asserts the STORAGE type only. The view shows `Custom` for any config (a
+   * known cosmetic split in the dual-model editor); asserting the tab would be
+   * wrong.
+   */
+  it('RED-6 prefilling from an UPLOAD source keeps it an upload on save', async () => {
+    const PNG = 'data:image/png;base64,VVBM1PUFQ';
+    const SLOT_UPLOAD = {
+      ...SLOT_S,
+      uiMarker: { customTitle: 'Slot S Title', icon: { type: 'upload', value: PNG } },
+    };
+    mockSendMessage.mockResolvedValue(stateWith([], [SLOT_UPLOAD]));
+    render(<SidebarApp />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'More options for slot 5' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Add to Global Rules' }));
+    const dialog = await screen.findByRole('dialog', { name: /New Global Page Rule/ });
+
+    await waitFor(() => { expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled(); });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockSendMessage.mock.calls.map((c) => (c[0] as { action?: string }).action)).toContain('CREATE_RULE');
+    });
+    const call = mockSendMessage.mock.calls.find((c) => (c[0] as { action?: string }).action === 'CREATE_RULE');
+    expect((call?.[0] as { payload?: { favicon?: { type?: string } } }).payload?.favicon?.type).toBe('upload');
+  });
+
+  /**
+   * RED-6b (apply a chain record + upload): the `Use chain` APPLY path must be
+   * source-faithful too. It used the lossy pair (`fromIconFieldValue(
+   * iconSourceToDraft(...))`), so applying an upload record saved `type:'url'`.
+   */
+  it('RED-6b applying a chain record from an UPLOAD source keeps it an upload on save', async () => {
+    const PNG = 'data:image/png;base64,VVBM1PUFQ';
+    const RULE_UPLOAD = { ...RULE_R, favicon: { type: 'upload', value: PNG } };
+    mockSendMessage.mockResolvedValue(stateWith([RULE_UPLOAD], []));
     render(<SidebarApp />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Add to global rules' }));
     const dialog = await screen.findByRole('dialog', { name: /New Global Page Rule/ });
 
-    // Open the icon editor's `Use chain` tab so the record rows (and their `Use`
-    // buttons) render, then apply that record's icon to this new rule's draft.
-    const iconTabs = within(dialog).getByRole('tablist', { name: 'Icon source' });
-    fireEvent.click(within(iconTabs).getByRole('tab', { name: /Use chain/i }));
+    const tabs = () => within(dialog).getByRole('tablist', { name: 'Icon source' });
+    fireEvent.click(within(tabs()).getByRole('tab', { name: /Use chain/i }));
     fireEvent.click(await within(dialog).findByRole('button', { name: /Apply the .* to this field/i }));
 
-    // STRUCTURAL: the record's ORIGINAL source was recovered through `owner`, so
-    // the draft carries a RECIPE — the editor switches to `Custom Icon` and its
-    // fields hold the recipe's values. The old bug flattened it to an upload
-    // (the editor would have opened on `Upload` with a data URI instead).
+    await waitFor(() => { expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled(); });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+
     await waitFor(() => {
-      const selected = Array.from(iconTabs.querySelectorAll('[role="tab"]'))
-        .filter((t) => t.getAttribute('aria-selected') === 'true')
-        .map((t) => t.textContent?.trim());
-      expect(selected).toEqual(['Custom Icon']);
+      expect(mockSendMessage.mock.calls.map((c) => (c[0] as { action?: string }).action)).toContain('CREATE_RULE');
     });
-    expect(within(dialog).getByLabelText('Custom background color')).toHaveValue('#2563eb');
-    expect(within(dialog).getByLabelText('Icon text or emoji')).toHaveValue('A');
-    expect(within(dialog).getByLabelText('Custom text color')).toHaveValue('#ffffff');
+    const call = mockSendMessage.mock.calls.find((c) => (c[0] as { action?: string }).action === 'CREATE_RULE');
+    expect((call?.[0] as { payload?: { favicon?: { type?: string } } }).payload?.favicon?.type).toBe('upload');
   });
 });

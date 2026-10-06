@@ -7,7 +7,18 @@
  * portable package (C2: "dereference + bare-send").
  */
 
-/** The single reference prefix the storage layer understands (`ICON_REF_PREFIX`). */
+/**
+ * The single reference prefix the storage layer understands (`ICON_REF_PREFIX`).
+ *
+ * This constant is the one OWNER of the literal; the consumers are:
+ *   1. `classifyIconValue` below (export-side classification),
+ *   2. `export-package.ts` (portable local-ref detection),
+ *   3. `icon-service.ts` (resolution of a stored reference).
+ * Deliberately NOT registered as a test assertion: equality of that set would
+ * lock the count, and a future LEGITIMATE consumer would then be a false
+ * failure. The invariant that matters is that nothing outside these three
+ * re-spells the prefix.
+ */
 export const LOCAL_ICON_REF_PREFIX = 'local-icon:';
 
 /**

@@ -624,7 +624,10 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
             : undefined,
         }}
         onResetTitleEdit={() => { setTitleMode(rule.title ? { kind: 'set', value: rule.title } : { kind: 'use-chain' }); }}
-        onResetIconEdit={() => { setIconMode(hasIcon ? { kind: 'set', value: seedValue } : { kind: 'use-chain' }); }}
+        // Reset must restore the CONFIG too, not just the mode: without it a recipe
+// draft loses its fields (and the mode would claim a composite that has none).
+        // Mirrors `baselineIcon` above; the type-aware seed itself is unchanged.
+        onResetIconEdit={() => { setIconMode(hasIcon ? { kind: 'set', value: seedValue } : { kind: 'use-chain' }); setIconConfig(isTemplateIcon ? { bgColor: seed?.bgColor, text: seed?.text, textColor: seed?.textColor } : undefined); }}
         onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
         onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
         submitMode={{ kind: 'immediate' }}

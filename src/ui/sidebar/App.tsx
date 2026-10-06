@@ -805,8 +805,7 @@ function SidebarUndoBar({ undo, onUndo, onExpire }: SidebarUndoAdapters) {
 import type { IconConfig } from '@ui/components/IconEditor';
 import { IconFieldEditor } from '@ui/shared/icon-field-editor';
 import type { IconFieldValue } from '@ui/shared/icon-field-editor';
-import { canonicalIconSource, iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft } from '@ui/shared/icon-source';
-import { fromIconFieldValue } from '@ui/shared/icon-mode-adapter';
+import { canonicalIconSource, iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft, iconSourceToIconConfig } from '@ui/shared/icon-source';
 import { wildcardToRegex } from '@shared/url-utils';
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import type { FieldMode } from '@ui/shared/field-editor';
@@ -1012,6 +1011,12 @@ function IconEditorModal({
             setSource(iconSourceToDraft(canonicalIconSource(source)));
             return;
           }
+          // LAST RESORT, not a first guess: this branch is only reached when the
+          // owner RESOLVED TO NOTHING — either the record is the sourceless site
+          // tier, or the owner resolved to a null source. With no source there
+          // is no identity to carry, so the value's shape is the only thing
+          // knowable. (It is deliberately NOT "guess identity from the value
+          // whenever an owner exists" — the branch above runs first.)
           setSource(tierValue.startsWith('data:')
             ? { mode: 'upload', value: tierValue }
             : { mode: 'url', value: tierValue });
@@ -1054,11 +1059,53 @@ interface CreateRuleModalProps {
    * render (which would re-save as an upload and destroy it — C1 / rev473).
    */
   resolveSourceForOwner?: (owner: TierOwner) => IconSource | null;
+  /**
+   * FIX-C (i) / rev473 family: the PREFILL's original source, when the caller
+   * has one. `defaultIcon` is only the string the chain materialized (a recipe
+   * arrives as its rendered PNG), so seeding from the string alone would reopen
+   * a recipe as an upload and destroy it on save (C1).
+   */
+  defaultIconSource?: IconSource | null;
   onSave: (data: { url: string; matchType: 'exact' | 'regex'; title?: string; favicon?: IconSource; priority: number }) => Promise<{ success: boolean; message?: string }>;
   onCancel: () => void;
 }
 
-function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = '', defaultMatchType, titleChain: liveTitleChain, iconChain: liveIconChain, onClearTier, resolveSourceForOwner, onSave, onCancel }: CreateRuleModalProps) {
+/**
+ * FIX-C (i): the ONE icon seeder for every draft-restoring path. The SOURCE wins
+ * when present — a recipe OR an upload must come back as itself — and only a
+ * sourceless prefill falls back to the value's shape.
+ *
+ * Module-scope (not a component closure) so the consumers' hook deps stay small
+ * and the helper is identically the same function for `CreateRuleModal` and its
+ * `applyChainValueToDraft`.
+ *
+ * Uses `iconSourceToIconConfig`, NOT `iconSourceToDraft`/`fromIconFieldValue`:
+ * that pair maps an upload to a config-less `{kind:'set', value:<dataUri>}`,
+ * which the mapper then classifies as `'url'` — the identity is lost and the
+ * view (prefix-based) disagrees with what is saved. The config form is what
+ * `resolveDraftFavicon` reads back as `upload`/`template`.
+ *
+ * `fallback` is what to use when no source exists, NOT the icon's truth: a
+ * recipe's fallback IS its rendered `data:` URI, so testing the string before
+ * the source is exactly the C1 bug.
+ */
+function seedIconFrom(src: IconSource | null, fallback: string): { mode: FieldMode; iconConfig?: IconConfig } {
+  if (src) {
+    if (src.type === 'template' || src.type === 'upload') {
+      return { mode: { kind: 'set', value: '' }, iconConfig: iconSourceToIconConfig(src) };
+    }
+    return { mode: { kind: 'set', value: src.value } };
+  }
+  // No stored source: the value's shape is the LAST RESORT here — only ever
+  // reached AFTER the source branch above, never instead of it (that inversion
+  // is the C1 bug).
+  if (!fallback) return { mode: { kind: 'use-chain' } };
+  return fallback.startsWith('data:')
+    ? { mode: { kind: 'set', value: '' }, iconConfig: { dataUri: fallback } }
+    : { mode: { kind: 'set', value: fallback } };
+}
+
+function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = '', defaultIconSource = null, defaultMatchType, titleChain: liveTitleChain, iconChain: liveIconChain, onClearTier, resolveSourceForOwner, onSave, onCancel }: CreateRuleModalProps) {
   // DT4: the four prefills are snapshotted ONCE on open, from the chain-derived
   // values the caller supplies (no per-keystroke re-seed, no implicit fallback).
   const [url, setUrl] = useState(defaultUrl);
@@ -1066,12 +1113,15 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
   const [titleMode, setTitleMode] = useState<FieldMode>(
     defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' },
   );
-  const [iconMode, setIconMode] = useState<FieldMode>(
-    defaultIcon ? { kind: 'set', value: defaultIcon.startsWith('data:') ? '' : defaultIcon } : { kind: 'use-chain' },
-  );
-  const [iconConfig, setIconConfig] = useState<IconConfig | undefined>(
-    defaultIcon.startsWith('data:') ? { dataUri: defaultIcon } : undefined,
-  );
+  // NOTE: this initializer is UNREACHABLE with a prefill — the modal is mounted
+  // unconditionally while `rulePrefill` starts null, so `defaultIcon` is always
+  // '' here. It stays source-aware for consistency, and because a non-empty
+  // initial value would otherwise reintroduce the C1 bug. Do NOT hang a test on
+  // this path: it is always empty at mount (such a test would be vacuously
+  // green); the open-time effect below is the real seeding.
+  const initialIconSeed = seedIconFrom(defaultIconSource, defaultIcon);
+  const [iconMode, setIconMode] = useState<FieldMode>(initialIconSeed.mode);
+  const [iconConfig, setIconConfig] = useState<IconConfig | undefined>(initialIconSeed.iconConfig);
   const [priority, setPriority] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1083,12 +1133,13 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
     setUrl(defaultUrl);
     setMatchType(defaultMatchType ?? 'exact');
     setTitleMode(defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' });
-    setIconMode(defaultIcon ? { kind: 'set', value: defaultIcon.startsWith('data:') ? '' : defaultIcon } : { kind: 'use-chain' });
-    setIconConfig(defaultIcon.startsWith('data:') ? { dataUri: defaultIcon } : undefined);
+    const seeded = seedIconFrom(defaultIconSource, defaultIcon);
+    setIconMode(seeded.mode);
+    setIconConfig(seeded.iconConfig);
     setPriority(0);
     setSaving(false);
     setSaveError(null);
-  }, [open, defaultUrl, defaultTitle, defaultIcon, defaultMatchType]);
+  }, [open, defaultUrl, defaultTitle, defaultIcon, defaultIconSource, defaultMatchType]);
 
   const handleSave = useCallback(async () => {
     if (saving) return;
@@ -1159,21 +1210,13 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
     // is the DERIVED render (R2 materializes it at read time), so dispatching on
     // the value's shape would reopen it as an upload and destroy the recipe (C1).
     const source = owner ? resolveSourceForOwner?.(owner) ?? null : null;
-    if (source) {
-      const seeded = fromIconFieldValue(iconSourceToDraft(canonicalIconSource(source)));
-      setIconMode(seeded.mode);
-      setIconConfig(seeded.iconConfig);
-      return;
-    }
-    // No stored source (the site tier carries none): the value's shape is all
-    // that is knowable. This is the ONLY permitted prefix guess.
-    if (value.startsWith('data:')) {
-      setIconMode({ kind: 'set', value: '' });
-      setIconConfig({ dataUri: value });
-    } else {
-      setIconMode({ kind: 'set', value });
-      setIconConfig(undefined);
-    }
+    // Same source-aware seeder as the prefill. The former `fromIconFieldValue(
+    // iconSourceToDraft(...))` pair dropped the config, so a chain `Use` of an
+    // UPLOAD record saved it as `type:'url'` (identity lost) — this uses the
+    // config form, which `resolveDraftFavicon` reads back as `upload`.
+    const s = seedIconFrom(source, value);
+    setIconMode(s.mode);
+    setIconConfig(s.iconConfig);
   }, [resolveSourceForOwner]);
 
   return (
@@ -1219,9 +1262,12 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         titleChain={chain}
         iconChain={liveIconChain ?? chain}
         baselineTitle={{ mode: { kind: 'use-chain' } }}
-        baselineIcon={{ mode: { kind: 'use-chain' } }}
+        // The baseline IS the seeded value: `IconFieldEditor` snapshots its
+        // picker from this pair, so leaving it `use-chain` made Reset discard
+        // the prefill (a recipe's fields went blank). Mirrors `seedIconFrom`.
+        baselineIcon={initialIconSeed}
         onResetTitleEdit={() => { setTitleMode(defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' }); }}
-        onResetIconEdit={() => { setIconMode(defaultIcon ? { kind: 'set', value: defaultIcon.startsWith('data:') ? '' : defaultIcon } : { kind: 'use-chain' }); }}
+        onResetIconEdit={() => { const s = seedIconFrom(defaultIconSource, defaultIcon); setIconMode(s.mode); setIconConfig(s.iconConfig); }}
         onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
         onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
         submitMode={{ kind: 'immediate' }}
@@ -2035,12 +2081,17 @@ export function SidebarApp() {
       url: slot.urlMatch.value,
       title: slot.uiMarker.customTitle || slot.titleSnapshot || '',
       icon: slot.uiMarker.icon?.value || slot.faviconSnapshot || '',
+      // FIX-C (i): carry the slot's ORIGINAL source. The record being copied is
+      // the SLOT's own icon — its row DISPLAYS the chain winner, but a "copy
+      // this slot to a rule" action copies the slot's own value, so the slot is
+      // the owner. Deriving it from the chain would copy the wrong one.
+      iconSource: slot.uiMarker.icon ?? null,
       matchType: slot.urlMatch.type,
     });
     setShowRuleModal(true);
   }, [state.sync]);
 
-  const [rulePrefill, setRulePrefill] = useState<{ url: string; title: string; icon: string; matchType?: 'exact' | 'regex' } | null>(null);
+  const [rulePrefill, setRulePrefill] = useState<{ url: string; title: string; icon: string; iconSource?: IconSource | null; matchType?: 'exact' | 'regex' } | null>(null);
 
   // ─── Slot URL update (Problem 8: double-click URL edit) ────────────────
 
@@ -2353,6 +2404,9 @@ export function SidebarApp() {
                   url: state.currentTabUrl,
                   title: displayCurrentTitle || state.currentTabTitle,
                   icon: displayCurrentFavicon || state.currentTabFavicon,
+                  // FIX-C (i): carry the chain winner's STORED source (already
+                  // computed) so a winning recipe/upload reopens as itself.
+                  iconSource: currentPageIconSource,
                 });
                 setShowRuleModal(true);
               }}>
@@ -2511,6 +2565,7 @@ export function SidebarApp() {
         defaultUrl={rulePrefill ? rulePrefill.url : state.currentTabUrl}
         defaultTitle={rulePrefill ? rulePrefill.title : ''}
         defaultIcon={rulePrefill ? rulePrefill.icon : ''}
+        defaultIconSource={rulePrefill?.iconSource ?? null}
         defaultMatchType={rulePrefill ? rulePrefill.matchType : undefined}
         // Item 2.2 / 2.3: the live chains, so `Use chain` shows real tier data.
         {...(titleChain ? { titleChain } : {})}

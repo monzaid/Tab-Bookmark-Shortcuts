@@ -20,6 +20,12 @@ export function toIconFieldValue(mode: FieldMode, iconConfig?: IconConfig): Icon
   if (mode.kind === 'use-chain') return { mode: 'use-chain', value: '' };
   // A composite config means the Custom Icon tab produced this value; a plain
   // string is either the Icon URL text or a raw `data:` upload.
+  //
+  // ⚠️ Any config ⇒ `custom`, including an upload's `{ dataUri }`. So a draft
+  // seeded from an UPLOAD source displays the Custom tab while persisting as
+  // `type:'upload'` (the config is what `resolveDraftFavicon` keys off). That
+  // view/storage split is a known cosmetic imperfection in the dual-model
+  // editor; the STORAGE type is the contract, and tests assert that, not the tab.
   if (iconConfig) return { mode: 'custom', value: mode.value, iconConfig };
   if (mode.value.startsWith('data:')) return { mode: 'upload', value: mode.value };
   return { mode: 'url', value: mode.value };
