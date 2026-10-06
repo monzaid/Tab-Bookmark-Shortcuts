@@ -13,7 +13,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'rea
 import { Button, Toast, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportApplyResult, ImportDiff, ImportRecordStatus, DimensionPresence, DimensionMode, ExportScope, SyncState } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportRecordOverride, ImportApplyResult, ImportDiff, ImportRecordStatus, DimensionPresence, DimensionMode, ExportScope, SyncState } from '@shared/types';
 import type { StatusBadgeProps } from '@ui/shared/components';
 import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
 import { applyIntent, computeDiff, quantifyDeletions } from '@shared/import-diff';
@@ -2421,6 +2421,34 @@ const RECORD_BADGE: Record<ImportRecordStatus, StatusBadgeProps['status']> = {
   skipped: 'inactive', // UNREACHABLE for records (count key only).
 };
 
+/**
+ * The one plain default intent (incremental, no overrides).
+ *
+ * A VALUE, not a call: `resetIntent` runs inside a state updater, and an updater
+ * must be pure — `defaultImportIntent()` mints a fresh object per call, so using
+ * it in the `prev === DEFAULT_INTENT` identity check would never match.
+ */
+const DEFAULT_INTENT: ImportIntent = defaultImportIntent();
+
+/**
+ * The intent a freshly chosen file starts from: accept every applicable record
+ * (all rows checked), so the user DECLINES what they do not want instead of
+ * ticking each one.
+ *
+ * Applicability is decided by the diff against the LIVE state: `added` cannot
+ * honour `keep` (the file's own records are always applied), so it gets no
+ * override. Without a usable current state there is no diff to read this from,
+ * so the plain {@link DEFAULT_INTENT} stands.
+ */
+function defaultIntentFor(pkg: ExportPackage | null, current: SyncState | null): ImportIntent {
+  if (!pkg || !current) return DEFAULT_INTENT;
+  const diff = computeDiff(pkg, current, DEFAULT_INTENT);
+  const allTake: ImportRecordOverride[] = diff.records
+    .filter((r) => r.status !== 'added')
+    .map((r) => ({ kind: r.kind, id: r.id, action: 'take' }));
+  return { ...DEFAULT_INTENT, recordOverrides: allTake };
+}
+
 /** `Slot N` — the placeholder the diff and the export both fall back to. */
 function slotPlaceholder(id: number): string {
   return `Slot ${String(id)}`;
@@ -2584,22 +2612,32 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
       setToast({ variant: 'error', message: (result?.message as string) || 'Invalid import file' });
       return false;
     }
+    const pkgLocal = parseExportPackage(text);
     setFile(text);
     setInspection(result.inspection as ImportInspection);
-    setPkg(parseExportPackage(text));
-    if (opts.resetIntent) setIntent(defaultImportIntent());
+    setPkg(pkgLocal);
     // D7: the quantification needs the CURRENT state. A failure here is
     // NON-fatal — `current` stays null and the copy reports "unknown"
     // rather than the false claim "no records".
+    let currentLocal: SyncState | null = null;
     try {
       const stateRes = await sendMessage('GET_STATE');
       const stateResult = extractResult(stateRes);
       if (stateResult?.success && stateResult.sync) {
-        setCurrent(stateResult.sync as SyncState);
+        currentLocal = stateResult.sync as SyncState;
+        setCurrent(currentLocal);
       }
     } catch {
       // keep `null` — the confirm dialog still opens, with unknown copy
     }
+    // A NEW file starts at "accept everything", derived from the diff against
+    // the state read just above (the locals, never state that has not settled
+    // yet). This is the ONLY resetIntent:true caller — choosing a file means
+    // starting fresh — so it resets UNCONDITIONALLY, including when a previous
+    // file's choices are still in the intent.
+    // A version-conflict RE-check (resetIntent=false) must keep the user's
+    // choices, so that path is left wholly alone.
+    if (opts.resetIntent) setIntent(defaultIntentFor(pkgLocal, currentLocal));
     return true;
   }, []);
 

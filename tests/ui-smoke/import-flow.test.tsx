@@ -271,10 +271,11 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     fireEvent.change(screen.getByTestId('import-mode-rules'), { target: { value: 'overwrite' } });
 
     const dialog = await openConfirmDialog();
-    // D7: the quantity must follow the mode the user CHOSE. Rules carry 3
-    // file-missing records (r1..r3); slots stay incremental → 0.
+    // D7: the quantity is the product of the intent the user holds. The DEFAULT
+    // now accepts every applicable record, so the file-missing set (slots 1 & 3,
+    // rules r1..r3) is exactly what the dialog counts.
     const text = dialog.textContent;
-    expect(text).toMatch(/delete 3 rules/i);
+    expect(text).toMatch(/delete 2 slots and 3 rules/i);
     expect(text).toMatch(/cannot be undone/i);
     expect(text).not.toMatch(/no records/i);
 
@@ -302,16 +303,19 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await openImportSection();
     await selectFile();
 
-    // Default (incremental) counts nothing irreversible.
+    // The default already deletes the file-missing set (slots 1 & 3, rules r1..r3).
     let dialog = await openConfirmDialog();
-    expect(dialog.textContent).toMatch(/delete no records/i);
+    expect(dialog.textContent).toMatch(/delete 2 slots and 3 rules/i);
     fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
 
-    // Switch slots to overwrite: slots 1 & 3 are file-missing ⇒ really deleted.
+    // Switching to OVERWRITE cannot delete more than "every file-missing record",
+    // so the count is UNCHANGED — the mode is not an additive axis once every row
+    // is already accepted. This is what stops a mode switch from silently
+    // widening the blast radius.
     fireEvent.change(screen.getByTestId('import-mode-slots'), { target: { value: 'overwrite' } });
     dialog = await openConfirmDialog();
     const text = dialog.textContent;
-    expect(text).toMatch(/delete 2 slots/i);
+    expect(text).toMatch(/delete 2 slots and 3 rules/i);
     expect(text).toMatch(/cannot be undone/i);
     expect(text).not.toMatch(/no records/i);
   });
@@ -320,16 +324,15 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await openImportSection();
     await selectFile();
 
-    // Slot 1 is file-missing; incremental keeps it unless explicitly taken.
+    // Slot 1 is file-missing and accepted BY DEFAULT (mode stays incremental) —
+    // "incremental ≠ delete nothing" is expressed by the per-record override.
     expect(screen.getByTestId('import-mode-slots')).toHaveValue('incremental');
-    // The accept control is a checkbox whose checked state VIEWS the row status;
-    // slot 1 is `kept` under incremental, so its box starts unchecked.
     const keepS1 = screen.getByRole('checkbox', { name: 'Take S1' });
-    expect(keepS1).not.toBeChecked();
-    fireEvent.click(keepS1);
+    expect(keepS1).toBeChecked();
+    fireEvent.click(keepS1); // decline it ⇒ keep the target's own slot
 
     const dialog = await openConfirmDialog();
-    expect(dialog.textContent).toMatch(/delete 1 slots/i);
+    expect(dialog.textContent).toMatch(/delete 1 slots and 3 rules/i);
   });
 
   it('keeps the checkbox, the status badge and the delete count in lockstep (one source)', async () => {
@@ -351,22 +354,25 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     }
   });
 
-  it('switching a dimension to overwrite CHECKS its file-missing rows and warns — one source', async () => {
-    // The trap this guards: `take` is not "no override". Under incremental a
-    // file-missing row is UNCHECKED and uncounted; switching to overwrite makes
-    // it `deleted` ⇒ the box is checked AND the count includes it. The box is a
-    // view of the status, so the two cannot disagree.
+  it('a declined file-missing row stays declined when the mode switches to overwrite (one source)', async () => {
+    // The trap this guards: `take` is not "no override", and a mode switch must
+    // NOT silently re-state a decision the user already made. The default
+    // accepts the file-missing rows; declining S1 writes an explicit `keep`
+    // override that OUTLIVES the mode change. The box is a view of the status,
+    // so the two cannot disagree — and the mode cannot undo the user's choice.
     await openImportSection();
     await selectFile();
 
     const keepS1 = screen.getByRole('checkbox', { name: 'Take S1' });
-    expect(keepS1).not.toBeChecked(); // incremental: file-missing is kept
+    expect(keepS1).toBeChecked(); // default: accept every applicable row
+    fireEvent.click(keepS1);
+    expect(screen.getByRole('checkbox', { name: 'Take S1' })).not.toBeChecked();
 
     fireEvent.change(screen.getByTestId('import-mode-slots'), { target: { value: 'overwrite' } });
-    expect(screen.getByRole('checkbox', { name: 'Take S1' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Take S1' })).not.toBeChecked();
 
     const dialog = await openConfirmDialog();
-    expect(dialog.textContent).toMatch(/delete 2 slots/i);
+    expect(dialog.textContent).toMatch(/delete 1 slots and 3 rules/i);
   });
 
   it('a BOTH-SIDES row is reachable both ways: uncheck ⇒ kept, check ⇒ replaced (not a delete)', async () => {
@@ -403,9 +409,15 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(screen.getByRole('checkbox', { name: 'Take S2' })).toBeChecked();
     expect(row2()).toMatch(/replaced/);
 
-    // Neither direction is a DELETION: both-sides never enters the count.
-    const dialog = await openConfirmDialog();
-    expect(dialog.textContent).toMatch(/delete no records/i);
+    // Neither direction is a DELETION: the count is the file-missing set alone
+    // (slots 1 & 3, rules r1..r3) in BOTH states, so accepting or declining the
+    // both-sides row 2 never adds to it.
+    let dialog = await openConfirmDialog();
+    expect(dialog.textContent).toMatch(/delete 2 slots and 3 rules/i);
+    fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Take S2' })); // decline
+    dialog = await openConfirmDialog();
+    expect(dialog.textContent).toMatch(/delete 2 slots and 3 rules/i);
   });
 
   it('a file-only row is accepted and cannot be declined (added is always applied)', async () => {
@@ -527,8 +539,13 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(screen.getByTestId('import-slot-strategy-2').textContent).toMatch(/inherit$/);
     expect(screen.getByTestId('import-slot-strategy-2').textContent).not.toMatch(/by default/);
     const slot3 = screen.getByTestId('import-slot-strategy-3').textContent;
-    expect(slot3).toMatch(/Tab ID exists, Rule check match, Priority tabId/);
-    expect(slot3).not.toMatch(/inherit/); // an object must NOT degrade to `inherit`
+    // slot 3's TARGET strategy really is `inherit` — the arrow's LEFT side may
+    // say so. The right side carries the file's object and must NOT degrade to
+    // `inherit`, so pin the direction: the concrete triple follows the arrow.
+    // (The old `not.toMatch(/inherit/)` failed once the target side read its own
+    // value honestly — it conflated "the file's value" with "anywhere in the line".)
+    expect(slot3).toMatch(/inherit → Tab ID exists, Rule check match, Priority tabId/);
+    expect(slot3).not.toMatch(/→ inherit/);
   });
 
   it('a dimension the package did NOT carry has no selector (A2)', async () => {
@@ -545,11 +562,11 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
 
     expect(screen.queryByRole('dialog')).toBeNull();
     // Independent, named guard for BOTH halves of the D7 point: the dialog is
-    // constant AND the count is an honest zero under the default (incremental)
-    // intent — not merely "some dialog opened".
+    // constant AND the count is an honest number under the default intent — not
+    // merely "some dialog opened".
     const dialog = await openConfirmDialog();
     expect(dialog).toBeTruthy();
-    expect(dialog.textContent).toMatch(/delete no records/i);
+    expect(dialog.textContent).toMatch(/delete 2 slots and 3 rules/i);
   });
 
   it('D7: an unreadable current state says "unknown", never "no records"', async () => {
@@ -714,5 +731,92 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(screen.getByText(/re-checked/i)).toBeTruthy();
     // The raw backend string must NOT be what the user reads.
     expect(screen.queryByText(/Version conflict: expected/i)).toBeNull();
+  });
+
+  // ─── Default = accept every record (user ruling: "default all selected") ────
+
+  it('default all-take: every applicable row is checked, and the file-missing set is counted', async () => {
+    await openImportSection();
+    await selectFile();
+
+    // Accept-everything default: nothing the package can apply is left unchecked.
+    for (const name of ['Take S1', 'Take S2', 'Take S3']) {
+      expect(screen.getByRole('checkbox', { name })).toBeChecked();
+    }
+    const dialog = await openConfirmDialog();
+    // file-missing = slots 1 & 3, rules r1..r3 (both-sides/added are never deletes).
+    expect(dialog.textContent).toMatch(/delete 2 slots and 3 rules/i);
+  });
+
+  it('default all-take: a both-sides row is accepted (replaced) and is not a deletion', async () => {
+    await openImportSection();
+    await selectFile();
+
+    const s2 = screen.getByRole('checkbox', { name: 'Take S2' });
+    expect(s2).toBeChecked();
+    const li = screen.getByTestId('import-record-slot-2').closest('li');
+    expect(li?.textContent).toMatch(/replaced/);
+    expect(li?.textContent).not.toMatch(/deleted/);
+  });
+
+  it('declining a default-accepted row keeps it and lowers the deletion count', async () => {
+    await openImportSection();
+    await selectFile();
+
+    const keepS1 = screen.getByRole('checkbox', { name: 'Take S1' });
+    expect(keepS1).toBeChecked();
+    fireEvent.click(keepS1);
+    expect(screen.getByRole('checkbox', { name: 'Take S1' })).not.toBeChecked();
+
+    const li = screen.getByTestId('import-record-slot-1').closest('li');
+    expect(li?.textContent).toMatch(/kept/);
+
+    const dialog = await openConfirmDialog();
+    expect(dialog.textContent).toMatch(/delete 1 slots and 3 rules/i);
+  });
+
+  it('a declination survives the version-conflict re-check (resetIntent=false path)', async () => {
+    // The user's choices must survive a re-inspect: only the state-derived
+    // numbers change, not their decisions. This change must NOT touch that path.
+    await openImportSection();
+    await selectFile();
+
+    const keepS1 = screen.getByRole('checkbox', { name: 'Take S1' });
+    expect(keepS1).toBeChecked();
+    fireEvent.click(keepS1);
+    expect(screen.getByRole('checkbox', { name: 'Take S1' })).not.toBeChecked();
+
+    // The state moved between INSPECT and APPLY ⇒ the write is refused and the
+    // draft is re-checked WITHOUT resetting the intent.
+    const base = mockSendMessage.getMockImplementation();
+    mockSendMessage.mockImplementation((msg: { action?: string }) => {
+      if (msg.action === 'IMPORT_APPLY') {
+        return Promise.resolve({
+          result: { success: false, errorCode: 'CONFIG_CONFLICT', message: 'Version conflict' },
+        });
+      }
+      return base ? (base(msg) as Promise<unknown>) : Promise.resolve({ result: { success: true } });
+    });
+
+    const dialog = await openConfirmDialog();
+    fireEvent.click(within(dialog).getByRole('button', { name: /confirm import/i }));
+    await waitFor(() => { expect(screen.getByText(/re-checked/i)).toBeTruthy(); });
+
+    // The re-check must NOT silently re-select the declined row.
+    expect(screen.getByRole('checkbox', { name: 'Take S1' })).not.toBeChecked();
+  });
+
+  it('an unreadable current state yields NO take overrides (nothing to build them from)', async () => {
+    // The default all-take is DERIVED from a diff against the live state. Without
+    // that state there is no diff to derive it from, so the intent stays the
+    // plain default (no overrides) — rows keep their incremental status and the
+    // dialog reports "unknown" rather than an assumed all-clear.
+    await openImportSection();
+    failStateRead = true; // the state read fails AFTER mount
+    await selectFile();
+
+    expect(screen.getByRole('checkbox', { name: 'Take S1' })).not.toBeChecked();
+    const dialog = await openConfirmDialog();
+    expect(dialog.textContent).toMatch(/unknown/i);
   });
 });
