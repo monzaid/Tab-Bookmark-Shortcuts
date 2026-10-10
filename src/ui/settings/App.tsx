@@ -1348,6 +1348,35 @@ interface DashboardEditForm {
 type DashboardSortKey = 'label' | 'title';
 type SortDir = 'asc' | 'desc';
 
+/**
+ * Human names for the three Sources a dashboard row can have.
+ *
+ * The badge on each row shows `entry.label`, which is "Tab 12" / "Slot 3" — an
+ * IDENTITY, not a source. A filter that offered those would be a filter over
+ * ids, so the three kinds are named for what they actually are.
+ */
+const SOURCE_LABELS: Record<DashboardEntry['kind'], string> = {
+  override: 'This Page',
+  slot: 'Slot',
+  'rule-hit': 'Rule',
+};
+
+/**
+ * The order the Source filter lists what it found: the actions a user TAKES,
+ * then the configurations they SET, then what a rule decides for them.
+ *
+ * Module-level (not per-render) so the filter's option list is stable — a value
+ * rebuilt inside the component would be a new array on every render, which is
+ * what made it an unstable hook dependency.
+ */
+const SOURCE_FILTER_ORDER: ReadonlyArray<DashboardEntry['kind']> = [
+  'override', 'slot', 'rule-hit',
+];
+
+function sourceLabel(kind: DashboardEntry['kind']): string {
+  return SOURCE_LABELS[kind];
+}
+
 /** IMP-5 / G1: the delivery copy, and whether a row can be applied here at all. */
 function deliveryLabel(delivery: DashboardEntry['delivery']): string | null {
   switch (delivery) {
@@ -1391,6 +1420,10 @@ function DashboardSection() {
   const [busy, setBusy] = useState(false);
   const [sortKey, setSortKey] = useState<DashboardSortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  /** Substring match over the row's Title / Source / URL. `''` = no search. */
+  const [query, setQuery] = useState('');
+  /** `'any'` = every Source; otherwise a `DashboardEntry['kind']`. */
+  const [sourceFilter, setSourceFilter] = useState<DashboardEntry['kind'] | 'any'>('any');
   /** IMP-4: per-row drafts so several rows can be edited simultaneously. */
   const [drafts, setDrafts] = useState<Map<string, DashboardEditForm>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -1443,8 +1476,79 @@ function DashboardSection() {
     return sorted;
   }, [entries, sortKey, sortDir]);
 
-  // IMP-4 / N8: the header select-all and the rows share ONE list.
-  const visibleEntries = sortedEntries;
+  /**
+   * What the search box matches, and the ONE place that list is built.
+   *
+   * Deliberately NOT regex or fuzzy: the user is looking for a page they
+   * recognise, and here a surprising match is worse than a missed one — the
+   * row's Clear is destructive, so a row the filter wrongly kept is a row the
+   * user may bulk-clear by accident.
+   *
+   * Title means the text the row actually DISPLAYS (`chain.title.winner.value`),
+   * not `label` — `label` is the source badge ("Tab 12", "Slot 3"), which would
+   * make "title search" report the wrong column.
+   */
+  const matchesQuery = useCallback((entry: DashboardEntry, needle: string): boolean => {
+    if (needle === '') return true;
+    const haystack = [
+      entry.chain.title.winner.value ?? '',
+      entry.label,
+      entry.url ?? '',
+    ].join(' ').toLowerCase();
+    return haystack.includes(needle);
+  }, []);
+
+  /** Filter first, then the sort order applies to what survived. */
+  const filteredEntries = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return sortedEntries.filter((e) => matchesQuery(e, needle));
+  }, [sortedEntries, query, matchesQuery]);
+
+  /**
+   * The rows on screen: the search plus the Source filter.
+   *
+   * This is THE list — the header select-all, the row loop and the "showing N of
+   * M" count all read it, so a control can never act on a different set from the
+   * one the user is looking at (N8).
+   */
+  const visibleEntries = useMemo(
+    () => (sourceFilter === 'any'
+      ? filteredEntries
+      : filteredEntries.filter((e) => e.kind === sourceFilter)),
+    [filteredEntries, sourceFilter],
+  );
+
+  /** The Source values that actually occur, in a stable order. */
+  const availableSources = useMemo(
+    () => SOURCE_FILTER_ORDER.filter((kind) => entries.some((e) => e.kind === kind)),
+    [entries],
+  );
+
+  const isFiltering = query.trim() !== '' || sourceFilter !== 'any';
+
+  /**
+   * Selection is narrowed to what is ON SCREEN whenever the filter changes.
+   *
+   * Same rule (and the same failure it prevents) as the rules table below: a
+   * selection that outlives the rows it named desyncs the header checkbox — it
+   * compares `selected.size` with the VISIBLE count, so a hidden-but-selected row
+   * left the box drawn unchecked while every visible row was ticked, and clicking
+   * it then silently dropped the hidden ones. Narrowing here is also the safer
+   * direction for a destructive action: the user can only ever clear what they
+   * could see.
+   *
+   * The early returns keep this from re-rendering on every unrelated pass — a
+   * no-op filter must not churn `selected` and re-render the whole table.
+   */
+  useEffect(() => {
+    const onScreen = new Set(visibleEntries.map((e) => e.id));
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set<string>();
+      for (const id of prev) if (onScreen.has(id)) next.add(id);
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleEntries]);
 
   // G1: "N items · none can be applied here" — `unknown` is excluded.
   const summary = useMemo(() => {
@@ -1620,10 +1724,19 @@ function DashboardSection() {
     }
   };
 
-  const resetAll = async () => {
+  /**
+   * Clear the SHOWN rows — the same list the table draws, so the count in the
+   * button's own label is the number of rows this will act on.
+   *
+   * The scope is `visibleEntries`, not `entries`: a row hidden by the search or
+   * the Source filter must survive. The previous version wrote every fetch of
+   * `entries`, which meant clicking this with an empty filtered list destroyed
+   * the whole panel — the exact opposite of what the user was looking at.
+   */
+  const clearShown = async () => {
     setBusy(true);
     try {
-      for (const entry of entries) {
+      for (const entry of visibleEntries) {
         if (entry.kind === 'override' && entry.tabId != null) {
           await sendMessage('REMOVE_TAB_OVERRIDE', { tabId: entry.tabId });
         } else if (entry.kind === 'slot' && entry.slotId != null) {
@@ -1633,11 +1746,11 @@ function DashboardSection() {
           });
         }
       }
-      setToast({ variant: 'success', message: 'All items cleared' });
+      setToast({ variant: 'success', message: 'Shown items cleared' });
       setSelected(new Set());
       void load();
     } catch {
-      setToast({ variant: 'error', message: 'Failed to clear all items' });
+      setToast({ variant: 'error', message: 'Failed to clear the shown items' });
     } finally {
       setBusy(false);
       setConfirmReset(null);
@@ -1647,7 +1760,10 @@ function DashboardSection() {
   const resetSelected = async () => {
     setBusy(true);
     try {
-      for (const entry of entries) {
+      // Also scoped to the visible rows: the selection is pruned to that set, so
+      // this is normally the same thing — but reading the same list here means a
+      // stale id can never be acted on off screen.
+      for (const entry of visibleEntries) {
         if (!selected.has(entry.id)) continue;
         if (entry.kind === 'override' && entry.tabId != null) {
           await sendMessage('REMOVE_TAB_OVERRIDE', { tabId: entry.tabId });
@@ -1946,15 +2062,19 @@ function DashboardSection() {
       {/* D-20: destructive resets are confirmed. */}
       <Confirm
         open={confirmReset !== null}
-        title="Clear selection?"
-        message="The values this layer owns will be removed. Lower layers will decide again, and the page falls back to the site value."
+        title={confirmReset?.kind === 'all' ? 'Clear shown items?' : 'Clear selection?'}
+        // The count is the SCOPE, stated before the click — and it is the count of
+        // SHOWN rows, because that is what the button acts on.
+        message={confirmReset?.kind === 'all'
+          ? `${String(visibleEntries.length)} ${visibleEntries.length === 1 ? 'item' : 'items'} shown will have the values this layer owns removed. Lower layers will decide again, and the pages fall back to their site values.`
+          : 'The values this layer owns will be removed. Lower layers will decide again, and the page falls back to the site value.'}
         confirmLabel="Clear"
         variant="danger"
         onCancel={() => { setConfirmReset(null); }}
         onConfirm={() => {
           const which = confirmReset;
           setConfirmReset(null);
-          if (which?.kind === 'all') void resetAll();
+          if (which?.kind === 'all') void clearShown();
           else if (which?.kind === 'selected') void resetSelected();
           else if (which?.kind === 'entry') {
             const entry = entries.find((e) => e.id === which.id);
@@ -1963,17 +2083,68 @@ function DashboardSection() {
         }}
       />
 
+      {/* The searches sit directly under the sentence that says what this list
+          is, and ABOVE the bulk actions: narrowing the list is how a user makes
+          a bulk Clear safe, so it must be reachable before the buttons rather
+          than after them. Same control vocabulary as the import/export record
+          lists (`tbs-settings__search` + `tbs-settings__filter-select`). */}
+      <div className="tbs-settings__toolbar" role="group" aria-label="Filter dashboard items">
+        <input
+          type="search"
+          className="tbs-settings__search"
+          data-testid="dashboard-search"
+          placeholder="Search title or Match URL"
+          value={query}
+          onChange={(e) => { setQuery(e.currentTarget.value); }}
+          aria-label="Search dashboard items"
+        />
+        <select
+          className="tbs-settings__filter-select"
+          data-testid="dashboard-source-filter"
+          value={sourceFilter}
+          aria-label="Filter by Source"
+          onChange={(e) => { setSourceFilter(e.currentTarget.value as DashboardEntry['kind'] | 'any'); }}
+        >
+          <option value="any">Any Source</option>
+          {availableSources.map((kind) => (
+            <option key={kind} value={kind}>{sourceLabel(kind)}</option>
+          ))}
+        </select>
+      </div>
+
       {/* G1: a summary sentence when rows exist but none can be applied here. */}
       {summary && (
         <p className="tbs-settings__summary" role="status">{summary}</p>
       )}
 
+      {/* "Showing N of M" only while a filter is on. Every bulk action here is
+          scoped to the VISIBLE rows, so the size of what the filter hid has to be
+          visible BEFORE the click rather than inferred after it. */}
+      {isFiltering && (
+        <p className="tbs-settings__filter-count" role="status" data-testid="dashboard-filter-count">
+          {visibleEntries.length === entries.length
+            ? `Showing all ${String(entries.length)} items`
+            : `Showing ${String(visibleEntries.length)} of ${String(entries.length)} items`}
+        </p>
+      )}
+
       <div className="tbs-settings__toolbar">
-        <Button size="sm" variant="secondary" onClick={() => { setConfirmReset({ kind: 'selected' }); }} disabled={selected.size === 0 || busy} aria-label="Reset selected items">
-          Reset Selected ({selected.size})
+        <Button size="sm" variant="secondary" onClick={() => { setConfirmReset({ kind: 'selected' }); }} disabled={selected.size === 0 || busy} aria-label="Clear selected items">
+          Clear Selected ({selected.size})
         </Button>
-        <Button size="sm" variant="danger" onClick={() => { setConfirmReset({ kind: 'all' }); }} disabled={entries.length === 0 || busy} aria-label="Reset all items">
-          Reset All
+        <Button
+          size="sm"
+          variant="danger"
+          onClick={() => { setConfirmReset({ kind: 'all' }); }}
+          // The SHOWN rows, and the label says so: the count in the button is the
+          // number of rows this will act on, so with a filter that hides
+          // everything the button reads "Clear Shown (0)" and is DISABLED rather
+          // than sitting there as a way to wipe the whole panel. A name that said
+          // "All" could not be honest about that scope — see `clearShown`.
+          disabled={visibleEntries.length === 0 || busy}
+          aria-label="Clear shown items"
+        >
+          {`Clear Shown (${String(visibleEntries.length)})`}
         </Button>
       </div>
 
@@ -1983,9 +2154,16 @@ function DashboardSection() {
             <th scope="col" style={{ width: '32px' }}>
               <input
                 type="checkbox"
-                // N8: the header select-all is derived from the SAME list the rows use.
+                // N8: the header select-all is derived from the SAME list the rows
+                // use — including the filter, so it never selects a row the user
+                // cannot see. Both halves are guarded on that list being non-empty
+                // so a filter that hides everything cannot (a) draw the box as
+                // "all selected" from a stale `selected`, or (b) be clicked into
+                // an arbitrary toggle of the previous selection.
                 checked={visibleEntries.length > 0 && selected.size === visibleEntries.length}
+                disabled={visibleEntries.length === 0}
                 onChange={() => {
+                  if (visibleEntries.length === 0) return;
                   if (selected.size === visibleEntries.length) setSelected(new Set());
                   else setSelected(new Set(visibleEntries.map((e) => e.id)));
                 }}

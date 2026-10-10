@@ -12,7 +12,7 @@
 | 类别 | 规则 | 例 |
 |---|---|---|
 | **描述句**（toast / 空态 / 提示 / 状态） | **sentence case**（仅句首与专有名词大写）+ 简短 | `Rule updated` / `No rules yet` / `Failed to reset items` |
-| **标签 / 按钮 / 选项名** | **Title Case** | `Match URL` / `Custom Title` / `Save` / `Reset All` / `Use chain` |
+| **标签 / 按钮 / 选项名** | **Title Case** | `Match URL` / `Custom Title` / `Save` / `Clear Shown` / `Use chain` |
 | **placeholder** | sentence case，**不加句末句点** | `https:// or data: URI`（**`Leave empty to keep original` 必须删除**，见 §1.2） |
 | 句末标点 | 单句**不加**句点；多句或含逗号才加 | `Cleared 3 layers · 12 tabs affected`（用 ` · ` 分隔，不加句点） |
 
@@ -30,11 +30,21 @@
 
 | 概念 | 统一用词 | 禁用 |
 |---|---|---|
-| 清空某层 / 整条链 | **clear / cleared** | `reset`（除 `Reset All` 的历史按钮名，见下） |
+| 清空某层 / 整条链 | **clear / cleared** | `reset` |
 | 撤销一次编辑（纯前端，DT7 ①） | **reset（this edit）** | `revert` / `undo edit` |
-| 侵权性批量清空（Dashboard 顶部两按钮） | **`Reset All` / `Reset Selected`** —— **保留旧名**（已确立的按钮，改名收益低于风险） | — |
+| 破坏性批量清空（Dashboard 顶部两按钮） | **`Clear Shown (N)` / `Clear Selected (N)`** | `Clear All` |
 
-> **⚠️ 术语冲突点（须在文档中显式说明，防止"被修掉"）**：`reset` 一词**同时**表示"撤销编辑"（DT7 ①）与"批量清空"（Dashboard 顶部）。二者的**作用域不同**（单个编辑 vs 批量），故保留；但**`Clear`（DT7 ②）与 `Reset All` 都是"清空"** → 须在 UI 上由**作用域文案**区分（见 §2）。
+> **✅ 已裁决（2026-10-10 迭代，两次覆盖原决定）**
+>
+> ① 上一版为降低回归风险**保留**了 `Reset All` / `Reset Selected` 旧名。该权衡被推翻：`reset` 在 Dashboard 里**同时**表示
+> "撤销这次编辑"（行内编辑器的 `Reset`）与"批量清空"（顶部按钮），两者在**同一屏**并列出现，作用域差异不足以区分用户——
+> 正是 §0.2 要消除的那类歧义。`reset` 一词从此只表示"撤销编辑"。
+>
+> ② 改名后的 `Clear All` 又把范围做成了**全部行**（含被搜索/Source 筛选隐藏的），于是出现实测缺陷：筛选结果为空时点击它，
+> 清掉了整面板。**范围改为「当前可见（shown）行」**，按钮名随之改为 `Clear Shown (N)`——名字里的 N 就是它会作用于的行数，
+> 因此筛选为空时它显示 `Clear Shown (0)` 且**禁用**，不可能再被用来清空全部。
+>
+> **作用域必须写进名字本身**：两个按钮都只覆盖**可见**行（`Clear Selected` 作用于选中的可见行）。确认弹窗必须报出数量（见 §2）。
 
 ---
 
@@ -224,7 +234,7 @@ interface RadioGroupProps {
 |---|---|---|
 | **b1** | **打开的那次回车不得穿透** —— 触发按钮需在 `keydown` 阻止默认行为，或对话框挂载时忽略该次重复事件 | 否则"打开"与"确认"由**同一物理按键**完成 |
 | **b2** | **必须传 `returnFocusRef` / `focusFallbackRef`** —— 本迭代新增的所有 `Confirm` 用法都要传；现状删除 slot 的已传（`sidebar/App.tsx:443-453`），设置页尚无用法 | `components.tsx:100-119`（已为"触发器被卸载"设计） |
-| **b3** | **不可逆操作（`Reset All` / 批量删除）→ 必须配 `UndoBar`（IMP-6）** | 焦点在"确认"上放大了误触概率 → `Confirm` 之外还需**可撤销兜底**（与 DT9 同一机制） |
+| **b3** | **不可逆操作（`Clear All` / 批量删除）→ 必须配 `UndoBar`（IMP-6）** | 焦点在"确认"上放大了误触概率 → `Confirm` 之外还需**可撤销兜底**（与 DT9 同一机制） |
 | **b4** | **禁止"同一物理按键既打开又确认"** —— 且 `Confirm` 打开后应有**极短保护期**（~100–150ms 内忽略 Enter），防连击 | 本裁决直接产生 |
 
 > 本裁决**不改变** `Confirm` 的视觉（`variant` 仍为 `default` / `danger`），仅决定**焦点与 DOM 顺序**。
@@ -240,7 +250,7 @@ interface RadioGroupProps {
 | # | 约束 | 理由 |
 |---|---|---|
 | **g1** | **焦点必须归还** —— `Undo` 或**过期**后，焦点回到 `UndoBar` 出现**之前**的元素（`Clear` 的触发按钮）；该元素可能已消失（如整行被清空）→ 退回到**稳定的**容器（面板 / 表格行） | 否则焦点掉到 `<body>`（与 `Dialog` 的 `focusFallbackRef` 同类问题，`components.tsx:110-119`） |
-| **g2** | **`UndoBar` 与 `Confirm` 不得同时抢焦点** —— 二者可能叠加（`Reset All` 的 `Confirm` 确认后弹 `UndoBar`）⇒ 必须定死：**`Confirm` 关闭 → 提交 → 再弹 `UndoBar`**（串行，非并行） | 两个焦点抢占源并存 = 焦点冲突 |
+| **g2** | **`UndoBar` 与 `Confirm` 不得同时抢焦点** —— 二者可能叠加（`Clear All` 的 `Confirm` 确认后弹 `UndoBar`）⇒ 必须定死：**`Confirm` 关闭 → 提交 → 再弹 `UndoBar`**（串行，非并行） | 两个焦点抢占源并存 = 焦点冲突 |
 | **g3** | **打开的那次回车不得穿透**（同 CT3-b 的 b1/b4）—— 触发按钮的 `keydown` 需阻止默认，且 `UndoBar` 挂载后极短保护期内忽略 `Enter` | 防"同一按键既触发又撤销"（虽然 `Undo` 无害，但会造成"莫名其妙被撤销"） |
 | **g4** | **避免双重播报** —— 现状是 `role="alert" aria-live="polite"`（`sidebar/App.tsx:486`）：`alert` 隐含 assertive，与 `polite` **语义冲突**；且**焦点已移动**时屏幕阅读器会读聚焦元素 ⇒ 应改为 **`role="status"`**（或去掉 live 属性），**二选一**，不得叠加 | 实测缺陷（① N11 的延伸） |
 

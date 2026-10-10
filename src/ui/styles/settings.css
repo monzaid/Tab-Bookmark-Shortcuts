@@ -1419,6 +1419,18 @@
   gap: var(--space-xxs);
 }
 
+/* ─── Dashboard filter bar (Data Dashboard) ───────────────────────────────── */
+
+/* "Showing N of M items" while a filter is on. Tabular figures so the numbers
+   do not jitter as the query is typed, and the count sits with the controls it
+   describes rather than under the table. */
+.tbs-settings__filter-count {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
 /* One row is a CELL plus an optional DETAIL stacked under it. The cell carries
    the fixed track layout (not just a flex row) — that is what makes the columns
    line up ACROSS rows, the point of a list, and what lets the URL ellipsise
