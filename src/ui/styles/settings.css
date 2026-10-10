@@ -118,7 +118,10 @@
 .tbs-settings__knobs {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  /* `flex-start`, not `flex-end`: with a hint line under each control the boxes
+     have different heights, and baseline/end alignment would float the shorter
+     ones down. The tops must line up so the three selects read as one row. */
+  align-items: flex-start;
   gap: var(--space-lg);
   padding: var(--space-sm) 0 var(--space-md);
   max-width: 720px;
@@ -128,12 +131,40 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-xxs);
+  /* Grows to fill the row on a narrow pane instead of squeezing the hint text
+     into a narrow column beside two siblings. */
+  flex: 1 1 160px;
+  min-width: 0;
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
 
-.tbs-settings__knobs > label > span {
+.tbs-settings__knobs > label > span:first-child {
   font-weight: 500;
+}
+
+/* The one-clause explanation of what the control actually decides. The knob
+   VALUES are opaque on their own ("Exists", "No match"), so without this the
+   reader has to open the reference to learn what they are choosing. */
+.tbs-settings__knob-hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* An in-place explanation for a control that is not shown (ACC#6a). Neutral, not
+   an error: nothing failed and nothing was lost. */
+.tbs-settings__note {
+  flex: 1 1 200px;
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border-left: 2px solid var(--color-border-strong);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 /**
@@ -336,6 +367,106 @@
   font-size: var(--font-size-sm);
   color: var(--color-text);
   background: var(--color-bg);
+}
+
+/* ─── Per-slot override list (Global Matching Settings) ───────────────────── */
+
+/**
+ * One row per slot, as a LIST rather than a three-column table.
+ *
+ * The table stretched to the pane's full width, so the three controls sat far
+ * from the row they described and the Custom expansion was squeezed into the
+ * middle cell — the harshest case on a narrow window, where the columns collided.
+ * A row that owns its own controls also lets the identity ("Slot 3 — Docs") sit
+ * beside them, so a reader stops counting rows to find a slot.
+ */
+.tbs-settings__slot-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.tbs-settings__slot-row {
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  min-width: 0;
+}
+
+/* An overridden slot is visually distinct at a glance, so "which slots differ
+   from the global value" does not require reading ten select values. */
+.tbs-settings__slot-row--custom {
+  border-color: var(--color-primary);
+  background: var(--color-info-bg);
+}
+
+.tbs-settings__slot-row__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-md);
+  min-width: 0;
+}
+
+.tbs-settings__slot-row__name {
+  /* The flexible track: a long slot title wraps here rather than pushing the
+     two selects off the row. */
+  flex: 1 1 160px;
+  min-width: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.tbs-settings__slot-row__field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* The Custom expansion, on its own line under the row's controls. Indented and
+   ruled so it reads as belonging to the row above it. */
+.tbs-settings__slot-row__detail {
+  margin-top: var(--space-sm);
+  padding-left: var(--space-sm);
+  border-left: 2px solid var(--color-border-strong);
+  min-width: 0;
+}
+
+/* The knobs inside an expansion: the label + control stack, with the hint lines
+   suppressed (they are shown once, in the global block). */
+.tbs-settings__slot-row__detail .tbs-settings__knobs {
+  padding: 0;
+  max-width: none;
+}
+
+.tbs-settings__slot-row__detail .tbs-settings__knobs > label {
+  flex: 1 1 140px;
+}
+
+/* Every control in the section shares one geometry (height, radius, padding) —
+   previously the knob selects, the table selects and the row selects were three
+   slightly different sizes, which read as three unrelated widgets. */
+.tbs-settings__knobs select,
+.tbs-settings__slot-row select,
+.tbs-settings__row select {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  /* A comfortable pointer/touch target; the OS metric stays intact because this
+     is a padding increase, not a height clamp. */
+  min-height: 30px;
 }
 
 /* The per-rule enable checkbox lives inside a `<label>` that carries the
@@ -800,6 +931,29 @@
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
   font-variant-numeric: tabular-nums;
+  /* Pushed to the card's right edge so the tally reads as a summary of the card
+     rather than as another heading word. */
+  margin-left: auto;
+}
+
+/* The card's own explanatory sentence, under its title. Distinct from
+   `__panel-sub` (which describes a whole screen): this one describes the block
+   it sits in, so it is one line at the card's own reading width. */
+.tbs-settings__card-note {
+  margin: calc(var(--space-xs) * -1) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+/* ─── Card heading as an h3 (Global Matching Settings) ────────────────────── */
+/* `tbs-settings__content h3` carries a large top margin for full-width section
+   headings. Inside a card the title is the card's first line, so the margin
+   would open a gap above it. */
+.tbs-settings__card > .tbs-settings__card-head > .tbs-settings__card-title {
+  margin-top: 0;
+  font-size: var(--font-size-base);
 }
 
 /* The mode control: a label, the select, and a sentence stating its

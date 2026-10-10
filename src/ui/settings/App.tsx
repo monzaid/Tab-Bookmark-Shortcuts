@@ -303,15 +303,24 @@ interface StrategySectionProps {
  * ACC#6a: `priority` is meaningful ONLY for combination 1 (tabIdMode `exists`).
  * When Tab ID = "No tab ID" the Priority control is hidden — its stored value is
  * PRESERVED (never cleared), so switching back to `exists` restores it.
+ *
+ * `hints` adds a one-clause explanation under each knob. It exists because the
+ * knob VALUES are opaque on their own: "Exists / No tab ID" and "Match / No
+ * match" state implementation facts, not user intent, so a reader had to consult
+ * the (collapsed) reference to learn what they were choosing. The hints are for
+ * the GLOBAL block only — repeating three sentences down ten slot rows would be
+ * noise, and by then the reader has already met them once.
  */
 function MatchKnobs({
   idPrefix,
   settings,
   onChange,
+  hints = false,
 }: {
   idPrefix: string;
   settings: MatchRuleSettings;
   onChange: (settings: MatchRuleSettings) => void;
+  hints?: boolean;
 }) {
   const showPriority = settings.tabIdMode !== 'no-exists';
   return (
@@ -326,6 +335,11 @@ function MatchKnobs({
           <option value="exists">Exists</option>
           <option value="no-exists">No tab ID</option>
         </select>
+        {hints && (
+          <span className="tbs-settings__knob-hint">
+            Use the tab this slot was last bound to.
+          </span>
+        )}
       </label>
       <label>
         <span>Rule Check</span>
@@ -337,8 +351,17 @@ function MatchKnobs({
           <option value="match">Match</option>
           <option value="no-match">No match</option>
         </select>
+        {hints && (
+          <span className="tbs-settings__knob-hint">
+            Use tabs that match the slot&apos;s Match URL.
+          </span>
+        )}
       </label>
-      {showPriority && (
+      {/* ACC#6a: the control is REMOVED for combination 2, but the removal is
+          now explained in place. A control that simply vanishes leaves the reader
+          unsure whether they mis-clicked or lost data — and the value is in fact
+          preserved, which the note does not need to say twice. */}
+      {showPriority ? (
         <label>
           <span>Priority</span>
           <select
@@ -350,7 +373,16 @@ function MatchKnobs({
             <option value="rule-check">Rule Check</option>
             <option value="none">None</option>
           </select>
+          {hints && (
+            <span className="tbs-settings__knob-hint">
+              Which of the two wins when both are available.
+            </span>
+          )}
         </label>
+      ) : (
+        <p className="tbs-settings__note">
+          Priority applies only when Tab ID is used. Your setting is kept for when you switch back.
+        </p>
       )}
     </div>
   );
@@ -369,44 +401,74 @@ function StrategySection({
   onSlotAutoBindChange,
 }: StrategySectionProps) {
   return (
-    <section aria-label="Global matching settings">
+    <section aria-label="Global matching settings" className="tbs-settings__panel">
       <h2>Global Matching Settings</h2>
+      {/* One sentence saying what this screen decides, before any control. The
+          previous version opened straight into an unlabelled row of selects, so
+          the reader had to infer the section's job from its controls. */}
+      <p className="tbs-settings__panel-sub">
+        How a slot finds its tab when you switch to it. These values are the default for every
+        slot; individual slots can override them below.
+      </p>
 
       <MatchSettingsHelp />
 
-      <MatchKnobs idPrefix="Global" settings={matchSettings} onChange={onGlobalChange} />
-
-      <label className="tbs-settings__row">
-        <span>Switch Direction</span>
-        <select
-          aria-label="Switch Direction"
-          value={switchDirection}
-          onChange={(e) => { onDirectionChange(e.target.value as SwitchDirection); }}
-        >
-          <option value="previous">Previous Match</option>
-          <option value="next">Next Match</option>
-        </select>
-      </label>
-
-      <label className="tbs-settings__row">
-        <input
-          type="checkbox"
-          checked={autoBindGlobal}
-          onChange={(e) => { onAutoBindGlobalChange(e.target.checked); }}
+      {/* Each block is a CARD with a heading, so the screen reads as three
+          answerable questions — which tab, which direction, which slot differs —
+          instead of one column of controls of equal weight. */}
+      <div className="tbs-settings__card">
+        <div className="tbs-settings__card-head">
+          <h3 className="tbs-settings__card-title">Which tab to switch to</h3>
+        </div>
+        <p className="tbs-settings__card-note">
+          Two sources can answer this, and the Priority setting breaks the tie when both can.
+        </p>
+        <MatchKnobs
+          idPrefix="Global"
+          settings={matchSettings}
+          onChange={onGlobalChange}
+          hints
         />
-        <span>Auto-bind switched tabs to their slot</span>
-      </label>
+      </div>
 
-      <h3>Per-Slot Override</h3>
-      <table className="tbs-settings__table" role="table" aria-label="Slot settings overrides">
-        <thead>
-          <tr>
-            <th scope="col">Slot</th>
-            <th scope="col">Strategy</th>
-            <th scope="col">Auto-bind</th>
-          </tr>
-        </thead>
-        <tbody>
+      <div className="tbs-settings__card">
+        <div className="tbs-settings__card-head">
+          <h3 className="tbs-settings__card-title">How switching behaves</h3>
+        </div>
+        <label className="tbs-settings__row">
+          <span>Switch Direction</span>
+          <select
+            aria-label="Switch Direction"
+            value={switchDirection}
+            onChange={(e) => { onDirectionChange(e.target.value as SwitchDirection); }}
+          >
+            <option value="previous">Previous Match</option>
+            <option value="next">Next Match</option>
+          </select>
+        </label>
+        <label className="tbs-settings__row">
+          <input
+            type="checkbox"
+            checked={autoBindGlobal}
+            onChange={(e) => { onAutoBindGlobalChange(e.target.checked); }}
+          />
+          <span>Auto-bind switched tabs to their slot</span>
+        </label>
+      </div>
+
+      <div className="tbs-settings__card">
+        <div className="tbs-settings__card-head">
+          <h3 className="tbs-settings__card-title">Per-slot overrides</h3>
+          <span className="tbs-settings__card-meta">{overriddenCount(slots)} of 10 customised</span>
+        </div>
+        <p className="tbs-settings__card-note">
+          Leave every slot on &ldquo;Inherit&rdquo; to use the settings above everywhere.
+        </p>
+        {/* Was a three-column table that stretched the full pane: the controls sat
+            far apart, the Custom expansion spilled into a squeezed cell, and on a
+            narrow window the columns collided. Rows carry the same information in
+            a fixed reading width, and the expansion opens on its own line. */}
+        <ul className="tbs-settings__slot-list">
           {Array.from({ length: 10 }, (_, i) => {
             const slotId = i + 1;
             const slot = slots.find((s) => s.id === slotId);
@@ -418,51 +480,71 @@ function StrategySection({
             const autoBindValue = override === undefined ? 'follow' : override ? 'on' : 'off';
             return (
               // T22/D9: the missing-icon repair entry reveals this exact row.
-              <tr key={slotId} data-testid={`slot-row-${String(slotId)}`}>
-                <td>Slot {slotId}</td>
-                <td>
-                  <select
-                    value={isCustom ? 'custom' : 'inherit'}
-                    onChange={(e) => {
-                      onSlotChange(
-                        slotId,
-                        e.target.value === 'inherit' ? 'inherit' : { ...matchSettings },
-                      );
-                    }}
-                    aria-label={`Strategy for slot ${slotId}`}
-                  >
-                    <option value="inherit">Inherit global</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                  {isCustom && (
+              <li
+                // The SAME predicate the header tally uses — an auto-bind-only
+                // override is an override, and the row must show that too.
+                className={`tbs-settings__slot-row${isSlotOverridden(slot) ? ' tbs-settings__slot-row--custom' : ''}`}
+                key={slotId}
+                data-testid={`slot-row-${String(slotId)}`}
+              >
+                <div className="tbs-settings__slot-row__head">
+                  {/* The NUMBER alone, never the page title. This list is the
+                      SLOT dimension: a slot overrides how switching works for
+                      whatever page it later holds, not for the tab it happens to
+                      be bound to right now. Appending the current page title
+                      ("Slot 3 — Docs") reads as "this row manages the Docs tab",
+                      which is a different — and wrong — mental model. The title
+                      belongs to the tab dimension, whose surfaces (the sidebar,
+                      the export list) already show it. */}
+                  <span className="tbs-settings__slot-row__name">{slotPlaceholder(slotId)}</span>
+                  <label className="tbs-settings__slot-row__field">
+                    <span>Strategy</span>
+                    <select
+                      value={isCustom ? 'custom' : 'inherit'}
+                      onChange={(e) => {
+                        onSlotChange(
+                          slotId,
+                          e.target.value === 'inherit' ? 'inherit' : { ...matchSettings },
+                        );
+                      }}
+                      aria-label={`Strategy for slot ${slotId}`}
+                    >
+                      <option value="inherit">Inherit global</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label className="tbs-settings__slot-row__field">
+                    <span>Auto-bind</span>
+                    <select
+                      value={autoBindValue}
+                      onChange={(e) => {
+                        onSlotAutoBindChange(
+                          slotId,
+                          e.target.value === 'follow' ? null : e.target.value === 'on',
+                        );
+                      }}
+                      aria-label={'Auto-bind for slot ' + String(slotId)}
+                    >
+                      <option value="follow">Follow global</option>
+                      <option value="on">Always on</option>
+                      <option value="off">Always off</option>
+                    </select>
+                  </label>
+                </div>
+                {isCustom && (
+                  <div className="tbs-settings__slot-row__detail">
                     <MatchKnobs
                       idPrefix={'Slot ' + String(slotId)}
                       settings={customSettings}
                       onChange={(next) => { onSlotChange(slotId, next); }}
                     />
-                  )}
-                </td>
-                <td>
-                  <select
-                    value={autoBindValue}
-                    onChange={(e) => {
-                      onSlotAutoBindChange(
-                        slotId,
-                        e.target.value === 'follow' ? null : e.target.value === 'on',
-                      );
-                    }}
-                    aria-label={'Auto-bind for slot ' + String(slotId)}
-                  >
-                    <option value="follow">Follow global</option>
-                    <option value="on">Always on</option>
-                    <option value="off">Always off</option>
-                  </select>
-                </td>
-              </tr>
+                  </div>
+                )}
+              </li>
             );
           })}
-        </tbody>
-      </table>
+        </ul>
+      </div>
     </section>
   );
 }
@@ -2924,6 +3006,23 @@ function editedSlotTitle(slot: Pick<SlotDefinition, 'uiMarker' | 'titleSnapshot'
 function slotLabel(id: number, title: string | null | undefined): string {
   const base = slotPlaceholder(id);
   return !title || title === base ? base : `${base} — ${title}`;
+}
+
+/**
+ * Does this slot deviate from the global strategy in EITHER of the two parts?
+ *
+ * One predicate, used by the row highlight AND the "N of 10 customised" tally,
+ * so the summary cannot disagree with the rows it summarises. Counting only the
+ * strategy reported "1 of 10 customised" beside two visibly non-inheriting rows
+ * — the kind of tally that teaches the reader to stop believing it.
+ */
+function isSlotOverridden(slot: SlotDefinition | undefined): boolean {
+  return (slot?.strategy ?? 'inherit') !== 'inherit' || slot?.autoBindOverride !== undefined;
+}
+
+/** How many of the ten slot rows deviate from the global strategy. */
+function overriddenCount(slots: SlotDefinition[]): number {
+  return slots.filter((s) => isSlotOverridden(s)).length;
 }
 
 /**
