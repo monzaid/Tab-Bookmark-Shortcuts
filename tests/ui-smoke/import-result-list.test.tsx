@@ -27,6 +27,12 @@ const FULL_RESULT: ImportApplyResult = {
   success: true,
   configVersion: 6,
   counts: { added: 2, replaced: 1, kept: 3, deleted: 4, skipped: 5 },
+  dimensions: {
+    slots: { changed: 2, failed: 0 },
+    rules: { changed: 3, failed: 1 },
+    settings: { changed: 1, failed: 0 },
+    shortcuts: { changed: 1, failed: 0 },
+  },
   tolerant: [
     { kind: 'unknown-field', detail: 'futureTopLevel' },
     { kind: 'unknown-field', detail: 'rules[0].mystery' },
@@ -48,6 +54,12 @@ const EMPTY_RESULT: ImportApplyResult = {
   success: true,
   configVersion: 6,
   counts: { added: 0, replaced: 0, kept: 1, deleted: 0, skipped: 0 },
+  dimensions: {
+    slots: { changed: 0, failed: 0 },
+    rules: { changed: 0, failed: 0 },
+    settings: { changed: 0, failed: 0 },
+    shortcuts: { changed: 0, failed: 0 },
+  },
   tolerant: [],
   domainViolations: [],
   missingIcons: [],
@@ -152,10 +164,27 @@ describe('T22 — import result list', () => {
     vi.clearAllMocks();
   });
 
-  it('renders the success counts', async () => {
+  it('renders the outcome counts', async () => {
     const view = await applyImport(FULL_RESULT);
     expect(within(view).getByTestId('import-result-count-added').textContent).toMatch(/2/);
     expect(within(view).getByTestId('import-result-count-deleted').textContent).toMatch(/4/);
+  });
+
+  it('reports what changed PER DIMENSION, including the failures', async () => {
+    // The counts above are record-status tallies (added/replaced/kept/…). They do
+    // not tell the user which DIMENSION moved, and they carry no failure at all:
+    // a rule the domain rejected and a shortcut the browser refused were both
+    // invisible. The per-dimension rows are that answer.
+    const view = await applyImport(FULL_RESULT);
+
+    expect(within(view).getByTestId('import-result-dim-slots').textContent).toMatch(/2/);
+    // rules: 3 changed AND 1 failed (the fixture's rejected rule) — the failure
+    // must be on the row, not folded into the success count.
+    const rules = within(view).getByTestId('import-result-dim-rules').textContent ?? '';
+    expect(rules).toMatch(/3/);
+    expect(rules).toMatch(/1/);
+    expect(rules).toMatch(/fail/i);
+    expect(within(view).getByTestId('import-result-dim-shortcuts').textContent).toMatch(/1/);
   });
 
   it('keeps domain violations SEPARATE from tolerant items, and non-dismissible (D15)', async () => {

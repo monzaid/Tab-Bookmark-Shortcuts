@@ -160,6 +160,12 @@ describe('T14a: import/export protocol — three new actions', () => {
       success: true,
       configVersion: 2,
       counts: { added: 0, replaced: 0, kept: 0, deleted: 0, skipped: 0 },
+      dimensions: {
+        slots: { changed: 0, failed: 0 },
+        rules: { changed: 0, failed: 0 },
+        settings: { changed: 0, failed: 0 },
+        shortcuts: { changed: 0, failed: 0 },
+      },
       tolerant: [],
       domainViolations: [],
       missingIcons: [],

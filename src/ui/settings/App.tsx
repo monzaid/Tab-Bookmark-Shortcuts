@@ -11,14 +11,19 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
 import { Button, Toast, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
+import { Tabs } from '@ui/shared/tabs';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportRecordOverride, ImportApplyResult, ImportDiff, ImportRecordStatus, DimensionPresence, DimensionMode, ExportScope, SyncState } from '@shared/types';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportRecordOverride, ImportApplyResult, ImportDiff, ImportRecordDiff, ImportRecordStatus, ImportPartDiff, DimensionPresence, DimensionMode, ExportScope, SyncState, UrlMatchType } from '@shared/types';
+import { MATCH_TYPE_LABELS } from '@shared/match-type-labels';
+import { RecordList, RecordFields } from '@ui/shared/record-list';
+import { previewFromIconSource, previewFromFieldValue } from '@ui/shared/icon-preview';
+import type { IconPreviewSource } from '@ui/shared/icon-preview';
 import type { StatusBadgeProps } from '@ui/shared/components';
 import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
 import { applyIntent, computeDiff, quantifyDeletions } from '@shared/import-diff';
-import { isExportPackage } from '@shared/export-package';
-import type { ExportPackage } from '@shared/export-package';
+import { isExportPackage, summariseMatchSettings, summariseStrategy, slotStrategyPartId, slotAutoBindPartId } from '@shared/export-package';
+import type { ExportPackage, SettingPartId } from '@shared/export-package';
 
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import { FieldEditor } from '@ui/shared/field-editor';
@@ -34,7 +39,7 @@ import { UndoBar } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
 import { getMessageClient } from '@ui/shared/message-client';
-import { formatFieldDiffLine } from '@ui/shared/import-field-format';
+import { formatFieldValue } from '@ui/shared/import-field-format';
 import { MatchSettingsHelp } from './MatchSettingsHelp';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -46,6 +51,24 @@ interface CommandInfo {
 }
 
 type SettingsSection = 'slots' | 'rules' | 'strategy' | 'dashboard' | 'import-export' | 'diagnostics';
+
+/**
+ * The minimal `storage.onChanged` surface this page needs.
+ *
+ * Declared as a RUNTIME-PROBED local shape rather than read straight off the
+ * ambient `chrome` types: outside an extension context the namespace can be
+ * absent (`typeof chrome === 'undefined'`), which the ambient types do not
+ * model, so a direct optional-chain would be flagged as an unnecessary check —
+ * and dropping the probe would throw in exactly the case it guards.
+ */
+type StorageChangeListener = (
+  changes: Record<string, chrome.storage.StorageChange>,
+  areaName: string,
+) => void;
+interface StorageOnChangedApi {
+  addListener: (fn: StorageChangeListener) => void;
+  removeListener: (fn: StorageChangeListener) => void;
+}
 
 /** Sortable column keys for the Page Rules table (Q11: no `mode` column). */
 type SortKey = 'urlMatch' | 'title' | 'priority' | 'enabled';
@@ -2116,8 +2139,8 @@ function DashboardSection() {
       {undoState && (
         <UndoBar
           state={undoState}
-          onUndo={(snapshot) => void handleUndo(snapshot)}
-          onExpire={() => setUndoState(null)}
+          onUndo={(snapshot) => { void handleUndo(snapshot); }}
+          onExpire={() => { setUndoState(null); }}
         />
       )}
 
@@ -2161,17 +2184,33 @@ function downloadPackage(pkg: string): void {
  * T19-C: a selected record dimension can be expanded and its records
  * individually deselected (`scope.excludedSlotIds` / `excludedRuleIds`).
  */
-function ExportSection() {
+function ExportSection({
+  refreshToken = 0,
+  onRefreshed,
+}: {
+  /** Bumped by the floating refresh button to force a re-read. */
+  refreshToken?: number;
+  /** Called once a re-read (auto or manual) has landed. */
+  onRefreshed?: () => void;
+} = {}) {
   const [checked, setChecked] = useState<Record<keyof DimensionPresence, boolean>>({
     slots: false, rules: false, settings: false, shortcuts: false,
   });
   /** T19-C: per-record deselection inside a selected dimension (D1). */
   const [excludedSlots, setExcludedSlots] = useState<number[]>([]);
   const [excludedRules, setExcludedRules] = useState<string[]>([]);
+  /** The settings PARTS the user left out (see `ExportScope`). */
+  const [excludedSettings, setExcludedSettings] = useState<string[]>([]);
+  /** Shortcut bindings (by command name) the user left out. */
+  const [excludedShortcuts, setExcludedShortcuts] = useState<string[]>([]);
   /**
    * The records a package could carry, from the SAME GET_STATE snapshot the
    * import section uses (one source of truth, one fetch per surface). `null`
    * means the read failed — expansion is then simply not offered.
+   *
+   * `slots` / `rules` arrive with their icons ALREADY dereferenced and their
+   * recipes materialised by the storage read path, so a row can render a
+   * preview straight from `uiMarker.icon.value` / `favicon.value`.
    */
   const [records, setRecords] = useState<{
     slots: SlotDefinition[];
@@ -2180,49 +2219,193 @@ function ExportSection() {
     switchDirection: SwitchDirection;
     autoBindGlobal: boolean;
   } | null>(null);
+  /**
+   * The browser's own command bindings, read for the shortcut list.
+   * `null` = not read yet or the read failed, in which case the dimension
+   * carries nothing — the same outcome as a bound-less machine.
+   */
+  const [commands, setCommands] = useState<Array<{ name: string; shortcut: string | null }> | null>(null);
   const [pkg, setPkg] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
-  useEffect(() => {
-    void (async () => {
-      try {
-        const res = await sendMessage('GET_STATE');
-        const result = extractResult(res);
-        const sync = result?.success
-          ? (result.sync as {
-              slots?: SlotDefinition[];
-              rules?: PageRule[];
-              matchSettings?: MatchRuleSettings;
-              switchDirection?: SwitchDirection;
-              autoBindGlobal?: boolean;
-            } | undefined)
-          : undefined;
-        setRecords({
-          slots: sync?.slots ?? [],
-          rules: sync?.rules ?? [],
-          matchSettings: sync?.matchSettings ?? DEFAULT_MATCH_SETTINGS,
-          switchDirection: sync?.switchDirection ?? 'next',
-          autoBindGlobal: sync?.autoBindGlobal ?? true,
-        });
-      } catch {
-        setRecords(null);
+  /**
+   * Read the target machine's current state + command bindings.
+   *
+   * Extracted so it can run BOTH on mount and whenever the configuration changes
+   * underneath this panel. Without the re-read the lists showed the snapshot
+   * taken when the panel mounted, so a slot edited in the sidebar, a rule edited
+   * on the Rules section or a global setting changed here all left the export
+   * lists describing a state the machine no longer had.
+   */
+  const loadTargetState = useCallback(async () => {
+    try {
+      const res = await sendMessage('GET_STATE');
+      const result = extractResult(res);
+      const sync = result?.success
+        ? (result.sync as {
+            slots?: SlotDefinition[];
+            rules?: PageRule[];
+            matchSettings?: MatchRuleSettings;
+            switchDirection?: SwitchDirection;
+            autoBindGlobal?: boolean;
+          } | undefined)
+        : undefined;
+      setRecords({
+        slots: sync?.slots ?? [],
+        rules: sync?.rules ?? [],
+        matchSettings: sync?.matchSettings ?? DEFAULT_MATCH_SETTINGS,
+        switchDirection: sync?.switchDirection ?? 'next',
+        autoBindGlobal: sync?.autoBindGlobal ?? true,
+      });
+    } catch {
+      setRecords(null);
+    }
+    // The shortcut list is the ONLY dimension whose data is browser-owned, so
+    // it comes from its own action rather than the sync snapshot.
+    try {
+      const cmdRes = await sendMessage('GET_COMMANDS');
+      const cmdResult = extractResult(cmdRes);
+      if (cmdResult?.success && Array.isArray(cmdResult.commands)) {
+        setCommands(cmdResult.commands as Array<{ name: string; shortcut: string | null }>);
       }
-    })();
+    } catch {
+      // leaves `commands` null → the shortcut dimension carries nothing
+    }
   }, []);
 
+  useEffect(() => {
+    void loadTargetState().then(() => { onRefreshed?.(); });
+    // `refreshToken` is a dependency on purpose: the manual refresh re-runs this
+    // read. `onRefreshed` is intentionally NOT one — it is a callback whose
+    // identity may change on every render, which would turn this into an
+    // infinite re-read loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadTargetState, refreshToken]);
+
+  /**
+   * Follow configuration changes made ANYWHERE else.
+   *
+   * `storage.onChanged` is the one signal that covers every writer — the
+   * sidebar's slot edits, the Rules section, this page's own Global Strategy
+   * form and an import applied moments ago — because they all land in `sync`.
+   * The same listener the sidebar uses, for the same reason; polling or trusting
+   * a mount-time snapshot is what produced the stale values.
+   */
+  useEffect(() => {
+    const onChangedApi = (globalThis as unknown as {
+      chrome?: { storage?: { onChanged?: StorageOnChangedApi } };
+    }).chrome?.storage?.onChanged;
+    if (!onChangedApi) return;
+    const onChanged: StorageChangeListener = (changes, areaName) => {
+      if (areaName !== 'sync' && areaName !== 'local') return;
+      if (Object.keys(changes).length === 0) return;
+      void loadTargetState();
+    };
+    onChangedApi.addListener(onChanged);
+    // A belt-and-braces refresh: `onChanged` is the precise signal, but it can
+    // be missed while a Service Worker is asleep, and a stale list is exactly the
+    // defect this guards. Re-reading when the page regains focus is cheap and
+    // cannot drift — the read is the same one the change listener performs.
+    const onFocus = () => { void loadTargetState(); };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      onChangedApi.removeListener(onChanged);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [loadTargetState]);
+
   const anyChecked = (Object.keys(checked) as Array<keyof DimensionPresence>).some((d) => checked[d]);
+
+  /**
+   * The settings parts and shortcut bindings THAT EXIST on this machine.
+   *
+   * Only existing parts are offered: `slotAutoBinds` is sparse (a slot with no
+   * explicit override has no such setting to share), and a command without a
+   * binding is not a shortcut. Rendering the full cross-product instead would
+   * fill the lists with rows that carry nothing.
+   */
+  const settingParts = useMemo(() => {
+    if (!records) return [];
+    const parts: Array<{ id: SettingPartId; label: string; value: string }> = [
+      { id: 'matchSettings', label: 'Match settings', value: matchSettingsSummary(records.matchSettings) },
+      { id: 'switchDirection', label: 'Switch direction', value: records.switchDirection },
+      { id: 'autoBindGlobal', label: 'Auto-bind (global)', value: String(records.autoBindGlobal) },
+    ];
+    for (const slot of bySlotId(records.slots)) {
+      parts.push({
+        // The id constructors live in `shared` so the export panel, the diff and
+        // the intent all address a part by the same string.
+        id: slotStrategyPartId(slot.id),
+        label: `Slot ${String(slot.id)} strategy`,
+        value: strategyText(slot.strategy),
+      });
+      if (slot.autoBindOverride !== undefined) {
+        parts.push({
+          id: slotAutoBindPartId(slot.id),
+          label: `Slot ${String(slot.id)} auto-bind`,
+          value: String(slot.autoBindOverride),
+        });
+      }
+    }
+    return parts;
+  }, [records]);
+
+  const shortcutBindings = useMemo(
+    () => (commands ?? []).filter((c): c is { name: string; shortcut: string } => c.shortcut !== null),
+    [commands],
+  );
+
   const scope: ExportScope = {
     slots: checked.slots, rules: checked.rules, settings: checked.settings, shortcuts: checked.shortcuts,
     excludedSlotIds: excludedSlots, excludedRuleIds: excludedRules,
+    excludedSettingIds: excludedSettings, excludedShortcutNames: excludedShortcuts,
   };
 
-  const toggleExcluded = (kind: 'slot' | 'rule', id: number | string) => {
-    if (kind === 'slot') {
-      setExcludedSlots((prev) =>
-        prev.includes(id as number) ? prev.filter((x) => x !== id) : [...prev, id as number]);
-    } else {
-      setExcludedRules((prev) =>
-        prev.includes(id as string) ? prev.filter((x) => x !== id) : [...prev, id as string]);
+  /**
+   * Tick/untick one record, part or binding.
+   *
+   * The `allSelected` flag is passed IN rather than derived from the exclusion
+   * array: the list filters rows, so "all" means "all currently visible". The
+   * exclusion array must still be filled with the rows the user cannot see,
+   * otherwised a filtered select-all would silently include them.
+   */
+  const toggleExcluded = (kind: 'slot' | 'rule' | 'setting' | 'shortcut', id: number | string) => {
+    switch (kind) {
+      case 'slot':
+        setExcludedSlots((prev) =>
+          prev.includes(id as number) ? prev.filter((x) => x !== id) : [...prev, id as number]);
+        break;
+      case 'rule':
+        setExcludedRules((prev) =>
+          prev.includes(id as string) ? prev.filter((x) => x !== id) : [...prev, id as string]);
+        break;
+      case 'setting':
+        setExcludedSettings((prev) =>
+          prev.includes(id as string) ? prev.filter((x) => x !== id) : [...prev, id as string]);
+        break;
+      case 'shortcut':
+        setExcludedShortcuts((prev) =>
+          prev.includes(id as string) ? prev.filter((x) => x !== id) : [...prev, id as string]);
+        break;
+    }
+  };
+
+  /** Exclude/include EVERY id of a dimension in one go (the select-all control). */
+  const setExcludedAll = (kind: 'slot' | 'rule' | 'setting' | 'shortcut', allIds: string[], excludeAll: boolean) => {
+    const asNumbers = allIds.map(Number);
+    switch (kind) {
+      case 'slot':
+        setExcludedSlots(excludeAll ? asNumbers : []);
+        break;
+      case 'rule':
+        setExcludedRules(excludeAll ? allIds : []);
+        break;
+      case 'setting':
+        setExcludedSettings(excludeAll ? allIds : []);
+        break;
+      case 'shortcut':
+        setExcludedShortcuts(excludeAll ? allIds : []);
+        break;
     }
   };
 
@@ -2253,123 +2436,280 @@ function ExportSection() {
     }
   };
 
+  /**
+   * How many RECORDS a dimension would carry — shown only where a count is a
+   * real fact about the package.
+   *
+   * `settings` and `shortcuts` deliberately report `null` rather than a number:
+   * the settings dimension carries a fixed bundle of values (not a countable
+   * list), and the shortcut dimension has no producer at all. Printing "1" for
+   * either would be a number that answers nothing, so the card shows no count
+   * instead of a misleading one.
+   */
+  const dimensionCount = (dim: keyof DimensionPresence): number | null => {
+    if (dim === 'slots') return records?.slots.length ?? 0;
+    if (dim === 'rules') return records?.rules.length ?? 0;
+    return null;
+  };
+
+  const selectedCount = (Object.keys(checked) as Array<keyof DimensionPresence>).filter(
+    (d) => checked[d],
+  ).length;
+
   return (
-    <section data-testid="export-section" aria-label="Export">
-      <h3>Export</h3>
-      <p className="tbs-settings__hint">Choose what to include, then export a package.</p>
-      <ul className="tbs-settings__export-dims">
-        {DIMENSION_LABELS.map(({ dim, label }) => (
-          <li key={dim}>
-            <label>
+    <section data-testid="export-section" aria-label="Export" className="tbs-settings__panel">
+      <header className="tbs-settings__panel-head">
+        <h3 className="tbs-settings__panel-title">Build a package</h3>
+        <p className="tbs-settings__panel-sub">
+          Pick the parts to include, then create the file. Nothing is uploaded — the package is
+          written on this machine.
+        </p>
+      </header>
+
+      <fieldset className="tbs-settings__pick-grid">
+        <legend className="tbs-settings__pick-legend">What to include</legend>
+        {DIMENSION_LABELS.map(({ dim }) => {
+          const meta = DIMENSION_META[dim];
+          const count = dimensionCount(dim);
+          return (
+            <label
+              key={dim}
+              className={`tbs-settings__pick${checked[dim] ? ' tbs-settings__pick--on' : ''}`}
+            >
               <input
+                className="tbs-settings__pick-box"
                 type="checkbox"
                 data-testid={`export-dim-${dim}`}
                 checked={checked[dim]}
-                disabled={dim === 'shortcuts'}
                 onChange={(e) => {
                   const next = e.currentTarget.checked;
                   setChecked((prev) => ({ ...prev, [dim]: next }));
                 }}
               />
-              {label}
-            </label>
-            {/* T19-B: no shortcut producer exists yet (T22); say so rather
-                than exporting a dimension that would always be empty. */}
-            {dim === 'shortcuts' && (
-              <span className="tbs-settings__export-unavailable" data-testid="export-shortcuts-reason">
-                Shortcuts are not supported for export yet.
+              <span className="tbs-settings__pick-body">
+                <span className="tbs-settings__pick-title">{meta.title}</span>
+                <span className="tbs-settings__pick-blurb">{meta.blurb}</span>
               </span>
-            )}
-          </li>
-        ))}
-      </ul>
+              <span className="tbs-settings__pick-count">
+                {count === null ? '' : String(count)}
+              </span>
+            </label>
+          );
+        })}
+      </fieldset>
 
-      {/* T19-C: expand a selected record dimension and deselect individual
-          records (D1 "expand to record level"). */}
+      {/* The record dimensions use the SAME list component the import panel
+          uses, so "looks the same" is a construction guarantee rather than two
+          hand-kept renderers. The icon previews read straight from the
+          dereferenced GET_STATE values. */}
       {checked.slots && records !== null && (
-        <details className="tbs-settings__export-records" data-testid="export-records-slots">
-          <summary>Slots ({records.slots.length})</summary>
-          <ul>
-            {bySlotId(records.slots).map((slot) => (
-              <li key={slot.id}>
-                <label>
+        <section className="tbs-settings__pick-detail" data-testid="export-records-slots">
+          <h4 className="tbs-settings__pick-detail-title">Slots to include</h4>
+          <RecordList
+            label="Export slots"
+            testIdPrefix="export-slots"
+            rows={bySlotId(records.slots).map((slot) => ({
+              key: String(slot.id),
+              icon: previewFromIconSource(slot.uiMarker.icon),
+              // The title the user actually set (`uiMarker.customTitle`) wins over
+              // the save-time `titleSnapshot`. Showing the snapshot meant a rename
+              // made in the sidebar or the Data Dashboard was invisible here — the
+              // list kept reporting the page title captured when the slot was
+              // saved, which reads exactly like "the list never refreshed". The
+              // ORDER mirrors the read-side chain (`field-chain.ts`), so the list
+              // and the slot's own row agree on what this slot is called.
+              // `slotLabel` (not `slotRowLabel`): the export side holds a raw
+              // title, which may be empty and must then read as the bare number.
+              title: slotLabel(slot.id, editedSlotTitle(slot)),
+              matchUrl: slot.urlMatch.value,
+              matchType: slot.urlMatch.type,
+              searchText: `${editedSlotTitle(slot)} ${slot.titleSnapshot}`,
+              trailing: (
+                <label className="tbs-settings__import-take">
                   <input
                     type="checkbox"
                     data-testid={`export-record-slot-${String(slot.id)}`}
                     checked={!excludedSlots.includes(slot.id)}
+                    aria-label={`Include ${slotLabel(slot.id, editedSlotTitle(slot))}`}
                     onChange={() => { toggleExcluded('slot', slot.id); }}
                   />
-                  {slotLabel(slot.id, slot.titleSnapshot)}
+                  Include
                 </label>
-              </li>
-            ))}
-          </ul>
-        </details>
+              ),
+            }))}
+            selectAll={{
+              // The exclusions are the ONE source: "all selected" means nothing is
+              // excluded, not a second boolean that could drift from it.
+              allSelected: excludedSlots.length === 0,
+              someSelected: excludedSlots.length > 0
+                && records.slots.some((s) => !excludedSlots.includes(s.id)),
+              onToggleAll: (all) => {
+                setExcludedAll('slot', records.slots.map((s) => String(s.id)), !all);
+              },
+              noun: 'slots',
+            }}
+            emptyAll="No saved slots yet."
+          />
+        </section>
       )}
       {checked.rules && records !== null && (
-        <details className="tbs-settings__export-records" data-testid="export-records-rules">
-          <summary>Rules ({records.rules.length})</summary>
-          <ul>
-            {records.rules.map((rule) => (
-              <li key={rule.id}>
-                <label>
+        <section className="tbs-settings__pick-detail" data-testid="export-records-rules">
+          <h4 className="tbs-settings__pick-detail-title">Rules to include</h4>
+          <RecordList
+            label="Export rules"
+            testIdPrefix="export-rules"
+            rows={records.rules.map((rule) => ({
+              key: rule.id,
+              icon: previewFromIconSource(rule.favicon),
+              title: rule.title || rule.urlMatch.value,
+              matchUrl: rule.urlMatch.value,
+              matchType: rule.urlMatch.type,
+              priority: rule.priority,
+              trailing: (
+                <label className="tbs-settings__import-take">
                   <input
                     type="checkbox"
                     data-testid={`export-record-rule-${rule.id}`}
                     checked={!excludedRules.includes(rule.id)}
+                    aria-label={`Include ${rule.title || rule.urlMatch.value}`}
                     onChange={() => { toggleExcluded('rule', rule.id); }}
                   />
-                  {rule.title || rule.urlMatch.value}
+                  Include
                 </label>
+              ),
+            }))}
+            selectAll={{
+              allSelected: records.rules.length > 0 && excludedRules.length === 0,
+              someSelected: excludedRules.length > 0
+                && records.rules.some((r) => !excludedRules.includes(r.id)),
+              onToggleAll: (all) => {
+                setExcludedAll('rule', records.rules.map((r) => r.id), !all);
+              },
+              noun: 'rules',
+            }}
+            emptyAll="No page rules yet."
+          />
+        </section>
+      )}
+
+      {/* Settings is broken into its PARTS, so a user can share the global
+          behaviour without shipping every per-slot override with it. Only parts
+          that exist on this machine are listed (a slot with no explicit auto-bind
+          override has no such part to share). */}
+      {checked.settings && records !== null && settingParts.length > 0 && (
+        <section className="tbs-settings__pick-detail" data-testid="export-records-settings">
+          <h4 className="tbs-settings__pick-detail-title">Settings to include</h4>
+          <ul className="tbs-settings__parts-list" data-testid="export-settings-values">
+            {settingParts.map((part) => (
+              <li key={part.id} data-testid={`export-setting-${part.id}`}>
+                <label className="tbs-settings__import-take">
+                  <input
+                    type="checkbox"
+                    data-testid={`export-part-${part.id}`}
+                    checked={!excludedSettings.includes(part.id)}
+                    aria-label={`Include ${part.label}`}
+                    onChange={() => { toggleExcluded('setting', part.id); }}
+                  />
+                  {part.label}
+                </label>
+                <span className="tbs-settings__part-value">{part.value}</span>
               </li>
             ))}
           </ul>
-        </details>
+          <div className="tbs-settings__parts-actions">
+            <Button
+              size="sm"
+              variant="ghost"
+              data-testid="export-settings-select-all"
+              onClick={() => {
+                setExcludedAll(
+                  'setting',
+                  settingParts.map((p) => p.id),
+                  excludedSettings.length === 0,
+                );
+              }}
+            >
+              {excludedSettings.length === 0 ? 'Clear all settings' : 'Select all settings'}
+            </Button>
+          </div>
+        </section>
       )}
 
-      {/* T19-C / 7a: the settings dimension has VALUES too — expand to see what
-          would be carried (the current machine's globals + each slot's strategy). */}
-      {checked.settings && records !== null && (
-        <details className="tbs-settings__export-records" data-testid="export-records-settings">
-          <summary>Settings</summary>
-          <ul data-testid="export-settings-values">
-            <li data-testid="export-setting-match-settings">
-              Match settings: {matchSettingsSummary(records.matchSettings)}
-            </li>
-            <li data-testid="export-setting-switch-direction">Switch direction: {records.switchDirection}</li>
-            <li data-testid="export-setting-auto-bind">Auto-bind: {String(records.autoBindGlobal)}</li>
-            {records.slots.length > 0 && (
-              <li data-testid="export-setting-slot-strategies">
-                Per-slot strategies:
-                <ul>
-                  {bySlotId(records.slots).map((slot) => (
-                    <li key={slot.id} data-testid={`export-slot-strategy-${String(slot.id)}`}>
-                      {`Slot ${String(slot.id)}: ${strategyText(slot.strategy)}`}
-                    </li>
-                  ))}
-                </ul>
-              </li>
-            )}
-          </ul>
-        </details>
+      {/* The shortcut dimension now has real data (the browser's own bindings)
+          and the same per-binding granularity. */}
+      {checked.shortcuts && (
+        <section className="tbs-settings__pick-detail" data-testid="export-records-shortcuts">
+          <h4 className="tbs-settings__pick-detail-title">Shortcuts to include</h4>
+          {shortcutBindings.length === 0 ? (
+            <p className="tbs-settings__hint" data-testid="export-shortcuts-none">
+              No keyboard shortcuts are set on this browser yet.
+            </p>
+          ) : (
+            <>
+              <ul className="tbs-settings__parts-list" data-testid="export-shortcuts-values">
+                {shortcutBindings.map((binding) => (
+                  <li key={binding.name} data-testid={`export-shortcut-${binding.name}`}>
+                    <label className="tbs-settings__import-take">
+                      <input
+                        type="checkbox"
+                        data-testid={`export-part-shortcut-${binding.name}`}
+                        checked={!excludedShortcuts.includes(binding.name)}
+                        aria-label={`Include ${binding.name}`}
+                        onChange={() => { toggleExcluded('shortcut', binding.name); }}
+                      />
+                      {binding.name}
+                    </label>
+                    <span className="tbs-settings__part-value">
+                      <kbd>{binding.shortcut}</kbd>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <div className="tbs-settings__parts-actions">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  data-testid="export-shortcuts-select-all"
+                  onClick={() => {
+                    setExcludedAll(
+                      'shortcut',
+                      shortcutBindings.map((b) => b.name),
+                      excludedShortcuts.length === 0,
+                    );
+                  }}
+                >
+                  {excludedShortcuts.length === 0 ? 'Clear all shortcuts' : 'Select all shortcuts'}
+                </Button>
+              </div>
+            </>
+          )}
+        </section>
       )}
 
-      {!anyChecked && (
-        <p className="tbs-settings__hint" data-testid="export-empty-reason">
-          Select at least one dimension to export.
+      {/* The action row is the LAST thing in reading order and states the
+          consequence of the current selection, so "nothing chosen" is explained
+          next to the control it disables rather than floating above it. */}
+      <footer className="tbs-settings__panel-foot">
+        <p
+          className="tbs-settings__panel-status"
+          data-testid={anyChecked ? undefined : 'export-empty-reason'}
+          aria-live="polite"
+        >
+          {anyChecked
+            ? `${String(selectedCount)} of 4 parts selected`
+            : 'Select at least one part to export.'}
         </p>
-      )}
-
-      <Button
-        size="md"
-        variant="primary"
-        data-testid="export-submit"
-        disabled={!anyChecked}
-        loading={exporting}
-        onClick={() => { void handleExport(); }}
-      >
-        Export
-      </Button>
+        <Button
+          size="md"
+          variant="primary"
+          data-testid="export-submit"
+          disabled={!anyChecked}
+          loading={exporting}
+          onClick={() => { void handleExport(); }}
+        >
+          Create package
+        </Button>
+      </footer>
 
       {pkg && summary && (
         <div
@@ -2378,7 +2718,7 @@ function ExportSection() {
           role="region"
           aria-label="Export package summary"
         >
-          <h4>Package summary</h4>
+          <h4>Package ready</h4>
           <ul>
             <li>Slots: {summary.slots}</li>
             <li>Rules: {summary.rules}</li>
@@ -2401,6 +2741,19 @@ const DIMENSION_LABELS: ReadonlyArray<{ dim: keyof DimensionPresence; label: str
   { dim: 'settings', label: 'Settings' },
   { dim: 'shortcuts', label: 'Shortcuts' },
 ];
+
+/**
+ * The pick cards' prose. Both surfaces ask the same four questions ("what is
+ * this part, and what does taking it do?"), so the wording lives in ONE table —
+ * a second copy would drift and the two panels would describe the same
+ * dimension differently.
+ */
+const DIMENSION_META: Record<keyof DimensionPresence, { title: string; blurb: string }> = {
+  slots: { title: 'Slots', blurb: 'Saved tab positions and their names' },
+  rules: { title: 'Rules', blurb: 'Title and icon rewrites for matching pages' },
+  settings: { title: 'Settings', blurb: 'Matching behaviour, switch direction and auto-bind' },
+  shortcuts: { title: 'Shortcuts', blurb: 'Keyboard bindings for your slots' },
+};
 
 /**
  * A record's diff status as a badge. Import is irreversible, so "what will be
@@ -2428,14 +2781,17 @@ const RECORD_BADGE: Record<ImportRecordStatus, StatusBadgeProps['status']> = {
 const DEFAULT_INTENT: ImportIntent = defaultImportIntent();
 
 /**
- * The intent a freshly chosen file starts from: accept every applicable record
- * (all rows checked), so the user DECLINES what they do not want instead of
- * ticking each one.
+ * The intent a freshly chosen file starts from: accept EVERY record (all rows
+ * checked), so the user DECLINES what they do not want instead of ticking each
+ * one.
  *
- * Applicability is decided by the diff against the LIVE state: `added` cannot
- * honour `keep` (the file's own records are always applied), so it gets no
- * override. Without a usable current state there is no diff to read this from,
- * so the plain default (no overrides) stands.
+ * Every row is seeded, `added` included — the diff honours a `take` on a
+ * file-only row (it stays `added`) and a `keep` on it (it is not created), so
+ * the seeded state and the rendered state agree row by row. A row left unseeded
+ * would render unchecked and look like a decision the user never made.
+ *
+ * Without a usable current state there is no diff to read this from, so the
+ * plain default (no overrides) stands.
  *
  * The fallback returns a FRESH object rather than the shared {@link DEFAULT_INTENT}
  * constant: the intent lives in state and callers edit it, so handing out one
@@ -2445,7 +2801,6 @@ function defaultIntentFor(pkg: ExportPackage | null, current: SyncState | null):
   if (!pkg || !current) return defaultImportIntent();
   const diff = computeDiff(pkg, current, DEFAULT_INTENT);
   const allTake: ImportRecordOverride[] = diff.records
-    .filter((r) => r.status !== 'added')
     .map((r) => ({ kind: r.kind, id: r.id, action: 'take' }));
   return { ...DEFAULT_INTENT, recordOverrides: allTake };
 }
@@ -2464,20 +2819,165 @@ function slotPlaceholder(id: number): string {
  * The diff's own label ALREADY falls back to `Slot N` when a record has no
  * title, so that placeholder must not be repeated (`Slot 5 — Slot 5`).
  */
+// ─── Import row cells (they describe the TARGET MACHINE) ─────────────────────
+//
+// Every cell of an import row answers "what does this machine have right now?".
+// The file's version of a field is shown in the row's Fields detail as
+// `<target> → <imported>`, and nowhere else — reading the file into the row made
+// a record the machine already had look as though its title, Match URL or Match
+// Type had come from the package.
+
+/**
+ * The icon of the record AS IT STANDS ON THIS MACHINE.
+ *
+ * The list answers ONE question — "what does this machine have right now?" — so
+ * every cell is read from the machine's side (`before`) and NEVER from the
+ * package. A record the machine does not have (`added`) therefore shows NO icon:
+ * the file's icon would be a value the machine has never held, presented as
+ * though it were current. The file's side is reported in the Fields detail.
+ */
+function importRowIcon(r: ImportRecordDiff): IconPreviewSource {
+  return previewFromFieldValue(r.before?.icon ?? null);
+}
+
+/**
+ * The machine's title for the record.
+ *
+ * `Slot N` is used when the machine has nothing to name, because the slot NUMBER
+ * is machine-side identity (slots are the fixed set 1–10), not a value from the
+ * file. A rule has no such number, so a rule the machine does not have shows no
+ * title at all — its file-side name lives in the Fields detail, where the
+ * incoming values belong.
+ */
+function importRowTitle(r: ImportRecordDiff): string {
+  if (r.before === null || r.before === undefined) {
+    return r.kind === 'slot' ? slotPlaceholder(Number(r.id)) : '';
+  }
+  // A rule with no title of its own falls back to its OWN match URL — still a
+  // machine value, which is the only kind this list may show.
+  const raw = textOf(r.before.title)
+    || (r.kind === 'slot' ? slotPlaceholder(Number(r.id)) : textOf(r.before.urlMatch));
+  return r.kind === 'slot' ? slotRowLabel(Number(r.id), raw) : raw;
+}
+
+/** The machine's Match URL (empty when there is no record to describe). */
+function importRowMatchUrl(r: ImportRecordDiff): string {
+  return textOf(r.before?.urlMatch ?? null);
+}
+
+/**
+ * A facet as plain text, with "no value" becoming an empty string.
+ *
+ * `formatFieldValue` answers `'None'` for a missing value because it renders a
+ * DIFF LINE, where the word is meaningful ("Icon: None"). Used as a cell value it
+ * would print the word itself — the bug that produced a slot titled
+ * "Slot 1 — None".
+ */
+function textOf(value: import('@shared/types').ImportFieldValue | null): string {
+  if (value === null || value.kind !== 'text') return '';
+  return value.value;
+}
+
+/**
+ * The machine's Match Type, as the contract value the list expects.
+ *
+ * `null` when the machine has no record to read — NOT `'exact'`. Defaulting to
+ * `exact` would put a machine value on screen that the machine never had, and
+ * would make an `added` row look as though its match type were already `exact`.
+ * The record list renders `—` for an unknown type (the same convention the field
+ * detail uses), so "no record, nothing to say" stays distinguishable from
+ * "a record whose type is Exact URL".
+ */
+function importRowMatchType(r: ImportRecordDiff): UrlMatchType | null {
+  const value = r.before?.matchType?.kind === 'text' ? r.before.matchType.value : '';
+  return (Object.keys(MATCH_TYPE_LABELS) as UrlMatchType[]).find(
+    (type) => MATCH_TYPE_LABELS[type] === value,
+  ) ?? null;
+}
+
 function slotRowLabel(id: number, label: string): string {
   const base = slotPlaceholder(id);
   return label === base ? base : `${base} — ${label}`;
 }
 
 /**
- * The same identity for the export list, which holds a title rather than a label.
- * Uses the SAME exact-equality rule as {@link slotRowLabel}: a falsy check alone
- * would still repeat the placeholder when a title happens to equal it, and two
- * rules for one "do not repeat the number" rule can drift apart.
+ * The export list's identity, where the input is a free-form TITLE rather than
+ * the diff's already-fallback-composed label — so an empty title must collapse
+ * to the bare number instead of producing "Slot 1 — ". Both helpers share the
+ * exact-equality rule so neither repeats a title that happens to BE the
+ * placeholder.
  */
+/**
+ * The title a slot CURRENTLY shows.
+ *
+ * `uiMarker.customTitle` is the user's own edit (set from the sidebar or the
+ * Data Dashboard); `titleSnapshot` is only the page title captured when the slot
+ * was saved, and it goes stale the moment the slot is renamed. Reading the
+ * snapshot made an edited slot look unchanged — the order here mirrors the
+ * read-side chain in `field-chain.ts` (`customTitle` then `titleSnapshot`) so the
+ * two surfaces cannot describe the same slot by different names.
+ */
+function editedSlotTitle(slot: Pick<SlotDefinition, 'uiMarker' | 'titleSnapshot'>): string {
+  return slot.uiMarker.customTitle?.trim() || slot.titleSnapshot;
+}
+
 function slotLabel(id: number, title: string | null | undefined): string {
   const base = slotPlaceholder(id);
   return !title || title === base ? base : `${base} — ${title}`;
+}
+
+/**
+ * A stable fingerprint of everything the review surface SHOWS about a diff.
+ *
+ * Used to decide whether a version conflict actually invalidated the user's
+ * review: a conflict is only worth refusing if the reviewed outcome moved. The
+ * signature covers the rows and their statuses plus the settings/shortcut parts
+ * — exactly what the panel renders — and deliberately nothing else, so a bump
+ * that changed no visible outcome (a clock stamp on an unrelated record, a write
+ * to a dimension this file does not carry) does not force a re-review.
+ */
+function diffSignature(diff: ImportDiff): string {
+  const records = diff.records
+    .map((r) => `${r.kind}:${String(r.id)}:${r.status}`)
+    .sort()
+    .join('|');
+  const settings = (diff.settingsParts ?? [])
+    .map((p) => `${p.id}:${p.status}`)
+    .sort()
+    .join('|');
+  const shortcuts = (diff.shortcutParts ?? [])
+    .map((p) => `${p.id}:${p.status}`)
+    .sort()
+    .join('|');
+  return `${records}#${settings}#${shortcuts}`;
+}
+
+/**
+ * A one-line report of what an APPLY actually did, per dimension.
+ *
+ * Built from the SERVER's own outcome (`ImportApplyResult.dimensions`) rather
+ * than re-counted from the UI's diff: the shortcut bindings are written in the
+ * background and the UI cannot observe them at all, and a second count here
+ * would be free to disagree with the write. Dimensions the file did not carry
+ * are omitted (the outcome reports 0/0 for them, which is "nothing to say",
+ * not "nothing changed").
+ *
+ * `failed` is never folded into `changed`: a record the domain rejected, or a
+ * shortcut the platform refused, must be visible as a failure.
+ */
+function summariseApplied(result: ImportApplyResult | null): string {
+  if (result === null) return 'Import applied.';
+  const parts: string[] = [];
+  const failures: string[] = [];
+  for (const { dim } of DIMENSION_LABELS) {
+    const outcome = result.dimensions[dim];
+    if (outcome.changed > 0) parts.push(`${String(outcome.changed)} ${DIMENSION_META[dim].title}`);
+    if (outcome.failed > 0) failures.push(`${String(outcome.failed)} ${DIMENSION_META[dim].title}`);
+  }
+  const changed = parts.length > 0 ? `Updated ${parts.join(', ')}.` : 'No changes were needed.';
+  return failures.length > 0
+    ? `${changed} ${failures.join(', ')} could not be applied.`
+    : changed;
 }
 
 /**
@@ -2488,85 +2988,261 @@ function bySlotId<T extends { id: number | string }>(rows: readonly T[]): T[] {
   return [...rows].sort((a, b) => Number(a.id) - Number(b.id));
 }
 
-/** A compact, human summary of a match-settings triple (never `[object Object]`). */
-function matchSettingsSummary(s: MatchRuleSettings): string {
-  return `Tab ID ${s.tabIdMode}, Rule check ${s.ruleCheckMode}, Priority ${s.priority}`;
-}
+/**
+ * Both summaries now live in `@shared/export-package` (`summariseMatchSettings`
+ * / `summariseStrategy`) because the settings-part diff rows in `import-diff.ts`
+ * render the SAME values. Two spellings of one triple is the drift a single
+ * source exists to prevent, so these are aliases rather than re-implementations.
+ */
+const matchSettingsSummary = summariseMatchSettings;
+const strategyText = summariseStrategy;
 
 /**
- * A per-slot strategy as text. `undefined` is NOT an explicit `'inherit'`: absent
- * means the package carries no strategy for that slot (the target is left alone),
- * while an explicit `'inherit'` resets the target to inherit. `strict` alone does
- * not flag a missed index (`noUncheckedIndexedAccess` is off), so callers must
- * test membership explicitly instead of trusting a falsy index read.
+ * The settings dimension's PARTS as take-checkbox rows.
+ *
+ * The rows come from `diff.settingsParts` — the same derivation the server uses
+ * to decide what to write — so a row's checkbox can never disagree with what the
+ * apply would do. Only parts the FILE carries are listed: a part the file omits
+ * is not applied, so a checkbox for it would be a control that does nothing.
+ *
+ * The visible text follows the established `current → file` vocabulary (7a),
+ * with the same test anchors as before so the value-comparison coverage that
+ * already existed keeps its grip.
  */
-function strategyText(v: 'inherit' | MatchRuleSettings | undefined): string {
-  if (v === undefined) return 'inherit (by default)';
-  if (v === 'inherit') return 'inherit';
-  return matchSettingsSummary(v);
-}
-
-/** `label: current → file`, or `label: unchanged` when equal (the field-row vocabulary). */
-function valueDiffLine(label: string, current: string, file: string): string {
-  return current === file ? `${label}: unchanged` : `${label}: ${current} → ${file}`;
-}
+const SETTINGS_PART_TESTIDS: Record<string, string> = {
+  matchSettings: 'import-setting-match-settings',
+  switchDirection: 'import-setting-switch-direction',
+  autoBindGlobal: 'import-setting-auto-bind',
+};
 
 /**
- * The settings dimension's VALUE comparison (7a). Values only — settings records
- * have no diff status, so no badge is invented. Takes non-null arguments so the
- * per-slot map never reads `pkg`/`current` through a closure (which would not be
- * narrowed by TypeScript).
+ * The shortcut bindings the file carries, as take-checkbox rows.
+ *
+ * Kept separate from `ImportSettingsParts` because the two address different
+ * intent fields (`takeSettingIds` vs `takeShortcutNames`) and use a different id
+ * space, but they render the SAME row shape — a shared `ImportPartRow` would
+ * have been a third abstraction for two call sites, so the rows are written out
+ * and kept deliberately identical in structure.
  */
-function ImportSettingsValues({
-  pkgSettings,
-  current,
+/**
+ * The `id` a select-all passes to mean "every row of this dimension".
+ *
+ * A sentinel rather than a loop of per-row calls: one state update means the
+ * rows and the control cannot be observed mid-flight disagreeing, and the
+ * allow-list is written in one place.
+ */
+const allPartsSentinel = '__all__';
+
+/**
+ * The per-dimension select-all for the settings / shortcut rows.
+ *
+ * The record lists get this from `RecordList`, but the settings and shortcut
+ * dimensions are not records — they are parts of one dimension — so they need
+ * the same control here rather than a second, differently-shaped one. State is
+ * read from the intent (`undefined` = take everything), which is the same single
+ * source the individual checkboxes use, so the two can never disagree.
+ */
+function PartsSelectAll({
+  ids,
+  taken,
+  onToggleAll,
+  noun,
 }: {
-  pkgSettings: NonNullable<ExportPackage['settings']>;
-  current: SyncState;
+  ids: string[];
+  taken: (id: string) => boolean;
+  onToggleAll: (take: boolean) => void;
+  /** Plural noun for the label, e.g. "settings". */
+  noun: string;
 }) {
+  const allTaken = ids.length > 0 && ids.every(taken);
+  const someTaken = !allTaken && ids.some(taken);
   return (
-    <div className="tbs-settings__import-settings-values" data-testid="import-settings-values">
-      <ul>
-        <li data-testid="import-setting-match-settings">
-          {valueDiffLine(
-            'Match settings',
-            matchSettingsSummary(current.matchSettings),
-            matchSettingsSummary(pkgSettings.matchSettings),
-          )}
-        </li>
-        <li data-testid="import-setting-switch-direction">
-          {valueDiffLine('Switch direction', current.switchDirection, pkgSettings.switchDirection)}
-        </li>
-        <li data-testid="import-setting-auto-bind">
-          {valueDiffLine('Auto-bind', String(current.autoBindGlobal), String(pkgSettings.autoBindGlobal))}
-        </li>
-        {/* Per-slot strategy: join the file's Record (EXPLICIT overrides only)
-            against the target's slot. Membership is tested explicitly — a falsy
-            index read cannot tell "absent" from an explicit value
-            (`strict` alone does not, since `noUncheckedIndexedAccess` is off). */}
-        {current.slots.length > 0 && (
-          <li data-testid="import-setting-slot-strategies">
-            Per-slot strategies:
-            <ul>
-              {bySlotId(current.slots).map((slot) => {
-                const fromFile = Object.prototype.hasOwnProperty.call(pkgSettings.slotStrategies, slot.id)
-                  ? pkgSettings.slotStrategies[slot.id]
-                  : undefined;
-                return (
-                  <li key={slot.id} data-testid={`import-slot-strategy-${String(slot.id)}`}>
-                    {`Slot ${String(slot.id)}: ${strategyText(slot.strategy)} → ${strategyText(fromFile)}`}
-                  </li>
-                );
-              })}
-            </ul>
-          </li>
-        )}
+    <label className="tbs-record-list__select-all">
+      <input
+        type="checkbox"
+        data-testid={`import-${noun}-select-all`}
+        checked={allTaken}
+        ref={(el) => {
+          if (el) el.indeterminate = someTaken;
+        }}
+        // The control is a VIEW of the rows, so it does not toggle the
+        // "everything" value: when every row is taken it CLEARS them all, and in
+        // any other state (some or none) it takes them all. Reading
+        // `e.currentTarget.checked` would be wrong precisely in the
+        // indeterminate case, where the browser reports `checked === true` while
+        // the box is drawn as a dash.
+        onChange={() => { onToggleAll(!allTaken); }}
+      />
+      {allTaken ? `Clear all ${noun}` : `Select all ${noun}`}
+    </label>
+  );
+}
+
+function ImportShortcutParts({
+  parts,
+  intent,
+  onToggle,
+  onToggleAll,
+}: {
+  parts: ImportPartDiff[];
+  intent: ImportIntent;
+  onToggle: (name: string, take: boolean) => void;
+  /** Take or clear EVERY row at once (the per-dimension select-all). */
+  onToggleAll: (take: boolean) => void;
+}) {
+  if (parts.length === 0) return null;
+  const taken = (id: string): boolean =>
+    intent.takeShortcutNames === undefined || intent.takeShortcutNames.includes(id);
+  return (
+    <div className="tbs-settings__parts" data-testid="import-shortcuts-values">
+      <PartsSelectAll
+        ids={parts.map((p) => p.id)}
+        taken={taken}
+        onToggleAll={onToggleAll}
+        noun="shortcuts"
+      />
+      <ul className="tbs-settings__import-records">
+        {parts.map((part) => {
+          const checked =
+            intent.takeShortcutNames === undefined || intent.takeShortcutNames.includes(part.id);
+          return (
+            <li key={part.id} data-testid={`import-shortcut-${part.id}`}>
+              <span>
+                {part.label}
+                {': '}
+                {formatFieldValue(part.after)}
+              </span>
+              <StatusBadge status={RECORD_BADGE[part.status]} label={part.status} />
+              <label className="tbs-settings__import-take">
+                <input
+                  type="checkbox"
+                  data-testid={`import-shortcut-take-${part.id}`}
+                  checked={checked}
+                  aria-label={`Take ${part.label}`}
+                  onChange={(e) => { onToggle(part.id, e.currentTarget.checked); }}
+                />
+                Take
+              </label>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
 }
 
-function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot' | 'rule', id: number | string) => void }) {
+function ImportSettingsParts({
+  parts,
+  intent,
+  onToggle,
+  onToggleAll,
+}: {
+  parts: ImportPartDiff[];
+  intent: ImportIntent;
+  onToggle: (id: SettingPartId, take: boolean) => void;
+  /** Take or clear EVERY row at once (the per-dimension select-all). */
+  onToggleAll: (take: boolean) => void;
+}) {
+  const globals = parts.filter((p) => p.group === 'global');
+  const perSlot = parts.filter((p) => p.group === 'slot');
+  const taken = (id: string): boolean =>
+    intent.takeSettingIds === undefined || intent.takeSettingIds.includes(id);
+
+  return (
+    <div className="tbs-settings__parts" data-testid="import-settings-values">
+      <PartsSelectAll
+        ids={parts.map((p) => p.id)}
+        taken={taken}
+        onToggleAll={onToggleAll}
+        noun="settings"
+      />
+      <ul className="tbs-settings__import-records">
+        {globals.map((part) => (
+          <ImportPartRow key={part.id} part={part} intent={intent} onToggle={onToggle} />
+        ))}
+      </ul>
+      {perSlot.length > 0 && (
+        <>
+          <p className="tbs-settings__parts-head" data-testid="import-setting-slot-strategies">
+            Per-slot settings
+          </p>
+          <ul className="tbs-settings__import-records">
+            {perSlot.map((part) => (
+              <ImportPartRow key={part.id} part={part} intent={intent} onToggle={onToggle} />
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One settings part as a row: label, the take checkbox, the current → file
+ * comparison, and the row's status badge.
+ *
+ * The test id follows the part id, so a per-slot row keeps the addressable
+ * `import-slot-strategy-N` anchor the value coverage uses while a global row
+ * keeps its name-based one.
+ */
+function ImportPartRow({
+  part,
+  intent,
+  onToggle,
+}: {
+  part: ImportPartDiff;
+  intent: ImportIntent;
+  onToggle: (id: SettingPartId, take: boolean) => void;
+}) {
+  const checked = intent.takeSettingIds === undefined || intent.takeSettingIds.includes(part.id);
+  const testId =
+    SETTINGS_PART_TESTIDS[part.id] ??
+    (part.id.endsWith(':strategy')
+      ? `import-slot-strategy-${String(part.slotId)}`
+      : `import-part-${part.id}`);
+
+  return (
+    <li data-testid={testId}>
+      {/* The colon and its trailing SPACE live inside one string literal: JSX drops
+          the whitespace between sibling elements, so `{label}{':'}` would render
+          "Match settings:Tab ID…". */}
+      <span className="tbs-settings__part-label">{`${part.label}: `}</span>
+      {/* The comparison is rendered from the diff's own facets — the same values
+          the server will act on, not a re-derived pair. Its own element (rather
+          than one text run with the label) is what lets a reader — or a test —
+          address the VALUE without also picking up the badge and the checkbox. */}
+      <span className="tbs-settings__part-diff">
+        {formatFieldValue(part.before)} → {formatFieldValue(part.after)}
+      </span>
+      <StatusBadge status={RECORD_BADGE[part.status]} label={part.status} />
+      <label className="tbs-settings__import-take">
+        <input
+          type="checkbox"
+          data-testid={`import-part-take-${part.id}`}
+          checked={checked}
+          aria-label={`Take ${part.label}`}
+          onChange={(e) => { onToggle(part.id as SettingPartId, e.currentTarget.checked); }}
+        />
+        Take
+      </label>
+    </li>
+  );
+}
+
+function ImportExportSection({
+  onJumpToRecord,
+  onApplied,
+  refreshToken = 0,
+  onRefreshed,
+}: {
+  onJumpToRecord: (kind: 'slot' | 'rule', id: number | string) => void;
+  /** Called after a successful APPLY, so the page's own state re-reads. */
+  onApplied?: () => void;
+  /** Bumped by the floating refresh button to force a re-read. */
+  refreshToken?: number;
+  /** Called once a re-read (auto or manual) has landed. */
+  onRefreshed?: () => void;
+}) {
   const [importing, setImporting] = useState(false);
   /**
    * The file string READ AT INSPECT. APPLY sends THIS exact string (D12:
@@ -2601,6 +3277,26 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
   };
 
   /**
+   * Read the machine's live sync state, or `null` when it cannot be read.
+   *
+   * Shared by the file-open path and the conflict re-check, so both compare
+   * against a state read the same way — a second, subtly different read would
+   * make "did the reviewed result change?" answerable two ways.
+   */
+  const readCurrentState = useCallback(async (): Promise<SyncState | null> => {
+    try {
+      const stateRes = await sendMessage('GET_STATE');
+      const stateResult = extractResult(stateRes);
+      if (stateResult?.success && stateResult.sync) {
+        return stateResult.sync as SyncState;
+      }
+    } catch {
+      // Non-fatal: the caller decides what "unknown" means.
+    }
+    return null;
+  }, []);
+
+  /**
    * Read a chosen file and (re)build the inspection. `resetIntent` re-seeds the
    * intent to the default; it is FALSE when re-inspecting after a version
    * conflict, because the user's dimension/record choices must survive the
@@ -2620,17 +3316,8 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
     // D7: the quantification needs the CURRENT state. A failure here is
     // NON-fatal — `current` stays null and the copy reports "unknown"
     // rather than the false claim "no records".
-    let currentLocal: SyncState | null = null;
-    try {
-      const stateRes = await sendMessage('GET_STATE');
-      const stateResult = extractResult(stateRes);
-      if (stateResult?.success && stateResult.sync) {
-        currentLocal = stateResult.sync as SyncState;
-        setCurrent(currentLocal);
-      }
-    } catch {
-      // keep `null` — the confirm dialog still opens, with unknown copy
-    }
+    const currentLocal = await readCurrentState();
+    if (currentLocal !== null) setCurrent(currentLocal);
     // A NEW file starts at "accept everything", derived from the diff against
     // the state read just above (the locals, never state that has not settled
     // yet). This is the ONLY resetIntent:true caller — choosing a file means
@@ -2682,6 +3369,37 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
     });
   };
 
+  /**
+   * One settings part or shortcut binding's take choice.
+   *
+   * `undefined` means "take everything", so the FIRST untick has to materialise
+   * the allow-list from the rows currently on screen — otherwise the first click
+   * would silently drop every row the user had not touched, which is the
+   * opposite of what unticking one box means. Subsequent toggles edit that list.
+   */
+  const setPartTaken = (
+    kind: 'settings' | 'shortcuts',
+    id: string,
+    take: boolean,
+    allIds: string[],
+  ) => {
+    setIntent((prev) => {
+      const key = kind === 'settings' ? 'takeSettingIds' : 'takeShortcutNames';
+      // The select-all passes the sentinel instead of a row id: it sets the list
+      // to EVERY row (take) or to none (clear). Without this branch the sentinel
+      // was just an id that matched nothing, so clearing left the allow-list
+      // untouched and the control appeared not to respond.
+      if (id === allPartsSentinel) {
+        return { ...prev, [key]: take ? [...allIds] : [] };
+      }
+      const seed = prev[key] ?? allIds;
+      const next = take
+        ? [...new Set([...seed, id])]
+        : seed.filter((x) => x !== id);
+      return { ...prev, [key]: next };
+    });
+  };
+
   const carried = (d: keyof DimensionPresence): boolean => inspection?.dimensions[d] ?? false;
 
   /**
@@ -2711,6 +3429,65 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
    */
   const liveDiff: ImportDiff | undefined =
     current && pkg ? computeDiff(pkg, current, intent) : inspection?.diff;
+
+  /**
+   * What this import is about to change, per dimension.
+   *
+   * Derived from the LIVE diff — the same rows the panel shows and the same
+   * derivation APPLY uses — so the dialog's numbers cannot describe a different
+   * outcome than the write. A dimension the file did not carry is omitted
+   * entirely rather than reported as zero: "0 slots" would read as "your slots
+   * are safe" when the truth is "this file says nothing about slots".
+   */
+  const changeSummary = (() => {
+    if (liveDiff === undefined) return [];
+    const rows: Array<{ dim: keyof DimensionPresence; changed: number; total: number; unit: string }> = [];
+    for (const { dim } of DIMENSION_LABELS) {
+      if (!carried(dim)) continue;
+      if (dim === 'slots' || dim === 'rules') {
+        const records = liveDiff.records.filter((r) =>
+          dim === 'slots' ? r.kind === 'slot' : r.kind === 'rule',
+        );
+        rows.push({
+          dim,
+          changed: records.filter((r) => r.status !== 'kept').length,
+          total: records.length,
+          unit: dim,
+        });
+      } else if (dim === 'settings') {
+        const parts = liveDiff.settingsParts ?? [];
+        rows.push({ dim, changed: parts.filter((p) => p.status !== 'kept').length, total: parts.length, unit: 'parts' });
+      } else {
+        const parts = liveDiff.shortcutParts ?? [];
+        rows.push({ dim, changed: parts.filter((p) => p.status !== 'kept').length, total: parts.length, unit: 'bindings' });
+      }
+    }
+    return rows;
+  })();
+
+  /**
+   * The review is derived from a SNAPSHOT of the machine taken when the file was
+   * chosen, so a change made elsewhere afterwards is invisible: the diff keeps
+   * comparing the file against values that no longer exist. Re-reading closes
+   * that gap, and it is the same read the file-open path performs — a different
+   * derivation would make "is my review still accurate" answerable two ways.
+   *
+   * Deliberately skips row decisions: `current` is state-derived, while the
+   * intent is the user's own choice, so a refresh must not touch it.
+   */
+  const refreshTargetState = useCallback(async () => {
+    if (!pkg) return;
+    const fresh = await readCurrentState();
+    if (fresh !== null) setCurrent(fresh);
+  }, [pkg, readCurrentState]);
+
+  useEffect(() => {
+    if (refreshToken === 0) return;
+    void refreshTargetState().then(() => { onRefreshed?.(); });
+    // `refreshToken` is the trigger; `onRefreshed` is excluded on purpose — its
+    // identity can change every render, which would re-read endlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshToken, refreshTargetState]);
 
   /** D7/A9: the confirmation copy is CONSTANT (even at 0 deletions). */
   const quantizedMessage = (() => {
@@ -2742,29 +3519,64 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
       const snapshotDiff =
         pkg && current ? computeDiff(pkg, current, intent) : null;
       // D12: the SAME string read at INSPECT; C3/F4: bind to the INSPECT version.
-      const res = await sendMessage('IMPORT_APPLY', { file, intent }, inspection.configVersion);
+      const write = (expectedVersion: number) =>
+        sendMessage('IMPORT_APPLY', { file, intent }, expectedVersion);
+      const res = await write(inspection.configVersion);
       const result = extractResult(res);
-      if (result?.success) {
-        setToast({ variant: 'success', message: 'Import applied' });
-        setApplyResult(extractApplyResult(res));
-        setAppliedDiff(snapshotDiff);
-        setInspection(null);
-        setFile(null);
-        setPkg(null);
-        setCurrent(null);
-      } else if (result?.errorCode === 'CONFIG_CONFLICT') {
-        // F4: a stale `expectedVersion` is REFUSED before any mutation, so
-        // nothing was written. Re-inspect instead of leaving the user on a bare
-        // server string with no way forward: the draft is rebuilt against the
-        // NEW state and the user is told to look again. Deliberately NOT a
-        // silent retry with the latest version — that would write against a
-        // state the user never reviewed, which is the guarantee F4 exists for.
-        // The intent is preserved: only the state-derived numbers changed.
+      if (result?.errorCode === 'CONFIG_CONFLICT') {
+        // F4 refused the write because the config moved under it. That guarantee
+        // exists so the import cannot land on a state the user never reviewed —
+        // but a refusal is only CORRECT if the REVIEWED RESULT actually changed.
+        // Re-read the live state and re-derive the outcome the user is looking
+        // at; if it is identical, they reviewed exactly what will be written, so
+        // the import is retried against the fresh version instead of throwing
+        // their review away. If it differs, nothing is written and they are sent
+        // back to re-check (the behaviour they already had).
+        const fresh = await readCurrentState();
+        const reviewedBefore = pkg && current ? computeDiff(pkg, current, intent) : null;
+        const freshAfter = fresh && pkg ? computeDiff(pkg, fresh, intent) : null;
+        const unchanged = reviewedBefore !== null && freshAfter !== null
+          && diffSignature(reviewedBefore) === diffSignature(freshAfter);
+        if (unchanged && fresh !== null) {
+          const retry = await write(fresh.configVersion);
+          const retryResult = extractResult(retry);
+          if (retryResult?.success) {
+            const applied = extractApplyResult(retry);
+            setToast({ variant: 'success', message: summariseApplied(applied) });
+            setApplyResult(applied);
+            setAppliedDiff(freshAfter);
+            setInspection(null);
+            setFile(null);
+            setPkg(null);
+            setCurrent(null);
+            onApplied?.();
+            return;
+          }
+        }
+        // The reviewed result genuinely moved (or the retry also lost a race):
+        // refuse, and re-check so the user reviews the new numbers.
         setToast({
           variant: 'error',
           message: 'The configuration changed since this file was checked. It has been re-checked — review the updated changes, then apply again.',
         });
         if (file) await inspectFile(file, { resetIntent: false });
+        return;
+      }
+      if (result?.success) {
+        const applied = extractApplyResult(res);
+        // The toast reports WHAT changed per dimension, not just that
+        // something did — "Import applied" left the user to scroll the result
+        // list to find out whether their slots or their shortcuts landed.
+        setToast({ variant: 'success', message: summariseApplied(applied) });
+        setApplyResult(applied);
+        setAppliedDiff(snapshotDiff);
+        setInspection(null);
+        setFile(null);
+        setPkg(null);
+        setCurrent(null);
+        // The rest of the page re-reads, so Global Strategy (and this
+        // panel's own target-machine lists) stop showing the pre-import values.
+        onApplied?.();
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Import failed' });
       }
@@ -2802,153 +3614,52 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
   };
 
   return (
-    <section aria-label="Import and export">
-      <h2>Import / Export</h2>
+    <section aria-label="Import and export" className="tbs-settings__panel">
+      {/* The file input must exist from first paint: the test anchor and the
+          "Choose file" button both drive it, and it is hidden from view, not
+          from the DOM. */}
+      <input
+        ref={fileInputRef}
+        data-testid="import-file-input"
+        type="file"
+        accept=".json,application/json"
+        hidden
+        onChange={(e) => { void handleFileChosen(e.currentTarget); }}
+      />
 
-      <div className="tbs-settings__import-zone">
-        <p>Import configuration from a JSON file</p>
-        <input
-          ref={fileInputRef}
-          data-testid="import-file-input"
-          type="file"
-          accept=".json,application/json"
-          hidden
-          onChange={(e) => { void handleFileChosen(e.currentTarget); }}
-        />
-        <Button size="md" variant="secondary" onClick={handleImportClick} loading={importing} aria-label="Import configuration">
-          Choose File to Import
-        </Button>
-      </div>
+      <header className="tbs-settings__panel-head">
+        <h3 className="tbs-settings__panel-title">Bring in a package</h3>
+        <p className="tbs-settings__panel-sub">
+          Choose an exported JSON file. Nothing changes until you review the comparison and
+          confirm.
+        </p>
+      </header>
 
       {/* Reading a file is async (file → text → INSPECT). Without this the pane
-          stays blank after "Choose File to Import" and the action looks dead,
-          so announce it in the same `role="status"` vocabulary as the load. */}
+          stays blank after "Choose file" and the action looks dead, so announce
+          it in the same `role="status"` vocabulary as the load. */}
       {importing && inspection === null && (
         <p className="tbs-settings__loading" role="status" aria-busy="true">
           Reading package…
         </p>
       )}
 
-      {/* D6: single page — dimension groups, diff and the confirm dialog are all
-          reachable without stepping through a wizard. */}
-      {inspection && (
-        <div className="tbs-settings__import-diff" data-testid="import-diff" role="region" aria-label="Import diff">
-          {DIMENSION_LABELS.map(({ dim, label }) => {
-            // Live records (status under the CURRENT intent) — see `liveDiff`.
-            const records = (liveDiff?.records ?? []).filter((r) =>
-              dim === 'slots' ? r.kind === 'slot' : dim === 'rules' ? r.kind === 'rule' : false,
-            );
-            // Display order only: slots are a numbered 1–10 set, so showing them
-            // in the file's order made the list unscannable. The diff's own
-            // record order (which tests may rely on) is deliberately untouched.
-            const shown = dim === 'slots' ? bySlotId(records) : records;
-            const isRecordDimension = dim === 'slots' || dim === 'rules';
-            return (
-              <section key={dim} className="tbs-settings__import-dim" data-testid={`import-dim-${dim}`}>
-                <h3>{label}</h3>
-                {!carried(dim) ? (
-                  // A2: a dimension the package did not carry cannot be chosen —
-                  // offering a selector here would be a lie.
-                  <p className="tbs-settings__hint" data-testid={`import-absent-${dim}`}>
-                    This package does not include {label.toLowerCase()}.
-                  </p>
-                ) : (
-                  <>
-                    <label>
-                      Mode for {label}
-                      <select
-                        data-testid={`import-mode-${dim}`}
-                        value={intent.dimensionModes[dim]}
-                        onChange={(e) => { setDimensionMode(dim, e.currentTarget.value as DimensionMode); }}
-                      >
-                        <option value="incremental">Incremental (add / replace)</option>
-                        <option value="overwrite">Overwrite</option>
-                      </select>
-                    </label>
-                    {dim === 'settings' && pkg?.settings && current && (
-                      <ImportSettingsValues pkgSettings={pkg.settings} current={current} />
-                    )}
-                    {isRecordDimension && shown.length > 0 && (
-                      <ul className="tbs-settings__import-records">
-                        {shown.map((r) => (
-                          <li key={`${r.kind}-${String(r.id)}`}>
-                            {/* The identity always includes the slot number; the
-                                `aria-label`s below stay on the diff's `r.label`
-                                so the control names are unchanged. */}
-                            <span>
-                              {r.kind === 'slot' ? slotRowLabel(Number(r.id), r.label) : r.label}
-                            </span>
-                            <StatusBadge status={RECORD_BADGE[r.status]} label={r.status} />
-                            {/* A4 checkpoint: the checkbox is a VIEW of the live
-                                row status, not a second boolean that could drift
-                                from it — checked ⟺ `status !== 'kept'`, and
-                                toggling writes a sparse keep/take override, after
-                                which the diff is recomputed and the view follows.
-                                The accessible name stays `Take <label>` (the test
-                                anchor); the label text is fixed for all rows. */}
-                            <label className="tbs-settings__import-take">
-                              <input
-                                type="checkbox"
-                                data-testid={`import-record-${r.kind}-${String(r.id)}`}
-                                checked={r.status !== 'kept'}
-                                aria-label={`Take ${r.label}`}
-                                // `added` cannot be declined yet: the incoming
-                                // package's own records are always applied, so a
-                                // `keep` override would be a control that lies.
-                                // Disabled + explained until the diff honours it.
-                                disabled={r.status === 'added'}
-                                title={r.status === 'added' ? 'New records from the file are always applied' : undefined}
-                                onChange={(e) => {
-                                  setRecordAction(r.kind, r.id, e.currentTarget.checked ? 'take' : 'keep');
-                                }}
-                              />
-                              Take
-                            </label>
-                            {/* A12: record level by default, field level on
-                                demand. The values are DECODED (import-field-format)
-                                — raw diff signatures never reach the DOM (D9). */}
-                            {r.fields.length > 0 && (
-                              <details className="tbs-settings__import-fields" data-testid={`import-fields-${r.kind}-${String(r.id)}`}>
-                                <summary>Fields</summary>
-                                <ul>
-                                  {r.fields.map((f) => (
-                                    <li key={f.field} data-testid={`import-field-${r.kind}-${String(r.id)}-${f.field}`}>
-                                      {formatFieldDiffLine(f, r.status)}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </details>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </>
-                )}
-              </section>
-            );
-          })}
-
-          <div className="tbs-settings__import-actions">
-            <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); setPkg(null); setCurrent(null); setApplyResult(null); setAppliedDiff(null); }}>Cancel</Button>
-            <Button
-              size="sm"
-              variant="primary"
-              data-testid="import-apply"
-              onClick={handleApply}
-              loading={importing}
-            >
-              Apply
-            </Button>
-          </div>
-        </div>
+      {/* STEP 1 — nothing chosen yet. The picker is a full-width, one-click
+          target instead of a bare button beside a sentence: the common case is
+          "I have a file, open it", and it should read as the page's only job. */}
+      {!inspection && !importing && (
+        <button type="button" className="tbs-settings__dropzone" onClick={handleImportClick}>
+          <span className="tbs-settings__dropzone-icon" aria-hidden="true">＋</span>
+          <span className="tbs-settings__dropzone-title">Choose a package file</span>
+          <span className="tbs-settings__dropzone-hint">
+            A <code>.json</code> file exported from this extension
+          </span>
+        </button>
       )}
 
-      {/* T22 (§4.3): the result list after APPLY. Each group renders ONLY when
-          it has content — an empty shell would be noise. D15: the domain
-          violations group is SEPARATE from the tolerant group and has no
-          dismiss affordance (it is a safety disclosure, not a choice). */}
-      {applyResult && (
+      {/* The APPLY result owns the pane after a successful write: the file is
+          gone and the next thing the user needs is "what happened". */}
+      {applyResult && !inspection && (
         <section className="tbs-settings__import-result" data-testid="import-result" aria-label="Import result">
           <h3>Import result</h3>
 
@@ -2959,6 +3670,30 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
               </span>
             ))}
           </div>
+
+          {/* What changed PER DIMENSION, from the server's own outcome. The
+              tally above counts record STATUSES; it says nothing about which
+              dimension moved and cannot express a failure — a rule the domain
+              rejected and a shortcut the browser refused were both invisible
+              here, which is exactly what "did my shortcuts import?" needs. */}
+          <ul className="tbs-settings__result-dims" data-testid="import-result-dims">
+            {DIMENSION_LABELS.map(({ dim }) => {
+              const outcome = applyResult.dimensions[dim];
+              return (
+                <li key={dim} data-testid={`import-result-dim-${dim}`}>
+                  <span className="tbs-settings__part-label">{`${DIMENSION_META[dim].title}: `}</span>
+                  <span className="tbs-settings__part-value">
+                    {`${String(outcome.changed)} changed`}
+                    {outcome.failed > 0 && (
+                      <span className="tbs-settings__result-failed">
+                        {`, ${String(outcome.failed)} failed`}
+                      </span>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
 
           {appliedDiff && appliedDiff.records.length > 0 && (
             <ul className="tbs-settings__result-records">
@@ -3040,7 +3775,252 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
               {applyResult.shortcutGuidance}
             </p>
           )}
+
+          <footer className="tbs-settings__panel-foot">
+            <p className="tbs-settings__panel-status" />
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => { setApplyResult(null); setAppliedDiff(null); }}
+            >
+              Import another file
+            </Button>
+          </footer>
         </section>
+      )}
+
+      {/* D6: single page — dimension groups, diff and the confirm dialog are all
+          reachable without stepping through a wizard. */}
+      {inspection && (
+        <div className="tbs-settings__import-diff" data-testid="import-diff" role="region" aria-label="Import diff">
+          <header className="tbs-settings__panel-head">
+            <h3 className="tbs-settings__panel-title">Review changes</h3>
+            <p className="tbs-settings__panel-sub">
+              Each part of the file is listed against what you have now. Untick anything you do
+              not want to take.
+            </p>
+          </header>
+          {DIMENSION_LABELS.map(({ dim }) => {
+            const meta = DIMENSION_META[dim];
+            // Live records (status under the CURRENT intent) — see `liveDiff`.
+            const records = (liveDiff?.records ?? []).filter((r) =>
+              dim === 'slots' ? r.kind === 'slot' : dim === 'rules' ? r.kind === 'rule' : false,
+            );
+            // Display order only: slots are a numbered 1–10 set, so showing them
+            // in the file's order made the list unscannable. The diff's own
+            // record order (which tests may rely on) is deliberately untouched.
+            const shown = dim === 'slots' ? bySlotId(records) : records;
+            const isRecordDimension = dim === 'slots' || dim === 'rules';
+            const changedCount = records.filter((r) => r.status !== 'kept').length;
+            // The settings parts and shortcut bindings the file carries,
+            // read from the LIVE diff (so their status follows the user's choices).
+            const shownParts = dim === 'settings' ? (liveDiff?.settingsParts ?? []) : [];
+            const shortcutParts = dim === 'shortcuts' ? (liveDiff?.shortcutParts ?? []) : [];
+            // No separate record lookup: every cell of a row comes from the diff
+            // itself (`before` / `icon` / `priority`), which is the one place that
+            // already resolved "does this exist on the machine, and did the user
+            // keep it". A second lookup over the package could only disagree with
+            // it — and did: it made rows report the FILE's URL and priority.
+            return (
+              <section
+                key={dim}
+                className={`tbs-settings__card${carried(dim) ? '' : ' tbs-settings__card--absent'}`}
+                data-testid={`import-dim-${dim}`}
+              >
+                <header className="tbs-settings__card-head">
+                  <h4 className="tbs-settings__card-title">{meta.title}</h4>
+                  {/* A count, not a status word: "3 of 5 change" says both the
+                      size of the part and how much of it the import will touch,
+                      which is what decides whether the user opens it. */}
+                  <span className="tbs-settings__card-meta">
+                    {!carried(dim)
+                      ? 'not in this file'
+                      : isRecordDimension
+                        ? `${String(changedCount)} of ${String(records.length)} change`
+                        : 'included'}
+                  </span>
+                </header>
+                {!carried(dim) ? (
+                  // A2: a dimension the package did not carry cannot be chosen —
+                  // offering a selector here would be a lie.
+                  <p className="tbs-settings__hint" data-testid={`import-absent-${dim}`}>
+                    This package does not include {meta.title.toLowerCase()}.
+                  </p>
+                ) : (
+                  <>
+                    <div className="tbs-settings__mode">
+                      <label className="tbs-settings__mode-label" htmlFor={`import-mode-${dim}`}>
+                        Mode
+                      </label>
+                      <select
+                        id={`import-mode-${dim}`}
+                        className="tbs-settings__mode-select"
+                        data-testid={`import-mode-${dim}`}
+                        value={intent.dimensionModes[dim]}
+                        // The consequence sentence is the select's description,
+                        // not adjacent prose: a screen reader must hear what
+                        // "Overwrite" does to the records the file omits, or the
+                        // option name is the only thing announced.
+                        aria-describedby={`import-mode-${dim}-help`}
+                        onChange={(e) => { setDimensionMode(dim, e.currentTarget.value as DimensionMode); }}
+                      >
+                        <option value="incremental">Incremental (add / replace)</option>
+                        <option value="overwrite">Overwrite</option>
+                      </select>
+                      {/* The consequence, in the words the confirmation dialog
+                          will use. A bare option name ("Overwrite") does not say
+                          what becomes of the records it does not contain. */}
+                      <span className="tbs-settings__mode-help" id={`import-mode-${dim}-help`}>
+                        {intent.dimensionModes[dim] === 'overwrite'
+                          ? `Everything in ${meta.title.toLowerCase()} is replaced, including records this file does not contain.`
+                          : `Records in this file are added or replaced; ${meta.title.toLowerCase()} you already have stay.`}
+                      </span>
+                    </div>
+                    {dim === 'settings' && shownParts.length > 0 && (
+                      <ImportSettingsParts
+                        parts={shownParts}
+                        intent={intent}
+                        onToggle={(id, take) => {
+                          setPartTaken('settings', id, take, shownParts.map((p) => p.id));
+                        }}
+                        onToggleAll={(take) => {
+                          setPartTaken('settings', allPartsSentinel, take, shownParts.map((p) => p.id));
+                        }}
+                      />
+                    )}
+                    {/* The shortcut bindings, one row each, with the same take-checkbox
+                        granularity the settings parts use. */}
+                    {dim === 'shortcuts' && shortcutParts.length > 0 && (
+                      <ImportShortcutParts
+                        parts={shortcutParts}
+                        intent={intent}
+                        onToggle={(name, take) => {
+                          setPartTaken('shortcuts', name, take, shortcutParts.map((p) => p.id));
+                        }}
+                        onToggleAll={(take) => {
+                          setPartTaken('shortcuts', allPartsSentinel, take, shortcutParts.map((p) => p.id));
+                        }}
+                      />
+                    )}
+                    {isRecordDimension && shown.length > 0 && (
+                      <RecordList
+                        label={`Import ${meta.title.toLowerCase()}`}
+                        testIdPrefix={`import-${dim}`}
+                        rows={shown.map((r) => ({
+                          key: String(r.id),
+                          // EVERY cell describes the TARGET MACHINE. The file's
+                          // version appears only in the field detail, as
+                          // `<target> → <imported>`; reading the FILE here made an
+                          // untouched record display a title / URL / type that
+                          // existed only inside the package.
+                          icon: importRowIcon(r),
+                          title: importRowTitle(r),
+                          matchUrl: importRowMatchUrl(r),
+                          matchType: importRowMatchType(r),
+                          // The machine's OWN priority, and only that. A rule the
+                          // machine does not have (`added`) has no priority yet,
+                          // so the column is omitted rather than showing the
+                          // file's number as if it were the machine's.
+                          ...(r.before?.priority !== undefined ? { priority: r.before.priority } : {}),
+                          // A12: record level by default, field level on demand —
+                          // but the disclosure lives INSIDE the row, so "whose
+                          // fields are these" is answered by the DOM rather than
+                          // by adjacency. A long list used to push the record
+                          // list and the field blocks apart with no visible tie.
+                          //
+                          // The field ROWS are `RecordFields`, not a `<ul>` built
+                          // here: label / value / state is a layout, and inline
+                          // markup is how per-row wording drifts between panels.
+                          detail: r.fields.length > 0 ? (
+                            <RecordFields
+                              fields={r.fields}
+                              status={r.status}
+                              testId={`import-fields-${r.kind}-${String(r.id)}`}
+                              testIdPrefix={`import-field-${r.kind}-${String(r.id)}`}
+                            />
+                          ) : null,
+                          trailing: (
+                            <>
+                              <StatusBadge status={RECORD_BADGE[r.status]} label={r.status} />
+                              {/* A4 checkpoint: the checkbox is a VIEW of the live
+                                  row status, not a second boolean that could drift
+                                  from it — checked ⟺ `status !== 'kept'`, and
+                                  toggling writes a sparse keep/take override, after
+                                  which the diff is recomputed and the view follows.
+                                  The accessible name stays `Take <label>` (the test
+                                  anchor); the label text is fixed for all rows.
+
+                                  EVERY row is declinable, including a file-only
+                                  (`added`) one: declining it means "do not create
+                                  this on my machine", which the diff honours by
+                                  reporting the row `kept`. A disabled box used to
+                                  assert the opposite — that the file's own records
+                                  were applied no matter what the user chose. */}
+                              <label className="tbs-settings__import-take">
+                                <input
+                                  type="checkbox"
+                                  data-testid={`import-record-${r.kind}-${String(r.id)}`}
+                                  checked={r.status !== 'kept'}
+                                  aria-label={`Take ${r.label}`}
+                                  onChange={(e) => {
+                                    setRecordAction(r.kind, r.id, e.currentTarget.checked ? 'take' : 'keep');
+                                  }}
+                                />
+                                Take
+                              </label>
+                            </>
+                          ),
+                        }))}
+                        emptyAll={`This file contains no ${meta.title.toLowerCase()}.`}
+                        selectAll={{
+                          // The per-record overrides are the ONE source: "all
+                          // taken" means no row was declined, so the checkbox
+                          // cannot disagree with the rows it controls.
+                          allSelected: !shown.some((r) => r.status === 'kept'),
+                          someSelected: shown.some((r) => r.status === 'kept')
+                            && shown.some((r) => r.status !== 'kept'),
+                          onToggleAll: (all) => {
+                            // EVERY row is controlled, `added` included: a
+                            // file-only row can now be declined, so excluding it
+                            // would leave "clear all" clearing everything except
+                            // the rows the user most likely wants to skip.
+                            for (const r of shown) {
+                              setRecordAction(r.kind, r.id, all ? 'take' : 'keep');
+                            }
+                          },
+                          noun: meta.title.toLowerCase(),
+                        }}
+                      />
+                    )}
+                  </>
+                )}
+              </section>
+            );
+          })}
+
+          {/* The commit bar states what this import will DO before it is
+              committed: the same deletion count the confirmation dialog uses
+              (one derivation, `deletionCounts`), so the two can never disagree.
+              Cancel stays a quiet text button — the primary action is the only
+              emphasised control in the panel. */}
+          <footer className="tbs-settings__commit">
+            <p className="tbs-settings__commit-summary" data-testid="import-summary" aria-live="polite">
+              {quantizedMessage}
+            </p>
+            <div className="tbs-settings__commit-actions">
+              <Button size="sm" variant="ghost" onClick={() => { setInspection(null); setFile(null); setPkg(null); setCurrent(null); setApplyResult(null); setAppliedDiff(null); }}>Cancel</Button>
+              <Button
+                size="sm"
+                variant="primary"
+                data-testid="import-apply"
+                onClick={handleApply}
+                loading={importing}
+              >
+                Apply import
+              </Button>
+            </div>
+          </footer>
+        </div>
       )}
 
       {/* D7: the quantized confirmation is CONSTANT — opened by Apply, even with
@@ -3069,7 +4049,37 @@ function ImportExportSection({ onJumpToRecord }: { onJumpToRecord: (kind: 'slot'
           </>
         }
       >
-        <p>{quantizedMessage}</p>
+        {/* The sentence is IDENTICAL to the one already shown in the commit bar
+            (`quantizedMessage`) — this dialog repeats it at the point of no
+            return, it does not restate the outcome in new words. */}
+        <p className="tbs-settings__confirm-line">{quantizedMessage}</p>
+
+        {/* What is about to change, per dimension. A user asked "Confirm
+            import" for a reason and could not tell whether it would touch their
+            slots, their rules or only a shortcut — the deletion sentence above
+            says nothing about what IS written. */}
+        {changeSummary.length > 0 && (
+          <div className="tbs-settings__confirm-changes" data-testid="import-confirm-changes">
+            <h4 className="tbs-settings__parts-head">Changes in this import</h4>
+            <ul className="tbs-settings__parts-list">
+              {changeSummary.map((row) => (
+                <li key={row.dim} data-testid={`import-confirm-change-${row.dim}`}>
+                  <span className="tbs-settings__part-label">{`${DIMENSION_META[row.dim].title}: `}</span>
+                  <span className="tbs-settings__part-value">
+                    {row.changed === 0
+                      ? `no change (${String(row.total)} ${row.unit} in the file)`
+                      : `${String(row.changed)} of ${String(row.total)} ${row.unit} change`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <p className="tbs-settings__confirm-hint">
+          You can export a backup before confirming. Applying starts immediately and cannot be
+          reversed from here.
+        </p>
       </Dialog>
 
       {toast && (
@@ -3204,6 +4214,26 @@ export function SettingsApp() {
   const [error, setError] = useState<string | null>(null);
   /** T22/D9: a record the result list asked to reveal (repair entry target). */
   const [importFocus, setImportFocus] = useState<{ kind: 'slot' | 'rule'; id: number | string } | null>(null);
+  /**
+   * Which half of the Import / Export section is showing. Import is the default
+   * because it is the rarer, more consequential job: a user opening this section
+   * usually already has a file in hand.
+   */
+  const [importExportTab, setImportExportTab] = useState<'import' | 'export'>('import');
+  /**
+   * A monotonically increasing token that tells the Import / Export panels to
+   * re-read the target machine. A TOKEN rather than a boolean so two refreshes
+   * in a row are both observed (a boolean would collapse them).
+   */
+  const [targetRefreshToken, setTargetRefreshToken] = useState(0);
+  /**
+   * True when a write happened elsewhere since the target values were last read:
+   * "the machine may have moved, look again". Set from `storage.onChanged`, which
+   * is the only signal that covers a sidebar edit, a Rules edit, a Global
+   * Strategy change and an applied import alike — they all land in `sync`.
+   */
+  const [targetMayBeStale, setTargetMayBeStale] = useState(false);
+  const [refreshingTarget, setRefreshingTarget] = useState(false);
 
   /**
    * T22/D9: reveal the record the missing-icon entry points at. Reuses the
@@ -3228,9 +4258,14 @@ export function SettingsApp() {
   }, [importFocus]);
 
   // Load state
-  const loadState = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const loadState = useCallback(async (opts: { silent?: boolean } = {}) => {
+    // A SILENT refresh re-reads without the loading state. The post-import
+    // refresh must not blank the page: `loading` unmounts every section, which
+    // would throw away the just-rendered apply result the user is reading.
+    if (!opts.silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const [cmdRes, stateRes] = await Promise.all([
         sendMessage('GET_COMMANDS'),
@@ -3353,6 +4388,85 @@ export function SettingsApp() {
     }
   }, [configVersion, loadState]);
 
+  /**
+   * Watch for configuration writes made ANYWHERE, so the Import / Export panels
+   * can say "the target machine may have moved".
+   *
+   * Mounted at the page level (not inside the panels) for two reasons: it must
+   * run while the user is on the sidebar / Rules / Dashboard sections — that is
+   * exactly when they change a slot or a rule — and it must survive the panels
+   * being unmounted by a section switch.
+   *
+   * `storage.onChanged` is used rather than `MessageClient.onExternalChange`
+   * because the latter only fires when the *configVersion* changed, which misses
+   * a same-version write and is silent about the `local` area entirely.
+   */
+  useEffect(() => {
+    const onChangedApi = (globalThis as unknown as {
+      chrome?: { storage?: { onChanged?: StorageOnChangedApi } };
+    }).chrome?.storage?.onChanged;
+    if (!onChangedApi) return;
+    /**
+     * A burst (one user edit can touch several keys) must not become a burst of
+     * reads, so the re-read is coalesced onto a short timer.
+     */
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onChanged: StorageChangeListener = (changes, areaName) => {
+      if (areaName !== 'sync' && areaName !== 'local') return;
+      if (Object.keys(changes).length === 0) return;
+      setTargetMayBeStale(true);
+      // Re-read as well as flagging. Flagging alone left the panels showing the
+      // old values while telling the user they might have changed — the exact
+      // report of "I edited a slot and the lists never caught up".
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        setTargetRefreshToken((n) => n + 1);
+      }, 150);
+    };
+    onChangedApi.addListener(onChanged);
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      onChangedApi.removeListener(onChanged);
+    };
+  }, []);
+
+  /**
+   * The manual refresh behind the floating button.
+   *
+   * Bumping the token is what makes the panels re-read; the flag is cleared only
+   * after they have done so, so the "may have changed" hint cannot be dismissed
+   * by a click that failed to refresh anything.
+   */
+  const handleRefreshTarget = useCallback(async () => {
+    setRefreshingTarget(true);
+    setTargetRefreshToken((n) => n + 1);
+    // Read the SAME thing the panels read, and report what came back.
+    //
+    // This is not decoration: a refresh that silently does nothing is
+    // indistinguishable from a refresh that is not wired up, so the confirmation
+    // states the actual figures and the version. If the values on screen do not
+    // match this report, the fault is in the rendering; if the report itself
+    // carries the old figures, the write never reached storage.
+    try {
+      const res = await sendMessage('GET_STATE');
+      const result = extractResult(res);
+      const sync = result?.success ? (result.sync as SyncState | undefined) : undefined;
+      if (sync) {
+        setToast({
+          variant: 'success',
+          message: `Read from storage: ${String(sync.slots.length)} slots, ${String(sync.rules.length)} rules, config v${String(sync.configVersion)}.`,
+        });
+      } else {
+        setToast({ variant: 'error', message: 'Refresh failed: could not read the configuration.' });
+      }
+    } catch {
+      setToast({ variant: 'error', message: 'Refresh failed: could not read the configuration.' });
+    }
+    setTargetMayBeStale(false);
+    setRefreshingTarget(false);
+  }, []);
+
   const handleSlotAutoBindChange = useCallback(async (slotId: number, override: boolean | null) => {
     try {
       const res = await sendMessage('SET_SLOT_AUTO_BIND', { slotId, override }, configVersion);
@@ -3439,18 +4553,82 @@ export function SettingsApp() {
             )}
             {activeSection === 'dashboard' && <DashboardSection />}
             {activeSection === 'import-export' && (
+              /* Import and Export are two DIFFERENT jobs that used to be two
+                 stacked headings — "which one am I looking at" had no answer at
+                 a glance, and both stayed on screen while the user worked in one
+                 of them. The `Tabs` primitive (shared with every other source
+                 picker, so the a11y wiring cannot drift) makes them mutually
+                 exclusive and the choice visible as a control.
+
+                 Both panels are always MOUNTED and the inactive one is hidden:
+                 export reads its own state on mount, and hiding (rather than
+                 unmounting) keeps that fetch and any in-progress import review
+                 from being discarded by a tab switch. */
               <>
+                <h2>Import / Export</h2>
+                {/* The strip is rendered WITHOUT children and the two panels are
+                    declared here instead. `Tabs` renders a single panel keyed by
+                    the CURRENT value, so passing both panels as children would
+                    leave the inactive tab's `aria-controls` pointing at an id
+                    that does not exist. Two real `role="tabpanel"` nodes (ids
+                    matching the tabs' `aria-controls`) keep every reference
+                    resolvable while both stay mounted. */}
+                <Tabs
+                  items={[
+                    { id: 'import', label: 'Import' },
+                    { id: 'export', label: 'Export' },
+                  ]}
+                  value={importExportTab}
+                  // `Tabs` speaks in `string` ids (it is shared with pickers whose
+                  // ids are not a closed union), so the narrow state is narrowed
+                  // back here rather than widening the state itself.
+                  onChange={(id) => { setImportExportTab(id === 'export' ? 'export' : 'import'); }}
+                  label="Import or export"
+                  idPrefix="import-export"
+                />
                 {/* D9: the missing-icon repair entry sends the user to the
                     record's OWN surface (slot table / rules table) — that
-                    surface's existing editor does the edit. Nothing is
-                    persisted here (C9: no "needs re-selection" marker). */}
-                <ImportExportSection
-                  onJumpToRecord={(kind, id) => {
-                    setActiveSection(kind === 'slot' ? 'slots' : 'rules');
-                    setImportFocus({ kind, id });
-                  }}
-                />
-                <ExportSection />
+                    surface's existing editor does the edit. Nothing is persisted
+                    here (C9: no "needs re-selection" marker). */}
+                <div
+                  className="tbs-settings__tabpanel"
+                  id="import-export-panel-import"
+                  role="tabpanel"
+                  aria-labelledby="import-export-tab-import"
+                  tabIndex={0}
+                  hidden={importExportTab !== 'import'}
+                >
+                  <ImportExportSection
+                    onJumpToRecord={(kind, id) => {
+                      setActiveSection(kind === 'slot' ? 'slots' : 'rules');
+                      setImportFocus({ kind, id });
+                    }}
+                    // An applied import changes the configuration the
+                    // OTHER sections are showing (Global Strategy holds its own
+                    // copy of `matchSettings`), so the page re-reads after the
+                    // write. SILENT: the user is reading the apply result, and
+                    // the loading state would unmount it.
+                    onApplied={() => {
+                      void loadState({ silent: true });
+                      setTargetRefreshToken((n) => n + 1);
+                    }}
+                    refreshToken={targetRefreshToken}
+                    onRefreshed={() => { setTargetMayBeStale(false); }}
+                  />
+                </div>
+                <div
+                  className="tbs-settings__tabpanel"
+                  id="import-export-panel-export"
+                  role="tabpanel"
+                  aria-labelledby="import-export-tab-export"
+                  tabIndex={0}
+                  hidden={importExportTab !== 'export'}
+                >
+                  <ExportSection
+                    refreshToken={targetRefreshToken}
+                    onRefreshed={() => { setTargetMayBeStale(false); }}
+                  />
+                </div>
               </>
             )}
             {activeSection === 'diagnostics' && <DiagnosticsSection />}
@@ -3460,6 +4638,38 @@ export function SettingsApp() {
 
       {toast && (
         <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />
+      )}
+
+      {/* The manual refresh, available on the Import / Export section.
+          The automatic refresh listens for `storage.onChanged`, but that signal
+          does not survive every real-world case — most notably a Service Worker
+          that was asleep when the write happened, which is exactly the "I changed
+          a slot and the lists never caught up" report. A control the user can
+          press turns an unexplainable stale list into a one-click fix, and the
+          hint on it says WHY they might need it. */}
+      {activeSection === 'import-export' && (
+        <button
+          type="button"
+          className={`tbs-settings__refresh${targetMayBeStale ? ' tbs-settings__refresh--stale' : ''}`}
+          data-testid="import-export-refresh"
+          aria-label="Refresh target machine values"
+          title="Re-read the slots, rules, settings and shortcuts on this machine"
+          aria-busy={refreshingTarget || undefined}
+          onClick={() => { void handleRefreshTarget(); }}
+        >
+          <span className="tbs-settings__refresh-icon" aria-hidden="true">⟳</span>
+          <span className="tbs-settings__refresh-label">Refresh</span>
+          {/* A live, non-visual announcement: the dot alone would convey the
+              "may have changed" state by colour, which is not accessible. */}
+          <span className="tbs-settings__refresh-status" role="status" aria-live="polite">
+            {targetMayBeStale
+              ? 'Target values may have changed — refresh to see the latest.'
+              : ''}
+          </span>
+          {targetMayBeStale && (
+            <span className="tbs-settings__refresh-dot" data-testid="import-export-refresh-stale" aria-hidden="true" />
+          )}
+        </button>
       )}
     </div>
   );

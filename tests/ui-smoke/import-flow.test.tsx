@@ -24,6 +24,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import type {
+  ImportApplyResult,
   ImportInspection,
   SyncState,
   SlotDefinition,
@@ -106,6 +107,23 @@ const PKG_SLOTS_ONLY: ExportPackage = {
 };
 
 const FILE_TEXT = JSON.stringify(PKG);
+
+/** The minimal APPLY result the applied-state tests assert against. */
+const FULL_APPLY_RESULT: ImportApplyResult = {
+  success: true,
+  configVersion: 99,
+  counts: { added: 1, replaced: 1, kept: 0, deleted: 0, skipped: 0 },
+  dimensions: {
+    slots: { changed: 2, failed: 0 },
+    rules: { changed: 1, failed: 0 },
+    settings: { changed: 0, failed: 0 },
+    shortcuts: { changed: 0, failed: 0 },
+  },
+  tolerant: [],
+  domainViolations: [],
+  missingIcons: [],
+  overlaps: [],
+};
 
 /** Build an inspection from the REAL diff, never by hand. */
 function makeInspection(
@@ -243,6 +261,27 @@ async function selectFile() {
 }
 
 /**
+ * One field row's three cells, read by CLASS rather than by `textContent`.
+ *
+ * Reading the cells separately is the point: the whole change is that a field is
+ * no longer one string, so an assertion on `textContent` could not tell a label
+ * column from a value column — it would pass on the old run-on layout too
+ * (a change detector, not an invariant guard).
+ */
+function fieldCells(kind: 'slot' | 'rule', id: number | string, field: string) {
+  const row = screen.getByTestId(`import-field-${kind}-${String(id)}-${field}`);
+  const text = (cls: string) => row.querySelector(cls)?.textContent ?? null;
+  return {
+    label: text('.tbs-field-row__label'),
+    // The value spans are ABSENT (not empty strings) when that side does not
+    // exist, which is exactly what distinguishes "no before" from "empty before".
+    before: text('.tbs-field-row__before'),
+    after: text('.tbs-field-row__after'),
+    state: text('.tbs-field-row__state'),
+  };
+}
+
+/**
  * Open the constant confirm dialog (Apply always opens it — D7). Choosing a file
  * also fetches the current state, so Apply stays disabled until that settles;
  * wait for it rather than assuming the inspect round-trip alone was enough.
@@ -348,8 +387,11 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     // row BACK in the set, so the loop must still hold in both directions.
     fireEvent.click(screen.getByRole('checkbox', { name: 'Take S2' }));
 
+    // The RECORD rows live in the shared list's own container (the settings
+// parts reuse the older `__import-records` class, so that selector would
+// silently walk the wrong set of rows).
     const rows = Array.from(
-      screen.getByTestId('import-diff').querySelectorAll('ul.tbs-settings__import-records > li'),
+      screen.getByTestId('import-diff').querySelectorAll('ul.tbs-record-list__rows > li'),
     );
     expect(rows.length).toBeGreaterThan(0);
 
@@ -434,9 +476,10 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(dialog.textContent).toMatch(/delete 2 slots and 3 rules/i);
   });
 
-  it('a file-only row is accepted and cannot be declined (added is always applied)', async () => {
-    // `added` cannot honour `keep`: the package's own records are always applied,
-    // so the control is checked and DISABLED rather than a dead toggle.
+  it('a file-only row is accepted and CAN be declined (added is a real choice)', async () => {
+    // A file-only row is take-able by default, and its checkbox must be able to
+    // say "no": declining means "do not create this on my machine", which the
+    // diff honours by reporting the row `kept`.
     await openImportSection();
     await selectFile();
 
@@ -444,7 +487,20 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     // buttons always were); query by the row's own testid to stay unambiguous.
     const added = screen.getByTestId('import-record-rule-r4');
     expect(added).toBeChecked();
-    expect(added).toBeDisabled();
+    expect(added).not.toBeDisabled();
+
+    const row = () => added.closest('li')?.textContent ?? '';
+    expect(row()).toMatch(/added/);
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Take https://d.example/' }));
+    expect(screen.getByTestId('import-record-rule-r4')).not.toBeChecked();
+    expect(row()).toMatch(/kept/);
+    expect(row()).not.toMatch(/added/);
+
+    // Re-check ⇒ added again: neither direction is vacuous.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Take https://d.example/' }));
+    expect(screen.getByTestId('import-record-rule-r4')).toBeChecked();
+    expect(row()).toMatch(/added/);
   });
 
   it('T20a: a record row expands to field-level lines, decoded not raw (A12/D9)', async () => {
@@ -456,17 +512,46 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     const fieldsBox = screen.getByTestId('import-fields-slot-2');
     expect(fieldsBox.textContent).toMatch(/Fields/i);
 
-    const titleLine = screen.getByTestId('import-field-slot-2-title');
-    expect(titleLine.textContent).toMatch(/Title: S2 → FILE-S2/);
+    const title = fieldCells('slot', 2, 'title');
+    expect(title.label).toBe('Title');
+    expect(title.before).toBe('S2');
+    expect(title.after).toBe('FILE-S2');
+    expect(title.state).toBe('changed');
 
-    const iconLine = screen.getByTestId('import-field-slot-2-icon');
     // The icon genuinely changed (recipe added) ⇒ the arrow branch renders a
     // REAL value, so the anti-leak assertion below is not vacuous.
-    expect(iconLine.textContent).toMatch(/Icon: None → Recipe icon/i);
+    const icon = fieldCells('slot', 2, 'icon');
+    expect(icon.after).toMatch(/Recipe icon/i);
 
     // D9: no raw diff signature may reach the DOM.
     expect(fieldsBox.textContent).not.toMatch(/recipe:|local-ref:|url:/);
     expect(fieldsBox.textContent).not.toMatch(/\|/);
+  });
+
+  it('lays each field out as label │ value │ state, so the columns line up', async () => {
+    // The complaint this fixes: five fields rendered as five run-on sentences
+    // gave the eye no column to scan. The claim is STRUCTURAL — each row is a
+    // three-cell grid — because jsdom has no layout engine (cf.
+    // `settings-class-css.test.ts`).
+    await openImportSection();
+    await selectFile();
+
+    const rows = screen.getByTestId('import-fields-slot-2')
+      .querySelectorAll('.tbs-field-row');
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of Array.from(rows)) {
+      // Every field has a label cell and a state cell — the two fixed columns.
+      expect(row.querySelector('.tbs-field-row__label')?.textContent).toBeTruthy();
+      expect(row.querySelector('.tbs-field-row__state')?.textContent).toBeTruthy();
+      // The label is its own element, NOT glued into the value text.
+      expect(row.querySelector('.tbs-field-row__value')).toBeTruthy();
+    }
+
+    // The labels are the field NAMES, not the old `Title:` prefixes.
+    const labels = Array.from(rows).map(
+      (r) => r.querySelector('.tbs-field-row__label')?.textContent,
+    );
+    expect(labels).toEqual(['Title', 'Icon', 'Match URL', 'Match Type']);
   });
 
   it('T20a: added rows carry the value and never say "unchanged" (A12/D9)', async () => {
@@ -474,12 +559,25 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await openImportSection();
     await selectFile();
 
-    const addedTitle = screen.getByTestId('import-field-rule-r4-title').textContent;
-    expect(addedTitle).toMatch(/Title: added/i);
-    expect(addedTitle).not.toMatch(/unchanged/i);
+    const addedTitle = fieldCells('rule', 'r4', 'title');
+    expect(addedTitle.state).toBe('added');
+    expect(addedTitle.before).toBeNull(); // no machine side ⇒ no arrow
+    // The fixture's rule carries no title, so there is no value to print: the
+    // cell is absent and the renderer draws its own dash. (The old flat form
+    // printed `Title: added` here, which is the same fact as text.)
+    expect(addedTitle.after).toBeNull();
 
-    const addedIcon = screen.getByTestId('import-field-rule-r4-icon').textContent;
-    expect(addedIcon).toBe('Icon: added'); // no value ⇒ bare form
+    // A facet that DOES carry a value prints it, so the assertion above is not
+    // passing merely because every value cell is empty.
+    const addedUrl = fieldCells('rule', 'r4', 'match-url');
+    expect(addedUrl.state).toBe('added');
+    expect(addedUrl.before).toBeNull();
+    expect(addedUrl.after).toBe('https://d.example/');
+
+    const addedIcon = fieldCells('rule', 'r4', 'icon');
+    expect(addedIcon.state).toBe('added');
+    expect(addedIcon.before).toBeNull();
+    expect(addedIcon.after).toBeNull();
   });
 
   it('T20a: deleted rows report "removed" with the last value, never "→ None" (A12/D9)', async () => {
@@ -497,12 +595,17 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     // from the injected inspection. In production both come from the user's mode.
     fireEvent.change(screen.getByTestId('import-mode-slots'), { target: { value: 'overwrite' } });
 
-    const title = screen.getByTestId('import-field-slot-1-title').textContent;
-    expect(title).toBe('Title: removed (S1)');
+    const title = fieldCells('slot', 1, 'title');
+    expect(title.state).toBe('removed');
+    expect(title.before).toBe('S1');
+    // The surviving-side cell is ABSENT: there is nothing for an arrow to point
+    // at, which is why the old "→ None" could not be rendered here.
+    expect(title.after).toBeNull();
 
-    const icon = screen.getByTestId('import-field-slot-1-icon').textContent;
-    expect(icon).toBe('Icon: removed'); // no value ⇒ bare form
-    expect(icon).not.toMatch(/unchanged|None/);
+    const icon = fieldCells('slot', 1, 'icon');
+    expect(icon.state).toBe('removed');
+    expect(icon.before).toBeNull(); // no value to carry
+    expect(icon.after).toBeNull();
   });
 
   it('shows the Settings VALUES — three strategy states, all distinguishable', async () => {
@@ -547,19 +650,368 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     expect(box.textContent).toMatch(/Switch direction: next → previous/);
     expect(box.textContent).toMatch(/Auto-bind: true → false/);
 
-    // ABSENT (slot 1) vs EXPLICIT inherit (slot 2) vs OBJECT (slot 3) — all three
-    // must be distinguishable.
-    expect(screen.getByTestId('import-slot-strategy-1').textContent).toMatch(/inherit \(by default\)/);
-    expect(screen.getByTestId('import-slot-strategy-2').textContent).toMatch(/inherit$/);
-    expect(screen.getByTestId('import-slot-strategy-2').textContent).not.toMatch(/by default/);
-    const slot3 = screen.getByTestId('import-slot-strategy-3').textContent;
+    // Only the slots the FILE carries a strategy for get a row: slot 2 (explicit
+    // 'inherit') and slot 3 (an object). A slot the file says nothing about is
+    // NOT applied, so no row claims otherwise.
+    expect(screen.queryByTestId('import-slot-strategy-1')).toBeNull();
+    // Read the comparison ELEMENT, not the whole row: the row also carries the
+    // status badge and the checkbox, so an end-anchored regex over its text
+    // would be defeated by a control that has nothing to do with the value.
+    const slot2Diff = screen.getByTestId('import-slot-strategy-2')
+      .querySelector('.tbs-settings__part-diff')?.textContent ?? '';
+    expect(slot2Diff).toMatch(/inherit$/);
+    expect(slot2Diff).not.toMatch(/by default/);
+
+    const slot3 = screen.getByTestId('import-slot-strategy-3')
+      .querySelector('.tbs-settings__part-diff')?.textContent ?? '';
     // slot 3's TARGET strategy really is `inherit` — the arrow's LEFT side may
     // say so. The right side carries the file's object and must NOT degrade to
     // `inherit`, so pin the direction: the concrete triple follows the arrow.
-    // (The old `not.toMatch(/inherit/)` failed once the target side read its own
-    // value honestly — it conflated "the file's value" with "anywhere in the line".)
     expect(slot3).toMatch(/inherit → Tab ID exists, Rule check match, Priority tabId/);
     expect(slot3).not.toMatch(/→ inherit/);
+  });
+
+  it('lets each settings PART be taken or declined independently (需求9)', async () => {
+    // The parts are the unit the user thinks in ("Match settings", "per-slot
+    // strategy"), so unticking one must restrict the write to the others rather
+    // than applying all of them or none.
+    const withSettings: ExportPackage = {
+      ...PKG,
+      scope: { slots: true, rules: true, settings: true },
+      settings: {
+        matchSettings: { tabIdMode: 'no-exists', ruleCheckMode: 'no-match', priority: 'none' },
+        switchDirection: 'previous',
+        autoBindGlobal: false,
+        slotStrategies: { 2: 'inherit' },
+      },
+    };
+    const base = defaultImportIntent();
+    await openImportSection(
+      makeInspection(withSettings, CURRENT, 5, base),
+      CURRENT,
+      JSON.stringify(withSettings),
+    );
+    await selectFile();
+
+    const box = screen.getByTestId('import-settings-values');
+    const rows = Array.from(box.querySelectorAll('li[data-testid]'));
+    expect(rows.length).toBeGreaterThan(0);
+    // Every part starts taken (the "accept everything" default).
+    for (const row of rows) {
+      expect((row.querySelector('input[type="checkbox"]') as HTMLInputElement).checked).toBe(true);
+    }
+
+    // Decline ONE part and confirm the dialog is still reachable — the import is
+    // restricted, not blocked.
+    fireEvent.click(screen.getByTestId('import-part-take-switchDirection'));
+    expect(
+      (screen.getByTestId('import-part-take-switchDirection') as HTMLInputElement).checked,
+    ).toBe(false);
+    // The other parts are untouched by one click.
+    expect(
+      (screen.getByTestId('import-part-take-matchSettings') as HTMLInputElement).checked,
+    ).toBe(true);
+  });
+
+  it('shows the icon itself when the Icon field CHANGES (需求8)', async () => {
+    // "Local icon (local-icon:icon:slot-3)" describes a reference without saying
+    // what it looks like, so a changed Icon field must show the icon. Slot 2's
+    // file side carries a RECIPE (three colour/text values, not a bitmap), which
+    // is exactly the case a text-only renderer cannot convey.
+    await openImportSection();
+    await selectFile();
+
+    const line = screen.getByTestId('import-field-slot-2-icon');
+    // The preview is rendered BESIDE the text, not instead of it.
+    expect(line.querySelectorAll('.tbs-icon-preview').length).toBeGreaterThan(0);
+    // ...and the text still describes the value — in the LABEL cell, which is
+    // where the field's name now lives.
+    expect(line.querySelector('.tbs-field-row__label')?.textContent).toBe('Icon');
+    expect(line.querySelector('.tbs-field-row__value')?.textContent).toMatch(/Recipe icon/i);
+  });
+
+  it('shows the rule PRIORITY for a rule the machine HAS', async () => {
+    // Priority is a rule column and is NOT one of the four change facets, so it
+    // has to reach the list by its own route — a diff-only implementation would
+    // silently omit it.
+    //
+    // The MACHINE's rule r1 carries priority 7 (CURRENT) while the file's slot 2
+    // and rule r4 are unrelated; the row must read the machine's number.
+    const target: SyncState = {
+      ...CURRENT,
+      rules: [{ ...CURRENT.rules[0], priority: 7 }, ...CURRENT.rules.slice(1)],
+    };
+    await openImportSection(makeInspection(PKG, target), target, FILE_TEXT);
+    await selectFile();
+
+    const row = screen.getByTestId('import-rules-row-r1');
+    // Read the priority COLUMN specifically: "7" also appears in the row's
+    // Fields detail (Priority is a reportable rule facet), so a bare text query
+    // would match two elements and prove nothing about the column.
+    expect(row.querySelector('.tbs-record-row__priority')?.textContent).toBe('7');
+
+    // A rule only the FILE carries has no machine priority to show.
+    expect(
+      screen.getByTestId('import-rules-row-r4')
+        .querySelector('.tbs-record-row__priority'),
+    ).toBeNull();
+  });
+
+  it('applies through a version conflict when the reviewed outcome did NOT change (F4)', async () => {
+    // The reported defect: confirming the import was refused with "the
+    // configuration changed", and the same happened again after re-checking, so
+    // the user could never import. F4's guarantee is "never write onto a state
+    // the user did not review" — and when the re-read produces the SAME review,
+    // they demonstrably did review it, so refusing is not protection but a
+    // dead end. This pins that the retry happens and lands.
+    await openImportSection();
+    await selectFile();
+
+    // First APPLY refuses (stale version); the re-read returns a HIGHER version
+    // but the same records, so the retry must succeed.
+    let applyCalls = 0;
+    const applyVersions: Array<number | undefined> = [];
+    const inner = mockSendMessage.getMockImplementation();
+    mockSendMessage.mockImplementation((msg: { action?: string; configVersion?: number }) => {
+      if (msg.action === 'IMPORT_APPLY') {
+        applyCalls += 1;
+        applyVersions.push(msg.configVersion);
+        if (applyCalls === 1) {
+          return Promise.resolve({
+            result: { success: false, errorCode: 'CONFIG_CONFLICT', message: 'Version conflict' },
+          });
+        }
+        return Promise.resolve({ result: { success: true, configVersion: 99, result: FULL_APPLY_RESULT } });
+      }
+      // The live state now reports a bumped version with the SAME slots/rules.
+      if (msg.action === 'GET_STATE') {
+        return Promise.resolve({
+          result: {
+            success: true,
+            sync: { ...CURRENT, configVersion: 42 },
+            local: {
+              bindings: [], cycleCursors: [], lastSuccessSlotId: null,
+              recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [],
+            },
+          },
+        });
+      }
+      return inner ? inner(msg) : Promise.resolve({ result: { success: true } });
+    });
+
+    fireEvent.click(screen.getByTestId('import-apply'));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /confirm import/i }));
+
+    // It lands: the result list appears rather than the conflict toast.
+    await screen.findByTestId('import-result');
+    expect(applyCalls).toBe(2);
+    // The retry carried the FRESH version, not the stale one again.
+    expect(applyVersions).toEqual([5, 42]);
+  });
+
+  it('still refuses when the re-read shows a DIFFERENT outcome (F4 preserved)', async () => {
+    // The other half of the same rule: if the live state genuinely moved, the
+    // import must NOT be retried against it — the user would be writing a
+    // result they never saw.
+    await openImportSection();
+    await selectFile();
+
+    let applyCalls = 0;
+    const inner = mockSendMessage.getMockImplementation();
+    mockSendMessage.mockImplementation((msg: { action?: string }) => {
+      if (msg.action === 'IMPORT_APPLY') {
+        applyCalls += 1;
+        return Promise.resolve({
+          result: { success: false, errorCode: 'CONFIG_CONFLICT', message: 'Version conflict' },
+        });
+      }
+      if (msg.action === 'GET_STATE') {
+        // A rule the file does not carry appeared ⇒ the diff's rows differ.
+        return Promise.resolve({
+          result: {
+            success: true,
+            sync: {
+              ...CURRENT,
+              configVersion: 42,
+              rules: [...CURRENT.rules, curRule('r-foreign', 'https://foreign.example/')],
+            },
+            local: {
+              bindings: [], cycleCursors: [], lastSuccessSlotId: null,
+              recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [],
+            },
+          },
+        });
+      }
+      return inner ? inner(msg) : Promise.resolve({ result: { success: true } });
+    });
+
+    fireEvent.click(screen.getByTestId('import-apply'));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /confirm import/i }));
+
+    // Exactly ONE attempt: no retry, and the user is told to review again.
+    await waitFor(() => { expect(applyCalls).toBe(1); });
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.queryByTestId('import-result')).toBeNull();
+  });
+
+  it('re-reads the machine on refresh, so the review stops comparing a stale snapshot', async () => {
+    // The review is derived from the snapshot taken when the FILE was chosen. A
+    // change made elsewhere afterwards was invisible: the diff kept comparing the
+    // file against values the machine no longer had. The refresh button must make
+    // the panel re-read — this pins that the DERIVATION (not just the call) moved.
+    await openImportSection();
+    await selectFile();
+
+    // Slot 2 exists on BOTH sides (the file changes its title), so its row is
+    // `replaced` against a machine that still has slot 2.
+    await waitFor(() => {
+      expect(screen.getByTestId('import-slots-row-2').textContent).toMatch(/replaced/);
+    });
+
+    // Someone DELETES slot 2 in the sidebar after the file was opened.
+    const inner = mockSendMessage.getMockImplementation();
+    mockSendMessage.mockImplementation((msg: { action?: string }) => {
+      if (msg.action === 'GET_STATE') {
+        return Promise.resolve({
+          result: {
+            success: true,
+            sync: { ...CURRENT, configVersion: 9, slots: CURRENT.slots.filter((s) => s.id !== 2) },
+            local: {
+              bindings: [], cycleCursors: [], lastSuccessSlotId: null,
+              recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [],
+            },
+          },
+        });
+      }
+      return inner ? inner(msg) : Promise.resolve({ result: { success: true } });
+    });
+    // The stale review still describes the old machine.
+    expect(screen.getByTestId('import-slots-row-2').textContent).toMatch(/replaced/);
+
+    fireEvent.click(screen.getByTestId('import-export-refresh'));
+
+    // Slot 2 is now FILE-ONLY, so it reads `added`: the comparison really used
+    // the re-read state rather than the frozen snapshot.
+    await waitFor(() => {
+      expect(screen.getByTestId('import-slots-row-2').textContent).toMatch(/added/);
+    });
+  });
+
+  it('describes the TARGET machine on every row, not the file', async () => {
+    // The reported defect: a record the machine already had was described with
+    // the FILE's title / Match URL, so an edit made elsewhere looked ignored.
+    // Slot 2 exists on both sides (the file renames it), so its row must read the
+    // MACHINE's title, with the file's value visible only in the Fields detail.
+    await openImportSection();
+    await selectFile();
+
+    const row = await screen.findByTestId('import-slots-row-2');
+    // Read the row's OWN CELLS, not its whole `<li>`: the Fields detail is a
+    // child of the row by design, so it legitimately mentions the file's value.
+    const cell = row.querySelector('.tbs-record-row__main')?.textContent ?? '';
+    // The machine's title is "S2"; the file's is "FILE-S2".
+    expect(cell).toMatch(/S2/);
+    expect(cell).not.toMatch(/FILE-S2/);
+    // ...and the file's value is still reported, inside the detail.
+    const detail = screen.getByTestId('import-fields-slot-2');
+    expect(detail.textContent).toMatch(/FILE-S2/);
+  });
+
+  it('shows the MACHINE\u2019s icon on the row, not the incoming one', async () => {
+    // Slot 2 exists on both sides: the machine has a URL icon, the file brings a
+    // RECIPE icon. The row must show the machine's, and the file's must appear in
+    // the Fields detail — showing the incoming icon made an untouched record look
+    // as though its icon had already been swapped.
+    const target: SyncState = {
+      ...CURRENT,
+      slots: [
+        curSlot(1, 'S1'),
+        { ...curSlot(2, 'S2'), uiMarker: { icon: { type: 'url', value: 'https://machine.example/i.png' } } },
+        curSlot(3, 'S3'),
+      ],
+    };
+    await openImportSection(makeInspection(PKG, target), target, FILE_TEXT);
+    await selectFile();
+
+    const row = await screen.findByTestId('import-slots-row-2');
+    const cell = row.querySelector('.tbs-record-row__main') ?? row;
+    const img = cell.querySelector('img');
+    expect(img?.getAttribute('src')).toBe('https://machine.example/i.png');
+
+    // The file's recipe is still reported, in the detail.
+    expect(screen.getByTestId('import-fields-slot-2').textContent).toMatch(/Recipe icon/);
+  });
+
+  it('shows NOTHING from the file on a row the machine does not have', async () => {
+    // The list is the machine's side of the comparison, full stop. A record only
+    // the FILE carries has no machine values — not an icon, not a title, not a
+    // priority — and borrowing the file's would present incoming data as though
+    // it were already on the machine. Everything the file brings belongs in the
+    // Fields detail.
+    //
+    // Rule r4 is file-only; the file's slot 2 is renamed "FILE-S2" and carries a
+    // recipe icon, which is what the `replaced` row must NOT show.
+    const target: SyncState = { ...CURRENT, rules: [] };
+    const file: ExportPackage = {
+      ...PKG,
+      slots: [FILE_SLOT_2],
+      rules: [{ ...FILE_RULE_4, priority: 42, favicon: { kind: 'url', url: 'https://file.example/i.png' } }],
+    };
+    await openImportSection(makeInspection(file, target), target, JSON.stringify(file));
+    await selectFile();
+
+    // The rule the machine does not have: no priority column, no title, no icon.
+    const ruleRow = await screen.findByTestId('import-rules-row-r4');
+    const ruleCell = ruleRow.querySelector('.tbs-record-row__main') ?? ruleRow;
+    expect(ruleCell.querySelector('.tbs-record-row__priority')).toBeNull();
+    expect(ruleCell.querySelector('img')).toBeNull();
+    expect(ruleCell.textContent).not.toMatch(/42/);
+    // The incoming values are still reported, in the detail.
+    expect(screen.getByTestId('import-fields-rule-r4').textContent).toMatch(/42/);
+  });
+
+  it('lets the settings and shortcut parts be selected all at once (需求)', async () => {
+    const withParts: ExportPackage = {
+      ...PKG,
+      scope: { slots: true, rules: true, settings: true, shortcuts: true },
+      settings: {
+        matchSettings: { tabIdMode: 'no-exists', ruleCheckMode: 'no-match', priority: 'none' },
+        switchDirection: 'previous',
+        autoBindGlobal: false,
+        slotStrategies: { 2: 'inherit' },
+      },
+      shortcuts: {
+        global: [{ name: 'next-match', shortcut: 'Ctrl+Shift+9' }],
+        perSlot: { 3: [{ name: 'save-slot-3', shortcut: 'Alt+3' }] },
+      },
+    };
+    await openImportSection(makeInspection(withParts, CURRENT), CURRENT, JSON.stringify(withParts));
+    await selectFile();
+
+    // Settings: clear all, then select all.
+    const settingsAll = screen.getByTestId('import-settings-select-all') as HTMLInputElement;
+    expect(settingsAll.checked).toBe(true); // "take everything" is the default
+    fireEvent.click(settingsAll);
+    // Bisect: the control's own state first, then the rows it governs. If the
+    // control does not move, the click never reached the handler; if it moves
+    // alone, the rows are reading a different source than the control.
+    await waitFor(() => {
+      expect((screen.getByTestId('import-settings-select-all') as HTMLInputElement).checked).toBe(false);
+    });
+    await waitFor(() => {
+      expect((screen.getByTestId('import-part-take-switchDirection') as HTMLInputElement).checked).toBe(false);
+    });
+    fireEvent.click(screen.getByTestId('import-settings-select-all'));
+    await waitFor(() => {
+      expect((screen.getByTestId('import-part-take-switchDirection') as HTMLInputElement).checked).toBe(true);
+    });
+
+    // Shortcuts: both bindings follow the one control.
+    fireEvent.click(screen.getByTestId('import-shortcuts-select-all'));
+    expect((screen.getByTestId('import-shortcut-take-next-match') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByTestId('import-shortcut-take-save-slot-3') as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByTestId('import-shortcuts-select-all'));
+    expect((screen.getByTestId('import-shortcut-take-save-slot-3') as HTMLInputElement).checked).toBe(true);
   });
 
   it('a dimension the package did NOT carry has no selector (A2)', async () => {
@@ -622,17 +1074,25 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await openImportSection();
     await selectFile();
 
-    const fields = screen.getByTestId('import-fields-slot-2');
-    const text = fields.textContent;
     // All four facets of the record are shown, so "which part changed" is
     // answerable — the match definition used to be invisible.
-    expect(text).toMatch(/Title:/);
-    expect(text).toMatch(/Icon:/);
-    expect(text).toMatch(/Match URL:/);
-    expect(text).toMatch(/Match Type:/);
-    // A changed facet carries BOTH concrete values; an unchanged one says so.
-    expect(text).toMatch(/Title: S2 → FILE-S2/);
-    expect(text).toMatch(/Match URL: unchanged/);
+    expect(
+      Array.from(screen.getByTestId('import-fields-slot-2')
+        .querySelectorAll('.tbs-field-row__label'))
+        .map((el) => el.textContent),
+    ).toEqual(['Title', 'Icon', 'Match URL', 'Match Type']);
+
+    // A changed facet carries BOTH concrete values, in their own cells.
+    const title = fieldCells('slot', 2, 'title');
+    expect(title.before).toBe('S2');
+    expect(title.after).toBe('FILE-S2');
+
+    // An unchanged facet names the machine's value too, so the reader can see
+    // what stayed the same without scrolling back to the row.
+    const url = fieldCells('slot', 2, 'match-url');
+    expect(url.state).toBe('unchanged');
+    expect(url.before).toBeNull();
+    expect(url.after).toBe('https://s2.example/');
   });
 
   it('a changed MATCH is shown with both concrete values (not "unchanged")', async () => {
@@ -647,8 +1107,10 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await openImportSection(makeInspection(file, target), target, JSON.stringify(file));
     await selectFile();
 
-    const text = screen.getByTestId('import-fields-slot-7').textContent;
-    expect(text).toMatch(/Match URL: https:\/\/s7\.example\/ → https:\/\/moved\.example\//);
+    const url = fieldCells('slot', 7, 'match-url');
+    expect(url.state).toBe('changed');
+    expect(url.before).toBe('https://s7.example/');
+    expect(url.after).toBe('https://moved.example/');
   });
 
   it('lists slots by slot NUMBER with the number in the label, whatever order the file used', async () => {
@@ -663,7 +1125,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await selectFile();
 
     const rows = screen.getByTestId('import-dim-slots')
-      .querySelectorAll('ul.tbs-settings__import-records > li > span:first-child');
+      .querySelectorAll('ul.tbs-record-list__rows > li .tbs-record-row__title');
     const labels = Array.from(rows).map((el) => el.textContent);
     expect(labels).toEqual(['Slot 1 — S1', 'Slot 2 — S2', 'Slot 3 — S3']);
   });
@@ -687,7 +1149,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
 
     const slots = screen.getByTestId('import-dim-slots');
     expect(slots.textContent).not.toMatch(/Slot 1 — Slot 1/);
-    const rows = slots.querySelectorAll('ul.tbs-settings__import-records > li > span:first-child');
+    const rows = slots.querySelectorAll('ul.tbs-record-list__rows > li .tbs-record-row__title');
     expect(Array.from(rows).map((el) => el.textContent)).toEqual(['Slot 1', 'Slot 2']);
   });
 
@@ -704,7 +1166,7 @@ describe('T18 — import section: dimension modes, diff, quantized confirm', () 
     await selectFile();
 
     const row = screen.getByTestId('import-dim-slots')
-      .querySelector('ul.tbs-settings__import-records > li > span:first-child');
+      .querySelector('ul.tbs-record-list__rows > li .tbs-record-row__title');
     expect(row?.textContent).toBe('Slot 7');
   });
 

@@ -81,7 +81,7 @@ describe('T1: export package mapping', () => {
     expect(settings?.matchSettings).toEqual(state.matchSettings);
     expect(settings?.switchDirection).toBe('previous');
     expect(settings?.autoBindGlobal).toBe(false);
-    expect(settings?.slotStrategies[3]).toEqual(SETTINGS_SLOT3);
+    expect(settings?.slotStrategies?.[3]).toEqual(SETTINGS_SLOT3);
   });
 
   it('does not mirror SyncState: strategy is stripped from slots[] (D3)', () => {
@@ -92,7 +92,7 @@ describe('T1: export package mapping', () => {
       expect(slot).not.toHaveProperty('strategy');
     }
     // The per-slot strategy lives in the settings dimension instead.
-    expect(pkg.settings?.slotStrategies[3]).toEqual(SETTINGS_SLOT3);
+    expect(pkg.settings?.slotStrategies?.[3]).toEqual(SETTINGS_SLOT3);
   });
 
   it('absent dimension ⇒ absent key, not []/undefined key (A2/A3)', () => {

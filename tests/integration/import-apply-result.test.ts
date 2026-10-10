@@ -201,9 +201,14 @@ describe('T22 — APPLY result: shortcut guidance (D4 派生 2)', () => {
     service = new ImportExportService(repo, new IconService(repo));
   });
 
+  /**
+   * A package carrying ONE real binding. An empty shortcut map would make every
+   * assertion below vacuous: with nothing to set there is nothing to guide about,
+   * so the guidance would be absent for a reason unrelated to the platform.
+   */
   const withShortcuts = () => pkgString({
     rules: [],
-    shortcuts: { global: [], perSlot: {} },
+    shortcuts: { global: [{ name: 'next-match', shortcut: 'Ctrl+Shift+9' }], perSlot: {} },
   });
 
   it('emits manual-set-up guidance when the platform cannot update commands', async () => {
@@ -214,6 +219,9 @@ describe('T22 — APPLY result: shortcut guidance (D4 派生 2)', () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.result.shortcutGuidance).toContain('chrome://extensions/shortcuts');
+    // ...and the outcome says the binding did NOT land, so the list and the
+    // guidance cannot contradict each other.
+    expect(result.result.dimensions.shortcuts).toEqual({ changed: 0, failed: 1 });
   });
 
   it('emits NO guidance when the platform supports it', async () => {
@@ -234,6 +242,111 @@ describe('T22 — APPLY result: shortcut guidance (D4 派生 2)', () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.result.shortcutGuidance).toBeUndefined();
+  });
+});
+
+/**
+ * 需求4 — the shortcut write.
+ *
+ * The defect this pins: APPLY produced guidance and wrote NOTHING, so a target
+ * machine kept its old bindings while the result reported success. The writer is
+ * now actually driven, per binding, and the outcome counts what landed.
+ */
+describe('需求4 — APPLY result: shortcuts are actually written', () => {
+  const adapter = createMockAdapter();
+  let repo: StorageRepository;
+  let service: ImportExportService;
+  let written: Array<{ name: string; shortcut: string | null }>;
+  let failFor: Set<string>;
+
+  const pkg = () => pkgString({
+    rules: [],
+    shortcuts: {
+      global: [{ name: 'next-match', shortcut: 'Ctrl+Shift+9' }],
+      perSlot: { 3: [{ name: 'save-slot-3', shortcut: 'Alt+3' }] },
+    },
+  });
+
+  beforeEach(async () => {
+    adapter.reset();
+    repo = new StorageRepository(adapter);
+    await repo.initialize();
+    service = new ImportExportService(repo, new IconService(repo));
+    written = [];
+    failFor = new Set();
+    service.setShortcutWriter({
+      update: (name, shortcut) => {
+        if (failFor.has(name)) return Promise.reject(new Error('refused by the browser'));
+        written.push({ name, shortcut });
+        return Promise.resolve();
+      },
+    });
+  });
+
+  it('writes every taken binding and counts them as changed', async () => {
+    const result = await service.applyImport(
+      pkg(), defaultImportIntent(), repo.getConfigVersion(),
+      { commandsUpdateSupported: true },
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    expect(written).toEqual([
+      { name: 'next-match', shortcut: 'Ctrl+Shift+9' },
+      { name: 'save-slot-3', shortcut: 'Alt+3' },
+    ]);
+    expect(result.result.dimensions.shortcuts).toEqual({ changed: 2, failed: 0 });
+  });
+
+  it('writes ONLY the bindings the user took (takeShortcutNames is an allow-list)', async () => {
+    const intent = { ...defaultImportIntent(), takeShortcutNames: ['save-slot-3'] };
+    const result = await service.applyImport(
+      pkg(), intent, repo.getConfigVersion(),
+      { commandsUpdateSupported: true },
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    expect(written).toEqual([{ name: 'save-slot-3', shortcut: 'Alt+3' }]);
+    expect(result.result.dimensions.shortcuts).toEqual({ changed: 1, failed: 0 });
+  });
+
+  it('reports a refused binding as FAILED without abandoning the others', async () => {
+    failFor.add('next-match');
+    const result = await service.applyImport(
+      pkg(), defaultImportIntent(), repo.getConfigVersion(),
+      { commandsUpdateSupported: true },
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    // The refusal is contained: the other binding still landed.
+    expect(written).toEqual([{ name: 'save-slot-3', shortcut: 'Alt+3' }]);
+    expect(result.result.dimensions.shortcuts).toEqual({ changed: 1, failed: 1 });
+  });
+
+  it('reports per-dimension outcomes for records too', async () => {
+    const result = await service.applyImport(
+      pkgString({
+        rules: [rule('r1', 'https://a.example/')],
+        slots: [{
+          id: 1,
+          urlMatch: exact('https://s1.example/'),
+          marker: {},
+          titleSnapshot: 'S1',
+          faviconSnapshot: '',
+        }],
+      }),
+      defaultImportIntent(),
+      repo.getConfigVersion(),
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    // Both records are new to an empty machine, so both change.
+    expect(result.result.dimensions.slots.changed).toBe(1);
+    expect(result.result.dimensions.rules.changed).toBe(1);
+    expect(result.result.dimensions.slots.failed).toBe(0);
   });
 });
 

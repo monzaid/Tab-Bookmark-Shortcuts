@@ -50,7 +50,6 @@ export interface PortableSlotMarker {
 export interface PortableSlotDef {
   id: number;
   urlMatch: UrlMatchDefinition;
-  autoBindOverride?: boolean;
   marker: PortableSlotMarker;
   titleSnapshot: string;
   faviconSnapshot: string;
@@ -66,12 +65,32 @@ export interface PortableRule {
   enabled?: boolean;
 }
 
-/** Global settings + the per-slot strategies that were stripped from `slots[]`. */
+/**
+ * Settings — the three global parts plus the per-slot parts that were stripped
+ * from `slots[]` (D3).
+ *
+ * EVERY part is optional (R4/9). This is a deliberate reversal of the earlier
+ * "settings is an all-or-nothing global axis" ruling: a user genuinely needs to
+ * share "how switching works" without also shipping twenty per-slot overrides,
+ * and the part is the unit they think in ("Match settings", "per-slot strategy").
+ *
+ * Semantics of absence: an ABSENT part is NOT carried and therefore NEVER
+ * applied — it cannot overwrite the target machine's value. A part that IS
+ * present is validated exactly as before. An old package carrying all four parts
+ * is still a valid package, so `schemaVersion` stays 1.
+ */
 export interface PortableSettings {
-  matchSettings: MatchRuleSettings;
-  switchDirection: SwitchDirection;
-  autoBindGlobal: boolean;
-  slotStrategies: Record<number, 'inherit' | MatchRuleSettings>;
+  matchSettings?: MatchRuleSettings;
+  switchDirection?: SwitchDirection;
+  autoBindGlobal?: boolean;
+  slotStrategies?: Record<number, 'inherit' | MatchRuleSettings>;
+  /**
+   * Per-slot auto-bind overrides, moved OUT of `slots[]` so the settings
+   * dimension is the single home of every setting-shaped value (R4: "每个槽的
+   * Strategy、Auto-bind" are the same kind of thing and belong on one axis).
+   * `true`/`false` = explicit override, absent key = follow the global default.
+   */
+  slotAutoBinds?: Record<number, boolean>;
 }
 
 export interface PortableShortcutBinding {
@@ -123,9 +142,19 @@ const ROOT_KEYS = {
 } as const satisfies Record<keyof ExportPackage, true>;
 
 const SLOT_KEYS = {
-  id: true, urlMatch: true, autoBindOverride: true, marker: true,
+  id: true, urlMatch: true, marker: true,
   titleSnapshot: true, faviconSnapshot: true,
 } as const satisfies Record<keyof PortableSlotDef, true>;
+
+/**
+ * The `settings` part names — the allowlist the tolerant reader compares the
+ * `settings` object against, so an unknown setting-shaped key is disclosed
+ * rather than silently dropped.
+ */
+const SETTINGS_KEYS = {
+  matchSettings: true, switchDirection: true, autoBindGlobal: true,
+  slotStrategies: true, slotAutoBinds: true,
+} as const satisfies Record<keyof PortableSettings, true>;
 
 const RULE_KEYS = {
   id: true, urlMatch: true, priority: true, title: true, favicon: true, enabled: true,
@@ -135,7 +164,92 @@ export const PACKAGE_FIELD_ALLOWLIST = {
   root: Object.keys(ROOT_KEYS),
   slot: Object.keys(SLOT_KEYS),
   rule: Object.keys(RULE_KEYS),
+  settings: Object.keys(SETTINGS_KEYS),
 } as const;
+
+// ─── Settings part ids (R4/R9 — ONE vocabulary for both surfaces) ─────
+
+/**
+ * The id of one settings part. The SAME id space is used by:
+ *   1. `ExportScope.excludedSettingIds` — what the user left out;
+ *   2. `ImportIntent.takeSettingIds`    — what the user chose to take;
+ *   3. the checkbox rows on both panels.
+ *
+ * Living here (not in the UI) is what makes (1) and (2) the same vocabulary: the
+ * export panel's exclusion and the import panel's take-checkbox address a part
+ * by one name, so the two surfaces cannot drift into two spellings of "the
+ * global match settings".
+ */
+export type SettingPartId =
+  | 'matchSettings'
+  | 'switchDirection'
+  | 'autoBindGlobal'
+  | `slot:${number}:strategy`
+  | `slot:${number}:autoBind`;
+
+/** The three global parts, in display order. */
+export const GLOBAL_SETTING_PART_IDS: readonly SettingPartId[] = [
+  'matchSettings',
+  'switchDirection',
+  'autoBindGlobal',
+];
+
+/**
+ * The per-slot parts a slot OWNS — i.e. the parts that address THIS slot.
+ *
+ * `slotAutoBinds` is sparse: a slot with no explicit override owns nothing here
+ * (it follows the global default), so no row is invented for it. That is why the
+ * caller must ask per slot against the real data rather than render the full
+ * cross-product of 10 slots × 2 parts.
+ */
+/**
+ * The two per-slot part ids, as functions.
+ *
+ * `String(slotId)` plus an assertion is deliberate: interpolating the NUMBER
+ * directly would satisfy the template literal type but violates the lint rule
+ * against numbers in templates, while `String()` widens the literal to
+ * `${string}` — which no longer satisfies `SettingPartId`. The assertion bridges
+ * exactly that gap and is the ONLY place either id is spelled.
+ */
+export function slotStrategyPartId(slotId: number): SettingPartId {
+  return `slot:${String(slotId)}:strategy` as SettingPartId;
+}
+
+export function slotAutoBindPartId(slotId: number): SettingPartId {
+  return `slot:${String(slotId)}:autoBind` as SettingPartId;
+}
+
+/** The per-slot parts a slot owns, in display order. */
+export function slotSettingPartIds(slotId: number, hasAutoBindOverride: boolean): SettingPartId[] {
+  const parts: SettingPartId[] = [slotStrategyPartId(slotId)];
+  if (hasAutoBindOverride) parts.push(slotAutoBindPartId(slotId));
+  return parts;
+}
+
+// ─── Settings value rendering (ONE wording for the diff and both panels) ─────
+
+/**
+ * A match-settings triple as text — never `[object Object]`.
+ *
+ * Lives in `shared` because THREE consumers must agree on the wording: the
+ * export panel's value preview, the import panel's settings values, and the
+ * settings-part diff rows. Two spellings of the same triple is exactly the drift
+ * a single source prevents.
+ */
+export function summariseMatchSettings(s: MatchRuleSettings): string {
+  return `Tab ID ${s.tabIdMode}, Rule check ${s.ruleCheckMode}, Priority ${s.priority}`;
+}
+
+/**
+ * A per-slot strategy as text. `undefined` is NOT an explicit `'inherit'`:
+ * absent means the package carries no strategy for that slot (the target is left
+ * alone), while an explicit `'inherit'` resets the target to inherit.
+ */
+export function summariseStrategy(v: 'inherit' | MatchRuleSettings | undefined): string {
+  if (v === undefined) return 'inherit (by default)';
+  if (v === 'inherit') return 'inherit';
+  return summariseMatchSettings(v);
+}
 
 /** A partial config derived from a package, ready to be merged by the service. */
 export interface SyncPatch {
@@ -218,7 +332,6 @@ export function syncStateToPackage(
       .map((slot) => ({
         id: slot.id,
         urlMatch: slot.urlMatch,
-        autoBindOverride: slot.autoBindOverride,
         marker: markerToPortable(slot.uiMarker, `icon:slot-${String(slot.id)}`),
         titleSnapshot: slot.titleSnapshot,
         faviconSnapshot: slot.faviconSnapshot,
@@ -239,20 +352,51 @@ export function syncStateToPackage(
   }
 
   if (scope.settings) {
+    const omitted = new Set<string>(scope.excludedSettingIds ?? []);
+    const settings: PortableSettings = {};
+
+    // Only the parts that were NOT deselected are written, and nothing is
+    // written as an empty placeholder: an absent part must mean "not carried",
+    // never "carried and empty" (the two differ at import — see the absent
+    // semantics on `PortableSettings`).
+    if (!omitted.has('matchSettings')) settings.matchSettings = sync.matchSettings;
+    if (!omitted.has('switchDirection')) settings.switchDirection = sync.switchDirection;
+    if (!omitted.has('autoBindGlobal')) settings.autoBindGlobal = sync.autoBindGlobal;
+
     const slotStrategies: Record<number, 'inherit' | MatchRuleSettings> = {};
+    const slotAutoBinds: Record<number, boolean> = {};
     for (const slot of sync.slots) {
-      slotStrategies[slot.id] = slot.strategy;
+      const strategyId = slotStrategyPartId(slot.id);
+      const autoBindId = slotAutoBindPartId(slot.id);
+      if (!omitted.has(strategyId)) {
+        slotStrategies[slot.id] = slot.strategy;
+      }
+      // A slot without an explicit override owns no `autoBind` part, so there is
+      // nothing to omit and no key to write.
+      if (slot.autoBindOverride !== undefined && !omitted.has(autoBindId)) {
+        slotAutoBinds[slot.id] = slot.autoBindOverride;
+      }
     }
-    pkg.settings = {
-      matchSettings: sync.matchSettings,
-      switchDirection: sync.switchDirection,
-      autoBindGlobal: sync.autoBindGlobal,
-      slotStrategies,
-    };
+    // Keep the part PRESENT when at least one slot contributed: an empty object
+    // then legitimately means "no slot currently overrides anything", which is
+    // not the same as "the user deselected every per-slot part".
+    if (Object.keys(slotStrategies).length > 0) settings.slotStrategies = slotStrategies;
+    if (Object.keys(slotAutoBinds).length > 0) settings.slotAutoBinds = slotAutoBinds;
+
+    pkg.settings = settings;
   }
 
   if (scope.shortcuts && extras.shortcuts) {
-    pkg.shortcuts = extras.shortcuts;
+    const omitted = new Set<string>(scope.excludedShortcutNames ?? []);
+    const bindings = (list: PortableShortcutBinding[]): PortableShortcutBinding[] =>
+      list.filter((b) => !omitted.has(b.name));
+
+    const perSlot: Record<number, PortableShortcutBinding[]> = {};
+    for (const [slotId, list] of Object.entries(extras.shortcuts.perSlot)) {
+      const kept = bindings(list);
+      if (kept.length > 0) perSlot[Number(slotId)] = kept;
+    }
+    pkg.shortcuts = { global: bindings(extras.shortcuts.global), perSlot };
   }
 
   return pkg;
@@ -279,13 +423,25 @@ export function packageToSyncPatch(pkg: ExportPackage, current: SyncState): Sync
   if (pkg.slots) {
     patch.slots = pkg.slots.map((portable) => {
       const existing = current.slots.find((s) => s.id === portable.id);
-      const strategy = pkg.settings?.slotStrategies[portable.id] ?? existing?.strategy ?? 'inherit';
+      // A slot record's own fields are `slots`-dimension data. The two
+      // settings-shaped values it carries (`strategy`, `autoBindOverride`) belong
+      // to the SETTINGS dimension and are therefore only read from `settings` —
+      // never from the slot record itself (D3 + R4: settings is their one
+      // home). An absent part means "not carried", so the existing value is kept
+      // rather than defaulted: `strategy` falls back to the target's own value
+      // (or `inherit` for a genuinely new slot), and an absent auto-bind key
+      // leaves the target's override untouched.
+      const strategy = pkg.settings?.slotStrategies?.[portable.id] ?? existing?.strategy ?? 'inherit';
+      const autoBindOverride =
+        pkg.settings?.slotAutoBinds !== undefined && portable.id in pkg.settings.slotAutoBinds
+          ? pkg.settings.slotAutoBinds[portable.id]
+          : existing?.autoBindOverride;
       const now = new Date().toISOString();
       return {
         id: portable.id,
         urlMatch: portable.urlMatch,
         strategy,
-        autoBindOverride: portable.autoBindOverride,
+        autoBindOverride,
         uiMarker: markerFromPortable(portable.marker),
         titleSnapshot: portable.titleSnapshot,
         faviconSnapshot: portable.faviconSnapshot,
@@ -313,12 +469,18 @@ export function packageToSyncPatch(pkg: ExportPackage, current: SyncState): Sync
   }
 
   if (pkg.settings) {
-    patch.settings = {
-      matchSettings: pkg.settings.matchSettings,
-      switchDirection: pkg.settings.switchDirection,
-      autoBindGlobal: pkg.settings.autoBindGlobal,
-      slotStrategies: { ...pkg.settings.slotStrategies },
-    };
+    // Spread the carried parts THROUGH unchanged. Copying all four
+    // unconditionally would turn an absent part into an `undefined` key that
+    // `applyIntent` then reads as "apply nothing" — which happens to be right,
+    // but only by accident. Copying only what exists makes the partial shape
+    // explicit at the boundary where it is created.
+    patch.settings = { ...pkg.settings };
+    if (pkg.settings.slotStrategies) {
+      patch.settings.slotStrategies = { ...pkg.settings.slotStrategies };
+    }
+    if (pkg.settings.slotAutoBinds) {
+      patch.settings.slotAutoBinds = { ...pkg.settings.slotAutoBinds };
+    }
   }
 
   if (pkg.shortcuts) {
@@ -404,37 +566,59 @@ function isCanonicalSlotKey(key: string): boolean {
  * Strict shape guard for the `settings` dimension — the successor to the legacy
  * `generatePreview` check that enforced Ruling 4 ("a legacy export file is NOT
  * importable"). An ABSENT `settings` is legal (the dimension was simply not
- * carried — A2/D6, and the UI says so via `import-absent-settings`); a PRESENT
- * one must be well-formed for the ENTIRE family:
+ * carried — A2/D6, and the UI says so via `import-absent-settings`).
+ *
+ * A PRESENT `settings` is now PARTIAL by design (R4/9): every part is
+ * individually optional, and the rule is per part — PRESENT ⇒ validated by its
+ * own rule below, ABSENT ⇒ not carried and never applied.
  *
  *   matchSettings   enum members
  *   switchDirection enum members
  *   autoBindGlobal  boolean          (legacy normalised it; the new path wrote it raw)
  *   slotStrategies  keys = canonical 1..10, values = 'inherit' | valid matchSettings
+ *   slotAutoBinds   keys = canonical 1..10, values = boolean
  *
  * `slotStrategies` is the one settings field even the LEGACY guard never
- * covered: `applyIntent` walks it and writes each value onto
- * `slot.strategy` without checking, so an invalid value is persisted and then
- * silently ignored by the literal-comparing resolver.
+ * covered: `applyIntent` walks it and writes each value onto `slot.strategy`
+ * without checking, so an invalid value would be persisted and then silently
+ * ignored by the literal-comparing resolver. `slotAutoBinds` gets the same
+ * treatment for the same reason (it writes onto `slot.autoBindOverride`).
  *
  * Deliberately NOT folded into `isExportPackage`: `tolerant` reporting is
  * structural and must run on a structurally-sound package, so this is a
- * SEPARATE pass. `settings` is an all-or-nothing global axis — there is no
- * "half a matchSettings".
+ * SEPARATE pass.
+ *
+ * An empty object (`{}`) is VALID: it means "the settings dimension was carried
+ * but the user deselected every part". That is a real user choice, not a
+ * malformed file, and it applies nothing — so it must not be refused.
  */
 export function isValidPortableSettings(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
 
-  if (!isValidMatchSettingsShape(value.matchSettings)) return false;
-  if (!(value.switchDirection === 'next' || value.switchDirection === 'previous')) return false;
-  if (typeof value.autoBindGlobal !== 'boolean') return false;
+  if (value.matchSettings !== undefined && !isValidMatchSettingsShape(value.matchSettings)) return false;
+  if (
+    value.switchDirection !== undefined &&
+    !(value.switchDirection === 'next' || value.switchDirection === 'previous')
+  ) {
+    return false;
+  }
+  if (value.autoBindGlobal !== undefined && typeof value.autoBindGlobal !== 'boolean') return false;
 
-  const slotStrategies = value.slotStrategies;
-  if (!isPlainObject(slotStrategies)) return false;
-  for (const [key, strategy] of Object.entries(slotStrategies)) {
-    if (!isCanonicalSlotKey(key)) return false;
-    if (strategy === 'inherit') continue;
-    if (!isValidMatchSettingsShape(strategy)) return false;
+  if (value.slotStrategies !== undefined) {
+    if (!isPlainObject(value.slotStrategies)) return false;
+    for (const [key, strategy] of Object.entries(value.slotStrategies)) {
+      if (!isCanonicalSlotKey(key)) return false;
+      if (strategy === 'inherit') continue;
+      if (!isValidMatchSettingsShape(strategy)) return false;
+    }
+  }
+
+  if (value.slotAutoBinds !== undefined) {
+    if (!isPlainObject(value.slotAutoBinds)) return false;
+    for (const [key, override] of Object.entries(value.slotAutoBinds)) {
+      if (!isCanonicalSlotKey(key)) return false;
+      if (typeof override !== 'boolean') return false;
+    }
   }
 
   return true;

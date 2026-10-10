@@ -7,7 +7,7 @@
  * (which is the pattern this iteration removed elsewhere).
  */
 import { describe, it, expect } from 'vitest';
-import { formatFieldValue, formatFieldDiffLine } from '@ui/shared/import-field-format';
+import { formatFieldValue, formatFieldDiff } from '@ui/shared/import-field-format';
 import { matchTypeLabel } from '@shared/match-type-labels';
 import type { ImportFieldDiff, ImportFieldValue, ImportRecordStatus } from '@shared/types';
 
@@ -54,80 +54,116 @@ describe('T20a — structured value → human', () => {
   });
 });
 
-describe('T20a — field line dispatched by record status (A12)', () => {
-  const line = (f: ImportFieldDiff, status: ImportRecordStatus) => formatFieldDiffLine(f, status);
+describe('T20a — field view dispatched by record status (A12)', () => {
+  const view = (f: ImportFieldDiff, status: ImportRecordStatus) => formatFieldDiff(f, status);
 
-  it('kept + unchanged ⇒ "unchanged"', () => {
+  it('kept + unchanged ⇒ state "unchanged" AND the machine value', () => {
+    // The value is reported because "unchanged" alone does not say WHAT stayed
+    // the same — and for a facet that is not a list column (an icon, a priority)
+    // the value would then appear nowhere on the screen.
     const v: ImportFieldValue = { kind: 'text', value: 'Same' };
-    expect(line({ field: 'title', before: v, after: v, changed: false }, 'kept')).toBe(
-      'Title: unchanged',
-    );
+    expect(view({ field: 'title', before: v, after: v, changed: false }, 'kept')).toEqual({
+      label: 'Title',
+      state: 'unchanged',
+      before: null,
+      after: 'Same',
+    });
   });
 
-  it('replaced still uses the arrow pair (status does NOT short-circuit replaced)', () => {
+  it('an unchanged facet the record does NOT have carries NO value, not an empty string', () => {
+    // A slot has no priority: there is no value to name. `null` (not `''`) is
+    // what lets the renderer draw its own dash instead of an empty cell.
+    expect(view({ field: 'priority', before: null, after: null, changed: false }, 'kept')).toEqual({
+      label: 'Priority',
+      state: 'unchanged',
+      before: null,
+      after: null,
+    });
+  });
+
+  it('replaced still reports BOTH sides (status does NOT short-circuit replaced)', () => {
     expect(
-      line(
+      view(
         { field: 'title', before: { kind: 'text', value: 'Old' }, after: { kind: 'text', value: 'New' }, changed: true },
         'replaced',
       ),
-    ).toBe('Title: Old → New');
+    ).toEqual({ label: 'Title', state: 'changed', before: 'Old', after: 'New' });
   });
 
-  it('replaced with an icon that did NOT change says "unchanged" (real fixture shape)', () => {
+  it('a changed facet carries ONE side per slot — never two "before"s', () => {
+    // The structural claim behind the arrow: `before` is only set when there IS
+    // a before. A renderer drawing `before → after` unconditionally would print
+    // "None →" for a file-only record, which the shape now makes unrepresentable.
     const icon: ImportFieldValue = { kind: 'url', value: 'https://x' };
-    expect(line({ field: 'icon', before: icon, after: icon, changed: false }, 'replaced')).toBe(
-      'Icon: unchanged',
+    const changed = view(
+      { field: 'icon', before: null, after: icon, changed: true },
+      'replaced',
     );
+    expect(changed.before).toBe('None'); // explicit: the machine had NO icon
+    expect(changed.after).toBe('URL (https://x)');
+
+    const unchanged = view({ field: 'icon', before: icon, after: icon, changed: false }, 'replaced');
+    expect(unchanged.state).toBe('unchanged');
+    expect(unchanged.before).toBeNull();
+    expect(unchanged.after).toBe('URL (https://x)');
   });
 
-  it('added carries the value and never says "unchanged"', () => {
-    const out = line(
+  it('added carries the value on the AFTER slot only, with state "added"', () => {
+    const out = view(
       { field: 'icon', before: null, after: { kind: 'url', value: 'https://n' }, changed: true },
       'added',
     );
-    expect(out).toBe('Icon: added (URL (https://n))');
-    expect(out).not.toMatch(/unchanged/i);
+    expect(out).toEqual({ label: 'Icon', state: 'added', before: null, after: 'URL (https://n)' });
   });
 
-  it('deleted carries the LAST value and never says "unchanged" or "→ None"', () => {
-    const out = line(
+  it('deleted carries the LAST value on the BEFORE slot only, never "→ None"', () => {
+    const out = view(
       { field: 'icon', before: { kind: 'local-ref', key: 'icon:slot-3' }, after: null, changed: true },
       'deleted',
     );
-    expect(out).toBe('Icon: removed (Local icon (icon:slot-3))');
-    expect(out).not.toMatch(/unchanged/i);
-    expect(out).not.toMatch(/None/);
+    expect(out).toEqual({
+      label: 'Icon',
+      state: 'removed',
+      before: 'Local icon (icon:slot-3)',
+      after: null,
+    });
+    // No surviving side ⇒ no arrow can be drawn, which is the point.
+    expect(out.after).toBeNull();
   });
 
-  it('added / deleted with no value render bare (no empty parentheses)', () => {
-    expect(line({ field: 'icon', before: null, after: null, changed: false }, 'added')).toBe(
-      'Icon: added',
-    );
-    expect(line({ field: 'icon', before: null, after: null, changed: false }, 'deleted')).toBe(
-      'Icon: removed',
-    );
+  it('added / deleted with no value carry no value at all (the renderer draws a dash)', () => {
+    expect(view({ field: 'icon', before: null, after: null, changed: false }, 'added')).toEqual({
+      label: 'Icon', state: 'added', before: null, after: null,
+    });
+    expect(view({ field: 'icon', before: null, after: null, changed: false }, 'deleted')).toEqual({
+      label: 'Icon', state: 'removed', before: null, after: null,
+    });
   });
 
-  it('a changed title renders the arrow pair even when the record was added', () => {
-    // `added` short-circuits to the value form — the arrow is for kept/replaced.
-    const out = line(
+  it('the record status WINS over `changed`: an added record reports "added"', () => {
+    // `added` describes a change of EXISTENCE — the record is not on the machine
+    // at all — so a before→after pair would misstate what the import does.
+    const out = view(
       { field: 'title', before: null, after: { kind: 'text', value: 'New' }, changed: true },
       'added',
     );
-    expect(out).toBe('Title: added (New)');
+    expect(out.state).toBe('added');
+    expect(out.before).toBeNull();
   });
 
   it('names the two NEW facets (Match URL / Match Type), never "Icon"', () => {
-    const out = line(
+    const url = view(
       { field: 'match-url', before: null, after: { kind: 'text', value: 'https://n' }, changed: true },
       'added',
     );
-    expect(out).toBe('Match URL: added (https://n)');
-    const type = line(
+    expect(url.label).toBe('Match URL');
+    expect(url.after).toBe('https://n');
+    const type = view(
       { field: 'match-type', before: null, after: { kind: 'text', value: 'Exact URL' }, changed: true },
       'added',
     );
-    expect(type).toBe('Match Type: added (Exact URL)');
+    expect(type.label).toBe('Match Type');
+    expect(type.after).toBe('Exact URL');
   });
 });
 

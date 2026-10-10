@@ -541,54 +541,365 @@
 
 /* ─── Import/Export Section ───────────────────────────────────────────────── */
 
-/* A file PICKER, not a drop target: the dashed outline is the universal "drop
-   here" cue, and there is no drag handler, so it would promise an interaction
-   that does not exist. Solid border + left alignment match the other panels. */
-.tbs-settings__import-zone {
+/* The section's two panels. They carry `role="tabpanel"` for the tab strip
+   above them, so they get the same focus-visible treatment as the shared
+   primitive's own panel — the tab pattern must not look different here. */
+.tbs-settings__tabpanel:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Each half of the section is a PANEL: one job, one column, one reading width.
+   The cap is the point — a diff list and its explanatory copy must not stretch
+   across a wide window, where the eye loses the row on its way to the status
+   badge at the far edge. */
+.tbs-settings__panel {
+  max-width: 880px;
+}
+
+/* The panel header: a title and ONE sentence saying what the panel is for.
+   Both panels carry one, so the user always knows which job they are in. */
+.tbs-settings__panel-head {
+  margin-bottom: var(--space-lg);
+}
+
+.tbs-settings__panel-title {
+  margin: 0 0 var(--space-xs);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.tbs-settings__panel-sub {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+/* The action row of a panel: a status sentence on the left (so "why is this
+   disabled" sits beside the control, not above it) and the actions on the right,
+   primary last in DOM order so tab order ends on the committing action. */
+.tbs-settings__panel-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--color-border);
+}
+
+.tbs-settings__panel-status {
+  margin: 0;
+  margin-right: auto;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* ── Step 1: choose a file ─────────────────────────────────────────────────── */
+
+/* A file PICKER, not a drop target: no dashed outline and no centred-drop
+   promise, because there is no drag handler to honour it (the affordance test in
+   `settings-class-css.test.ts` enforces that pairing). It is a full-width
+   one-click target instead, because opening a file is the panel's only job in
+   this state — and a bare button beside a sentence buried it. */
+.tbs-settings__dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: var(--space-xxl) var(--space-xl);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-lg);
-  padding: var(--space-xl);
-  margin-bottom: var(--space-lg);
-  transition: border-color var(--duration-fast) var(--easing);
+  background: var(--color-bg-secondary);
+  font-family: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--easing),
+              background-color var(--duration-fast) var(--easing);
 }
 
-.tbs-settings__import-zone:hover {
+.tbs-settings__dropzone:hover {
   border-color: var(--color-primary);
+  background: var(--color-bg-hover);
 }
 
-.tbs-settings__import-zone p {
-  color: var(--color-text-secondary);
-  margin-bottom: var(--space-md);
+.tbs-settings__dropzone-icon {
+  font-size: var(--font-size-xl);
+  line-height: 1;
+  color: var(--color-primary);
 }
+
+.tbs-settings__dropzone-title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.tbs-settings__dropzone-hint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.tbs-settings__dropzone-hint code {
+  font-size: var(--font-size-sm);
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-tertiary);
+}
+
+/* ── Export: the dimension pick grid ───────────────────────────────────────── */
+
+/* Four dimensions with a description and a live record count. A bare checkbox
+   label ("Settings") does not say what would be carried or how much of it, which
+   is exactly what the user is deciding. Auto-fill keeps the four cards in a row
+   on a wide window and stacks them when the pane is narrow — no fixed columns,
+   no breakpoint that can go stale. */
+.tbs-settings__pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-sm);
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.tbs-settings__pick-legend {
+  padding: 0;
+  margin-bottom: var(--space-sm);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.tbs-settings__pick {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--easing),
+              background-color var(--duration-fast) var(--easing);
+}
+
+.tbs-settings__pick:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-bg-hover);
+}
+
+/* Selected is a border + tint, never colour alone: the checkbox inside carries
+   the same state for assistive tech and for anyone who cannot see the tint. */
+.tbs-settings__pick--on {
+  border-color: var(--color-primary);
+  background: var(--color-info-bg);
+}
+
+.tbs-settings__pick--off {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.tbs-settings__pick--off:hover {
+  border-color: var(--color-border);
+  background: transparent;
+}
+
+.tbs-settings__pick-box {
+  margin-top: 2px;
+  flex: none;
+}
+
+.tbs-settings__pick-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.tbs-settings__pick-title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.tbs-settings__pick-blurb {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+/* Tabular figures: the count must not reflow when it goes 0 → 1 → 10. */
+.tbs-settings__pick-count {
+  flex: none;
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-tertiary);
+}
+
+.tbs-settings__pick--on .tbs-settings__pick-count {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+/* ── Import: the review surface ────────────────────────────────────────────── */
 
 /* T22: the single-page diff surface (D6). Records the dimensions, their mode
    selector and the per-record keep/take checkboxes as ONE bordered block, so the
    diff reads as a unit rather than a run of loose headings. */
 .tbs-settings__import-diff {
   margin-top: var(--space-lg);
-  padding: var(--space-md);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
+  padding: var(--space-lg);
+  gap: var(--space-sm);
 }
 
-/* One dimension group. Separated by a rule so the heading does not run into the
-   records of the previous group. */
-.tbs-settings__import-dim {
-  padding-top: var(--space-sm);
+/* One dimension group, as a CARD: a title row that states how much of the part
+   the import touches, then the controls. The previous version stacked four
+   headings separated by hairlines, so "which part am I looking at" and "how much
+   of it changes" both had to be read out of body copy. */
+.tbs-settings__card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+/* A part the file does not carry is present (so the user learns it was absent,
+   rather than silently missing) but visibly inert. */
+.tbs-settings__card--absent {
+  background: var(--color-bg-secondary);
+}
+
+.tbs-settings__card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.tbs-settings__card-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.tbs-settings__card-meta {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The mode control: a label, the select, and a sentence stating its
+   CONSEQUENCE. "Overwrite" alone never said what becomes of the records the file
+   does not contain — the single most dangerous thing in this panel. */
+.tbs-settings__mode {
+  display: grid;
+  grid-template-columns: auto minmax(0, 220px) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.tbs-settings__mode-label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.tbs-settings__mode-select {
+  padding: 4px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+}
+
+.tbs-settings__mode-help {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Narrow panes: the three columns cannot hold, so the help text takes its own
+   line rather than squeezing the select to an unreadable width. */
+@media (max-width: 720px) {
+  .tbs-settings__mode {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── Import: the commit bar ────────────────────────────────────────────────── */
+
+/* The point of no return states its consequence BEFORE the click: the same
+   `deletionCounts` sentence the confirmation dialog shows, so the two can never
+   describe different outcomes. Separated from the review cards by a rule, so it
+   reads as the panel's outcome line rather than one more group. */
+.tbs-settings__commit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-top: var(--space-sm);
+  padding-top: var(--space-md);
   border-top: 1px solid var(--color-border);
 }
 
-.tbs-settings__import-dim:first-child {
-  padding-top: 0;
-  border-top: none;
+.tbs-settings__commit-summary {
+  margin: 0;
+  margin-right: auto;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
 }
 
-.tbs-settings__import-dim h3 {
-  margin: 0 0 var(--space-xs);
-  font-size: var(--font-size-md);
+.tbs-settings__commit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex: none;
+}
+
+/* The confirmation dialog repeats the outcome sentence and adds where the user
+   can still turn back (the backup). Body copy stays at reading size — this is
+   the last thing read before an irreversible write. */
+.tbs-settings__confirm-line {
+  margin: 0 0 var(--space-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+/* R5: what the import will change, per dimension — the answer to "what am I
+   agreeing to", set apart from the deletion sentence (which answers a different
+   question: what will be LOST). */
+.tbs-settings__confirm-changes {
+  margin-top: var(--space-md);
+}
+
+.tbs-settings__confirm-changes .tbs-settings__parts-list > li {
+  padding: var(--space-xxs) 0;
+}
+
+.tbs-settings__confirm-hint {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
 }
 
 /* Per-record diff rows: label + status on the left, the actions on the right. */
@@ -601,16 +912,31 @@
   gap: var(--space-xxs);
 }
 
+/* Zebra + hover: a 10-slot or many-rule list is a scannable set, and the row the
+   pointer is over must be obvious while the keep/take box is being read. The
+   background is the ONLY difference between rows — no spacing shifts, so the
+   list never jumps under the cursor. */
 .tbs-settings__import-records > li {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-xs);
+  border-radius: var(--radius-sm);
+}
+
+.tbs-settings__import-records > li:nth-child(even) {
+  background: var(--color-bg-secondary);
+}
+
+.tbs-settings__import-records > li:hover {
+  background: var(--color-bg-hover);
 }
 
 .tbs-settings__import-records > li > span:first-child {
   flex: 1 1 auto;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* The per-record accept control: a checkbox that VIEWS the row status. */
@@ -669,6 +995,20 @@
   color: var(--color-text-secondary);
 }
 
+/* The disclosure toggle. It is the only control in the block, so it reads as a
+   link into the detail rather than as a second row of the list. */
+.tbs-settings__import-fields > summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  /* Room for the marker and a comfortable click target on its own line. */
+  padding: var(--space-xxs) 0;
+}
+
+.tbs-settings__import-fields > summary:hover {
+  color: var(--color-text);
+}
+
 .tbs-settings__import-fields ul {
   list-style: none;
   padding: 0 0 0 var(--space-lg);
@@ -681,21 +1021,159 @@
   overflow-wrap: anywhere;
 }
 
+/* ── A field row: label │ value │ state ────────────────────────────────────── */
+
+/* Three COLUMNS, not a sentence. Every row of every record shares the same track
+   sizes, so the labels form a line the eye can run down and the state words line
+   up instead of landing wherever the value happened to end. A run-on line
+   (`Title: S2 → FILE-S2`) put all three parts in one word stream, which is what
+   made a record's fields hard to scan. */
+.tbs-field-row {
+  display: grid;
+  grid-template-columns: minmax(64px, 88px) minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.tbs-field-row__label {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+/* The value is the only track allowed to be long, so it is the only one that
+   wraps — and it wraps ANYWHERE, because a Match URL has no spaces to break on. */
+.tbs-field-row__value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* The two sides of a change. `unchanged` / `added` / `removed` carry ONE side, so
+   only that span is rendered (see `RecordFields`). */
+.tbs-field-row__before {
+  color: var(--color-text-secondary);
+}
+
+.tbs-field-row__after {
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.tbs-field-row__arrow {
+  color: var(--color-text-tertiary);
+}
+
+/* A field with a state but no value (a file-only record's icon, say). Keeps the
+   row readable as a row rather than as a gap between label and state. */
+.tbs-field-row__none {
+  color: var(--color-text-tertiary);
+}
+
+/* The state as a TINTED WORD, not colour alone: the word is always present, and
+   the tint only makes the four states distinguishable at a glance. Reserving a
+   width keeps the column edge straight whichever word is in it. */
+.tbs-field-row__state {
+  min-width: 9ch;
+  justify-self: end;
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-tertiary);
+}
+
+/* What the state MEANS here: this import writes the file's value (changed), adds
+   a record (added), removes one (removed), or leaves the machine's own in place
+   (unchanged). */
+.tbs-field-row[data-state='changed'] .tbs-field-row__state {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.tbs-field-row[data-state='added'] .tbs-field-row__state {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.tbs-field-row[data-state='removed'] .tbs-field-row__state {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+/* Narrow panes: the label column is what gives way, since the state word and the
+   value are the two the reader is comparing. */
+@media (max-width: 700px) {
+  .tbs-field-row {
+    grid-template-columns: minmax(56px, 72px) minmax(0, 1fr) auto;
+  }
+}
+
 /* T22: the APPLY result list (§4.3). */
 .tbs-settings__import-result {
   margin-top: var(--space-lg);
-  padding: var(--space-md);
+  padding: var(--space-lg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
 }
 
+.tbs-settings__import-result h3 {
+  margin-top: 0;
+}
+
+/* The five outcome counts as equal-width chips rather than a wrapped run of
+   "key: value" text: they are one summary, and the tallies must line up so a
+   zero is visibly a zero. Tabular figures stop the row reflowing on 9 → 10. */
 .tbs-settings__result-counts {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-md);
+  gap: var(--space-sm);
   margin-bottom: var(--space-md);
+}
+
+/* R6: the per-dimension outcome rows. A rule the domain rejected, or a
+   shortcut the platform refused, is a DIFFERENCE the user must not have to
+   infer from a success tally, so it is coloured like the error it is. */
+.tbs-settings__result-dims {
+  list-style: none;
+  margin: 0 0 var(--space-md);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.tbs-settings__result-dims > li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+
+.tbs-settings__result-failed {
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+.tbs-settings__result-counts > span {
+  flex: 1 1 auto;
+  min-width: 88px;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
   color: var(--color-text-secondary);
   font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 
 /* The shortcut guidance line sits apart from the counts, as an aid rather than
@@ -733,29 +1211,400 @@
   background: var(--color-danger-subtle, var(--color-bg-subtle, transparent));
 }
 
-.tbs-settings__export-dims {
-  list-style: none;
-  padding: 0;
-  margin: 0 0 var(--space-md);
+/* ── Record list (shared by both panels — R1: identical by construction) ── */
+
+.tbs-record-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
+  min-width: 0;
 }
 
-.tbs-settings__export-dims label {
+.tbs-record-list__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.tbs-record-list__select-all {
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
 }
 
+.tbs-record-list__count {
+  margin-left: auto;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+  /* Tabular figures: the count must not shift as the search narrows the list. */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tbs-settings__filter-select {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+}
+
+.tbs-record-list__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+/* One row is a CELL plus an optional DETAIL stacked under it. The cell carries
+   the fixed track layout (not just a flex row) — that is what makes the columns
+   line up ACROSS rows, the point of a list, and what lets the URL ellipsise
+   instead of pushing the controls off the edge. */
+.tbs-record-row {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tbs-record-row__main {
+  display: grid;
+  grid-template-columns: 16px minmax(120px, 2fr) minmax(140px, 3fr) auto auto auto;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.tbs-record-row:last-child {
+  border-bottom: none;
+}
+
+.tbs-record-row:hover {
+  background: var(--color-bg-hover);
+}
+
+.tbs-record-row__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.tbs-record-row__match {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+}
+
+.tbs-record-row__type {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.tbs-record-row__priority {
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.tbs-record-row__trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  justify-self: end;
+  white-space: nowrap;
+}
+
+/* Narrow panes: the URL column is the one that can be dropped (its value is
+   still in the row's title attribute), so the controls stay reachable. */
+@media (max-width: 900px) {
+  .tbs-record-row__main {
+    grid-template-columns: 16px minmax(100px, 2fr) auto auto auto;
+  }
+  .tbs-record-row__match {
+    display: none;
+  }
+}
+
+/* A record's Fields, nested in its own row (see `RecordRow.detail`). Indented
+   to the cell's content start so the relation reads as "belongs to the row
+   above", and given a left rule because the association is the whole point. */
+.tbs-record-row .tbs-settings__import-fields {
+  margin: var(--space-xs) 0 var(--space-xxs) calc(16px + var(--space-sm));
+  padding-left: var(--space-sm);
+  border-left: 2px solid var(--color-border-strong);
+}
+
+/* ── Floating refresh (Import / Export) ────────────────────────────────────── */
+
+/* Pinned to the bottom-right of the settings pane, clear of the scroll area so
+   it stays reachable however long the record list is. `position: fixed` (not
+   sticky) because the panel it acts on lives inside a scrolling `main`. */
+.tbs-settings__refresh {
+  position: fixed;
+  right: var(--space-xl);
+  bottom: var(--space-xl);
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  /* Opaque, not translucent: it overlaps a record list, and a see-through
+     button over rows makes both unreadable. */
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  transition: border-color var(--duration-fast) var(--easing),
+              background-color var(--duration-fast) var(--easing);
+}
+
+.tbs-settings__refresh:hover {
+  border-color: var(--color-primary);
+  background: var(--color-bg-hover);
+}
+
+/* The "target may have moved" state. Colour is a SECOND cue only: the live
+   status text inside the button carries the same message for anyone who cannot
+   see the dot. */
+.tbs-settings__refresh--stale {
+  border-color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.tbs-settings__refresh-icon {
+  font-size: var(--font-size-base);
+  line-height: 1;
+}
+
+.tbs-settings__refresh-label {
+  font-weight: 500;
+}
+
+/* Spins while a re-read is in flight, so the click has a visible effect even
+   when the values happen to come back identical. */
+.tbs-settings__refresh[aria-busy='true'] .tbs-settings__refresh-icon {
+  animation: tbs-spin 900ms linear infinite;
+}
+
+@keyframes tbs-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Visually hidden, but announced: the hint must not rely on the dot. */
+.tbs-settings__refresh-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.tbs-settings__refresh-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-warning);
+  flex: none;
+}
+
+/* Respect the OS setting: a decorative spinner is not worth motion sickness. */
+@media (prefers-reduced-motion: reduce) {
+  .tbs-settings__refresh[aria-busy='true'] .tbs-settings__refresh-icon {
+    animation: none;
+  }
+}
+
+/* ── Icon preview (import/export) ──────────────────────────────────────────── */
+
+/* `object-fit` matters: these are 16px cells and a favicon is usually square,
+   but a recipe is rendered at 2× and must scale down cleanly rather than clip. */
+.tbs-icon-preview {
+  display: inline-block;
+  object-fit: contain;
+  border-radius: 2px;
+  flex: none;
+  vertical-align: middle;
+}
+
+.tbs-icon-preview--empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-tertiary);
+}
+
+/* The Icon field's before → after pair (R8). Only shown when the icon
+   CHANGES, so it is a deliberate, uncommon decoration rather than row furniture. */
+.tbs-settings__field-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-right: var(--space-xs);
+}
+
+/* ── Settings / shortcut parts (R4/R9 / R10) ─────────────────────── */
+
+.tbs-settings__parts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.tbs-settings__parts-head {
+  margin: var(--space-xs) 0 0;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.tbs-settings__parts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.tbs-settings__parts-list > li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tbs-settings__parts-list > li:last-child {
+  border-bottom: none;
+}
+
+.tbs-settings__parts-list > li:hover {
+  background: var(--color-bg-hover);
+}
+
+/* The value sits at the right, after a flexible gap, so the labels and the
+   values form two readable columns. */
+.tbs-settings__part-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+/* The current → file comparison beside a part's label. Monospace-ish alignment
+   is deliberately avoided here (values are prose triples, not numbers), but the
+   element is its own block so the value never runs into the badge. */
+.tbs-settings__part-diff {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tbs-settings__part-value {
+  margin-left: auto;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tbs-settings__part-value kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  padding: 1px 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text);
+}
+
+.tbs-settings__parts-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* The per-dimension detail block under a pick card: a heading, then the list. */
+.tbs-settings__pick-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--color-border);
+}
+
+.tbs-settings__pick-detail-title {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+/* The field-detail disclosures: each record's `Fields` block stacks here. */
+.tbs-settings__import-field-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  margin-top: var(--space-xs);
+}
+
+/* The reason a dimension is unavailable is a footnote on its own card (the
+   shortcut dimension has no producer yet, T19-B) — it sits under the blurb it
+   qualifies, not beside the title where it would read as part of the name. */
 .tbs-settings__export-unavailable {
-  margin-left: var(--space-sm);
+  display: block;
+  flex-basis: 100%;
+  margin-top: var(--space-xxs);
   color: var(--color-text-tertiary);
   font-size: var(--font-size-sm);
+  line-height: 1.4;
 }
 
 .tbs-settings__export-records {
-  margin: 0 0 var(--space-md);
+  margin: var(--space-md) 0 0;
+  font-size: var(--font-size-sm);
+}
+
+.tbs-settings__export-records > summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-weight: 500;
 }
 
 .tbs-settings__export-records ul {
@@ -767,17 +1616,33 @@
   gap: var(--space-xxs);
 }
 
+.tbs-settings__export-records li > label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+/* The "package ready" panel: the download is the next step, so it is separated
+   from the tally by a rule rather than sitting in the same visual run as the
+   counts — show the summary, THEN offer the file (T19 show-then-download). */
 .tbs-settings__export-summary {
   margin-top: var(--space-lg);
-  padding: var(--space-md);
-  border: 1px solid var(--color-border);
+  padding: var(--space-lg);
+  border: 1px solid var(--color-success);
   border-radius: var(--radius-md);
+  background: var(--color-success-bg);
+}
+
+.tbs-settings__export-summary h4 {
+  margin-top: 0;
 }
 
 .tbs-settings__export-summary ul {
   list-style: none;
   padding: 0;
   margin: 0 0 var(--space-md);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ─── Diagnostics Section ─────────────────────────────────────────────────── */

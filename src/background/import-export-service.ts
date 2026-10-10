@@ -20,13 +20,20 @@ import type {
   ImportIntent,
   ImportInspection,
   ImportApplyResult,
-  ImportRecordStatus,
   TolerantItem,
   IconSource,
 } from '@shared/types';
 import { defaultImportIntent } from '@shared/types';
 import { applyIntent, computeDiff, findMatchOverlaps } from '@shared/import-diff';
-import { isExportPackage, isValidPortableSettings, syncStateToPackage, PACKAGE_FIELD_ALLOWLIST } from '@shared/export-package';
+import {
+  isExportPackage,
+  isValidPortableSettings,
+  syncStateToPackage,
+  PACKAGE_FIELD_ALLOWLIST,
+  type ExportPackage,
+  type PortableShortcuts,
+  type PortableShortcutBinding,
+} from '@shared/export-package';
 import { partitionByDomainRules, type DomainRecord, type DomainRejection } from './domain-rules';
 
 // ─── Narrow collaborator seams (no adapter/service coupling) ─────────────────
@@ -39,6 +46,71 @@ import { partitionByDomainRules, type DomainRecord, type DomainRejection } from 
  */
 export interface MissingIconProbe {
   isMissingIcon(source: IconSource | undefined | null): Promise<boolean>;
+}
+
+/**
+ * R10: the shortcut SOURCE, narrowed to the one call needed.
+ *
+ * `commands.getAll()` is the only place a keyboard binding actually lives — it is
+ * browser-owned state, not something this extension stores — so the producer
+ * reads it here rather than inventing a second copy. Structural (not
+ * `BrowserAdapter`) so a test can supply a stub; the adapter satisfies it.
+ */
+export interface ShortcutProbe {
+  getAll(): Promise<Array<{ name: string; description: string; shortcut: string | null }>>;
+}
+
+/**
+ * R4: the shortcut WRITE side, narrowed to the one call needed.
+ *
+ * `commands.update` is the only way a binding can actually be set — until now
+ * APPLY produced guidance and wrote nothing, which is exactly why "Shortcuts
+ * import had no effect". Optional: a platform without the API (Chrome/Edge) has
+ * no writer, and the result then reports the dimension as failed-with-guidance
+ * rather than silently claiming success.
+ */
+export interface ShortcutWriter {
+  update(name: string, shortcut: string | null): Promise<void>;
+}
+
+/**
+ * R10: how a command name maps onto the slot it belongs to.
+ *
+ * `save-slot-N` / `switch-slot-N` address slot N; every other command
+ * (`next-match`) is global. This is the SAME shape the worker's own command
+ * dispatch parses (`/^save-slot-(\d+)$/`), kept here as one named rule so the
+ * package's grouping cannot disagree with the command router's.
+ */
+function slotIdFromCommandName(name: string): number | null {
+  const match = /^(?:save|switch)-slot-(\d+)$/.exec(name);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Build the portable shortcut payload from the browser's own bindings.
+ *
+ * A command with NO shortcut is dropped rather than carried as `null`: a `null`
+ * binding describes nothing to set on the target machine, so carrying it would
+ * fill the import list with rows whose only outcome is "nothing happened".
+ */
+export function shortcutsToPortable(
+  commands: Array<{ name: string; shortcut: string | null }>,
+): PortableShortcuts {
+  const global: PortableShortcutBinding[] = [];
+  const perSlot: Record<number, PortableShortcutBinding[]> = {};
+
+  for (const command of commands) {
+    if (!command.shortcut) continue;
+    const binding: PortableShortcutBinding = { name: command.name, shortcut: command.shortcut };
+    const slotId = slotIdFromCommandName(command.name);
+    if (slotId === null) {
+      global.push(binding);
+    } else {
+      (perSlot[slotId] ??= []).push(binding);
+    }
+  }
+
+  return { global, perSlot };
 }
 
 /** T22: platform capability + guidance produced by APPLY (D4). */
@@ -57,7 +129,27 @@ export class ImportExportService {
   constructor(
     private repo: StorageRepository,
     private icons: MissingIconProbe,
+    /**
+     * R10: the browser's own command bindings. Optional so every existing
+     * caller/test that does not exercise the shortcut dimension keeps working —
+     * an absent probe degrades to "no shortcut data", which is exactly the
+     * pre-iteration behaviour (the dimension is simply not carried).
+     */
+    private shortcuts?: ShortcutProbe,
   ) {}
+
+  /**
+   * R4: the writer is supplied per APPLY (not at construction) because
+   * applying a shortcut is a side effect that must NOT happen during the diff /
+   * inspect passes, and because the capability is a per-platform fact the caller
+   * already knows (`commandsUpdateSupported`). Absent ⇒ nothing can be written
+   * and the dimension is reported as failed rather than silently skipped.
+   */
+  private shortcutWriter?: ShortcutWriter;
+
+  setShortcutWriter(writer: ShortcutWriter | undefined): void {
+    this.shortcutWriter = writer;
+  }
 
   // ─── Export Package (A11 — EXPORT_PACKAGE) ─────────────────────────────
 
@@ -73,7 +165,22 @@ export class ImportExportService {
   ): Promise<{ success: true; package: string } | { success: false; errorCode: string; message: string }> {
     try {
       const sync = await this.repo.getSyncState();
-      const pkg = syncStateToPackage(sync, scope);
+      // R10: the shortcut dimension is the ONLY one whose data does not come
+      // from `sync` — bindings are browser-owned. Read them only when the
+      // dimension was actually selected, so a slots-only export never touches
+      // the commands API.
+      let extras: { shortcuts?: PortableShortcuts } = {};
+      if (scope.shortcuts && this.shortcuts) {
+        try {
+          extras = { shortcuts: shortcutsToPortable(await this.shortcuts.getAll()) };
+        } catch {
+          // A platform that refuses `commands.getAll` yields no shortcut data
+          // rather than failing the whole export: the other dimensions are still
+          // valid and a refusal here would lose them for no reason.
+          extras = {};
+        }
+      }
+      const pkg = syncStateToPackage(sync, scope, extras);
       return { success: true, package: JSON.stringify(pkg, null, 2) };
     } catch {
       return { success: false, errorCode: 'INTERNAL_ERROR', message: 'Failed to export package' };
@@ -257,8 +364,49 @@ export class ImportExportService {
 
     const counts = { added: 0, replaced: 0, kept: 0, deleted: 0, skipped: 0 };
     for (const record of diff.records) {
-      counts[record.status as ImportRecordStatus] += 1;
+      counts[record.status] += 1;
     }
+
+    // R4: the shortcut bindings the user took are actually WRITTEN here.
+    // Until this existed APPLY only produced guidance, so the target kept its
+    // old bindings — the dimension looked imported and was not.
+    const shortcutOutcome = await this.applyShortcuts(parsed, intent, options);
+    const shortcutCount = shortcutOutcome.attempted;
+
+    // R5/R6: the per-dimension outcome, derived from the SAME diff rows the
+    // UI renders (`kept` = untouched), so the reported numbers are the rows the
+    // user saw. A rejected record counts as `failed`, never as changed.
+    const acceptedSlotIdsForOutcome = new Set(partition.slots.map((s) => s.id));
+    const acceptedRuleIdsForOutcome = new Set(partition.rules.map((r) => r.id));
+    const rejectedIds = new Set(partition.rejected.map((v) => `${v.kind}:${String(v.id)}`));
+
+    const outcomeFor = (kind: 'slot' | 'rule'): { changed: number; failed: number } => {
+      const rows = diff.records.filter((r) => r.kind === kind);
+      const changed = rows.filter((r) =>
+        r.status !== 'kept' && (kind === 'slot'
+          ? acceptedSlotIdsForOutcome.has(Number(r.id))
+          : acceptedRuleIdsForOutcome.has(String(r.id))),
+      ).length;
+      const failed = rows.filter((r) => rejectedIds.has(`${r.kind}:${String(r.id)}`)).length;
+      return { changed, failed };
+    };
+
+    // Settings is not a record list: its "changed" count is the parts this import
+    // actually wrote (the user's take-list intersected with what the file
+    // carried), which is the number the panel's own rows show.
+    const settingsChanged = diff.settingsParts === undefined
+      ? 0
+      : diff.settingsParts.filter((p) => p.status !== 'kept').length;
+
+    const dimensions = {
+      slots: outcomeFor('slot'),
+      rules: outcomeFor('rule'),
+      settings: { changed: settingsChanged, failed: 0 },
+      shortcuts: {
+        changed: shortcutOutcome.changed,
+        failed: shortcutOutcome.failed,
+      },
+    };
 
     // C11/D9: the missing-icon list is an APPLY PRODUCT — a one-shot disclosure,
     // never read-side state. Judged against `finalSafe` (the records actually
@@ -279,9 +427,14 @@ export class ImportExportService {
     // D4 派生 2: a platform without `commands.update` cannot be applied
     // programmatically, so the result carries manual set-up guidance — but ONLY
     // when the package actually carried the shortcut dimension (otherwise the
-    // notice would be noise on every import).
+    // notice would be noise on every import). It is now emitted when the write
+    // was IMPOSSIBLE, not merely when the package mentioned shortcuts: with a
+    // writer present and every binding written, there is nothing left to do by
+    // hand and the notice would be a lie.
+    const shortcutsBlocked =
+      options.commandsUpdateSupported === false && shortcutCount > 0 && shortcutOutcome.changed === 0;
     const shortcutGuidance =
-      options.commandsUpdateSupported === false && parsed.shortcuts !== undefined
+      shortcutsBlocked
         ? 'The shortcuts in this import must be set manually at chrome://extensions/shortcuts'
         : undefined;
 
@@ -292,6 +445,7 @@ export class ImportExportService {
         success: true,
         configVersion: write.configVersion,
         counts,
+        dimensions,
         tolerant: this.collectTolerant(parsed),
         domainViolations: partition.rejected,
         missingIcons,
@@ -299,6 +453,54 @@ export class ImportExportService {
         ...(shortcutGuidance !== undefined ? { shortcutGuidance } : {}),
       },
     };
+  }
+
+  /**
+   * R4: write the shortcut bindings the user TOOK.
+   *
+   * The take-list is `intent.takeShortcutNames` (`undefined` = take every
+   * binding the file carries, the same A1 default the other dimensions use), so
+   * unticking a row in the panel genuinely restricts what is written.
+   *
+   * Each binding is attempted INDEPENDENTLY: one refusal (a browser that rejects
+   * a reserved combination, say) must not abandon the rest, and the count of
+   * refusals is reported so the result list can say what failed.
+   */
+  private async applyShortcuts(
+    parsed: ExportPackage,
+    intent: ImportIntent,
+    options: ImportApplyOptions,
+  ): Promise<{ attempted: number; changed: number; failed: number }> {
+    const carried = parsed.shortcuts;
+    if (carried === undefined) return { attempted: 0, changed: 0, failed: 0 };
+
+    const takes = (name: string): boolean =>
+      intent.takeShortcutNames === undefined || intent.takeShortcutNames.includes(name);
+
+    const bindings: PortableShortcutBinding[] = [
+      ...carried.global,
+      ...Object.values(carried.perSlot).flat(),
+    ].filter((b) => takes(b.name));
+
+    if (bindings.length === 0) return { attempted: 0, changed: 0, failed: 0 };
+
+    // No writer ⇒ the platform cannot set bindings at all. Reported as FAILED
+    // (not "changed") so the outcome list tells the truth; the guidance text
+    // then explains the manual route.
+    const writer = options.commandsUpdateSupported === false ? undefined : this.shortcutWriter;
+    if (!writer) return { attempted: bindings.length, changed: 0, failed: bindings.length };
+
+    let changed = 0;
+    let failed = 0;
+    for (const binding of bindings) {
+      try {
+        await writer.update(binding.name, binding.shortcut);
+        changed += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { attempted: bindings.length, changed, failed };
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────
@@ -341,6 +543,19 @@ export class ImportExportService {
 
     walk(root.slots, PACKAGE_FIELD_ALLOWLIST.slot, 'slots');
     walk(root.rules, PACKAGE_FIELD_ALLOWLIST.rule, 'rules');
+
+    // R4: `settings` is now a PARTIAL map, so a new part name is something a
+    // reader must be able to report. Walking it here is what keeps the allowlist
+    // table honest — it was previously unreachable for this dimension.
+    if (root.settings !== undefined && root.settings !== null && typeof root.settings === 'object') {
+      for (const key of unknownKeys(
+        root.settings as Record<string, unknown>,
+        PACKAGE_FIELD_ALLOWLIST.settings,
+      )) {
+        items.push({ kind: 'unknown-field', detail: `settings.${key}` });
+      }
+    }
+
     return items;
   }
 

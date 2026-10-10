@@ -169,6 +169,9 @@ describe('T8: computeDiff — mode governs only "file-missing, target-has"', () 
     const diff = computeDiff(FILE, CURRENT);
     const row = diff.records.find((r) => r.kind === 'slot' && r.id === 2);
     const fields = (row?.fields ?? []).map((f) => f.field);
+    // A slot has no `priority` field at all, so the facet list stops at the four
+    // facets a slot genuinely has — the Fields detail must not name a field the
+    // record does not own.
     expect(fields).toEqual(['title', 'icon', 'match-url', 'match-type']);
 
     const matchUrl = row?.fields.find((f) => f.field === 'match-url');
@@ -181,7 +184,7 @@ describe('T8: computeDiff — mode governs only "file-missing, target-has"', () 
     expect(matchType?.before).toEqual({ kind: 'text', value: 'Exact URL' });
   });
 
-  it('a DELETED row still reports all four facets of what is going away', () => {
+  it('a DELETED row still reports every facet of what is going away', () => {
     // The record is leaving, but its match is still readable — reporting it
     // keeps the shape uniform AND answers "which match am I losing?". Omitting
     // the pair made deleting and keeping a record look structurally different.
@@ -197,12 +200,23 @@ describe('T8: computeDiff — mode governs only "file-missing, target-has"', () 
     expect(row?.fields.find((f) => f.field === 'match-url')?.after).toBeNull();
   });
 
-  it('a KEPT row still carries all four facets (the shape is stable)', () => {
+  it('a KEPT row still carries every facet (the shape is stable)', () => {
     const diff = computeDiff(FILE, CURRENT);
     const kept = diff.records.find((r) => r.status === 'kept' && r.kind === 'slot');
     expect((kept?.fields ?? []).map((f) => f.field))
       .toEqual(['title', 'icon', 'match-url', 'match-type']);
     expect((kept?.fields ?? []).every((f) => !f.changed)).toBe(true);
+  });
+
+  it('names `priority` for a RULE row (the field that record really has)', () => {
+    // The facet set follows the RECORD KIND, not the branch: a rule's priority is
+    // reportable, so dropping it for rules would hide a change the import makes.
+    const current = sync([], [rule('rule-a', 'https://a.example/')]);
+    const file = pkg({ rules: [portableRule('rule-a', 'https://a.example/')] });
+    const diff = computeDiff(file, current);
+    const row = diff.records.find((r) => r.kind === 'rule');
+    expect((row?.fields ?? []).map((f) => f.field))
+      .toEqual(['title', 'icon', 'match-url', 'match-type', 'priority']);
   });
 });
 
@@ -242,6 +256,49 @@ describe('T8: applyIntent — produces the final state, both sides decided by di
     expect(final.slots.find((s) => s.id === 2)?.titleSnapshot).toBe('S2'); // target's own
     const diff = computeDiff(FILE, CURRENT, intent);
     expect(statusOf(diff, 'slot', 2)).toBe('kept');
+  });
+
+  it('a per-record "keep" DECLINES a file-only record (no record is created)', () => {
+    // A file-only row is take-able by default, so its checkbox must be able to say
+    // "no" — which here means "do not create this on my machine". The record is
+    // absent from the final state, and the row reports the decline rather than
+    // claiming it will be added.
+    const base = defaultImportIntent();
+    const intent: ImportIntent = {
+      ...base,
+      recordOverrides: [{ kind: 'slot', id: 4, action: 'keep' }],
+    };
+    const final = applyIntent(FILE, CURRENT, intent);
+    expect(final.slots.map((s) => s.id).sort((a, b) => a - b)).toEqual([1, 2, 3]);
+    expect(statusOf(computeDiff(FILE, CURRENT, intent), 'slot', 4)).toBe('kept');
+  });
+
+  it('an IDENTICAL both-sides row reports `replaced` when the user takes it', () => {
+    // Otherwise the checkbox is dead in the take direction: an identical row is
+    // `kept` by default, and a `take` that still reported `kept` would leave the
+    // box drawn unchecked — the user's click visibly doing nothing. `applyIntent`
+    // DOES overwrite the target with the file's (identical) record, so the status
+    // must say so.
+    const file = pkg({ slots: [portableSlot(1)] }); // identical to CURRENT's slot 1
+    const base = defaultImportIntent();
+    const intent: ImportIntent = {
+      ...base,
+      recordOverrides: [{ kind: 'slot', id: 1, action: 'take' }],
+    };
+    expect(statusOf(computeDiff(file, CURRENT), 'slot', 1)).toBe('kept');
+    expect(statusOf(computeDiff(file, CURRENT, intent), 'slot', 1)).toBe('replaced');
+  });
+
+  it('a file-only RULE can be declined the same way', () => {
+    const base = defaultImportIntent();
+    const intent: ImportIntent = {
+      ...base,
+      recordOverrides: [{ kind: 'rule', id: 'rule-b', action: 'keep' }],
+    };
+    const file = pkg({ rules: [portableRule('rule-a', 'https://a.example/'), portableRule('rule-b', 'https://b.example/')] });
+    const final = applyIntent(file, CURRENT, intent);
+    expect(final.rules.map((r) => r.id)).toEqual(['rule-a']);
+    expect(statusOf(computeDiff(file, CURRENT, intent), 'rule', 'rule-b')).toBe('kept');
   });
 
   it('never mutates its inputs; new records are stamped from the clock', () => {

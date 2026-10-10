@@ -16,7 +16,15 @@ import { stripComments } from '../../helpers/strip-comments';
  */
 const UI_ROOT = resolve(process.cwd(), 'src/ui');
 const CSS_DIR = resolve(process.cwd(), 'src/ui/styles');
-const CLASS_TOKEN = /tbs-settings__[a-zA-Z0-9_-]+/g;
+/**
+ * The class families this guard owns: the settings surfaces' own prefix, plus
+ * the field-row prefix introduced with the label │ value │ state layout.
+ *
+ * `tbs-field-` is here rather than left to a "visually obvious" convention
+ * because it is exactly as invisible when undefined: the row would render as a
+ * styleless run of spans, which is the layout bug the prefix was added to fix.
+ */
+const CLASS_TOKEN = /tbs-(?:settings__|field-)[a-zA-Z0-9_-]+/g;
 
 /**
  * Classes assembled at runtime, so their full literal never appears in the
@@ -40,6 +48,35 @@ const DYNAMIC_CLASS_ALLOWLIST: readonly string[] = [];
 const FULL_WIDTH = /(?<![\w-])(?:flex-basis:\s*100%|flex\s*:[^;]*\b100%|width:\s*100%)/;
 
 /**
+ * How many tracks a `grid-template-columns` value declares.
+ *
+ * Counted by walking the string with a paren DEPTH counter rather than by
+ * splitting on commas: `minmax(64px, 88px)` contains a comma that is NOT a
+ * track separator, and a naive split counts one rule as two tracks. A regex
+ * lookahead for "comma not inside parens" is possible but is exactly the kind of
+ * pattern that reads as correct and silently miscounts — correcting it took a
+ * failing test, so it is written as the loop it actually is.
+ *
+ * @param value the declaration's VALUE (no `grid-template-columns:` prefix)
+ */
+function countTracks(value: string): number {
+  let depth = 0;
+  let count = 0;
+  let inToken = false;
+  for (const ch of value) {
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    if (depth === 0 && /\s/.test(ch)) {
+      inToken = false;
+    } else if (!inToken) {
+      inToken = true;
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/**
  * Comments are stripped before matching. A `tbs-settings__foo` inside prose is
  * not a rendered class, so flagging it would be a false positive — the same
  * reason `layer-boundary.test.ts` strips comments. Over-stripping can only lose
@@ -58,11 +95,15 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** Every `.ts`/`.tsx` under `src/ui` that mentions the class prefix. */
+/** Every `.ts`/`.tsx` under `src/ui` that mentions one of the owned prefixes. */
 function sourcesUsingPrefix(): string[] {
+  // Matched with the SAME pattern the scan uses. A second, hand-written
+  // `includes('tbs-settings__')` here would silently leave a file that only uses
+  // `tbs-field-*` out of the scan — the guard would then pass by not looking.
+  const MENTIONS = /tbs-(?:settings__|field-)/;
   return walk(UI_ROOT)
     .filter((f) => /\.tsx?$/.test(f))
-    .filter((f) => stripComments(readFileSync(f, 'utf8')).includes('tbs-settings__'));
+    .filter((f) => MENTIONS.test(stripComments(readFileSync(f, 'utf8'))));
 }
 
 function stylesheets(): string {
@@ -96,7 +137,7 @@ function importZoneIsDropCue(css: string): boolean {
 }
 
 describe('settings classes ↔ stylesheets', () => {
-  it('defines every tbs-settings__ class the settings surfaces use', () => {
+  it('defines every owned class the settings surfaces use', () => {
     const cssFiles = readdirSync(CSS_DIR).filter((f) => f.endsWith('.css'));
     // Non-empty: a renamed directory or a wrong root would otherwise make the
     // offender scan vacuously pass ("found nothing" in "looked nowhere").
@@ -133,14 +174,24 @@ describe('settings classes ↔ stylesheets', () => {
   it('flags an undefined class and accepts defined ones (case table)', () => {
     const css = stylesheets();
 
-    const MUST_FLAG = ['tbs-settings__definitely-not-defined-xyz'];
+    const MUST_FLAG = [
+      'tbs-settings__definitely-not-defined-xyz',
+      // The field-row family is owned too: an undefined one is equally invisible.
+      'tbs-field-definitely-not-defined-xyz',
+    ];
     const MUST_NOT_FLAG = [
+      'tbs-field-row',
+      'tbs-field-row__label',
+      'tbs-field-row__value',
+      'tbs-field-row__state',
       'tbs-settings__content',
       'tbs-settings__table',
+      'tbs-settings__panel',
+      'tbs-settings__card',
+      'tbs-settings__card-head',
       'tbs-settings__import-diff',
-      'tbs-settings__import-dim',
       'tbs-settings__import-records',
-      'tbs-settings__import-actions',
+      'tbs-settings__commit',
       'tbs-settings__result-shortcut',
       'tbs-settings__batch-bar',
       'tbs-settings__toggle',
@@ -215,6 +266,42 @@ describe('import fields expansion', () => {
     expect(list).not.toBe('');
     expect(list).toMatch(/min-width:\s*0\b/);
     expect(list).toMatch(/overflow-wrap:\s*anywhere|word-break:\s*break-word/);
+  });
+
+  /**
+   * The fields are laid out as label │ value │ state COLUMNS rather than one
+   * run-on line per field. jsdom cannot verify the rendering, so this asserts
+   * the STRUCTURE that makes it hold: a grid row with exactly three tracks, the
+   * value being the one that wraps, and the state carrying its own word (never
+   * colour alone — same rule as `StatusBadge`).
+   */
+  it('lays a field out as a three-track grid, not a sentence', () => {
+    const row = block(/\.tbs-field-row\s*\{([^}]*)\}/);
+    expect(row).not.toBe('');
+    expect(row).toMatch(/display:\s*grid\b/);
+    // Three explicit tracks. Counted from the declaration rather than by
+    // matching a literal track list: the sizes are free to change (that is
+    // styling), the NUMBER of columns is the invariant.
+    const tracks = /grid-template-columns:([^;]*)/.exec(row)?.[1] ?? '';
+    expect(tracks).not.toBe('');
+    expect(countTracks(tracks)).toBe(3);
+
+    // The label column must not shrink to nothing: a squashed label is how the
+    // "labels line up" property silently dies on a narrow pane.
+    expect(tracks).toMatch(/minmax\(\s*\d+px/);
+
+    // The VALUE track is the only flexible one, so it is the one that wraps.
+    const value = block(/\.tbs-field-row__value\s*\{([^}]*)\}/);
+    expect(value).not.toBe('');
+    expect(value).toMatch(/min-width:\s*0\b/);
+    expect(value).toMatch(/overflow-wrap:\s*anywhere|word-break:\s*break-word/);
+
+    // The state word is text, so colour is a second channel rather than the only
+    // one. Asserting the rule exists is what keeps a future tint from dropping
+    // the word (WCAG: never colour alone).
+    const state = block(/\.tbs-field-row__state\s*\{([^}]*)\}/);
+    expect(state).not.toBe('');
+    expect(state).toMatch(/font-size:/);
   });
 
   it('the full-width pattern accepts every spelling and is not fooled by min/max-width', () => {

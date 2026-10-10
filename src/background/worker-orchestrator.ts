@@ -149,7 +149,10 @@ export class WorkerOrchestrator {
     this.recoveryService = new RecoveryService(adapter, this.repo);
     this.ruleService = new RuleService(adapter, this.repo);
     this.iconService = new IconService(this.repo);
-    this.importExportService = new ImportExportService(this.repo, this.iconService);
+    // R10: `adapter.commands` is the shortcut dimension's data source —
+// bindings are browser-owned, so the service reads them through the adapter
+// rather than from `sync`.
+    this.importExportService = new ImportExportService(this.repo, this.iconService, adapter.commands);
     this.diagnostics = new DiagnosticsService(adapter, this.repo);
     this.notifications = new NotificationService(adapter);
     this.incognito = new IncognitoService(adapter);
@@ -798,13 +801,19 @@ export class WorkerOrchestrator {
         if (typeof expectedVersion !== 'number') {
           return { success: false, errorCode: 'INVALID_REQUEST', message: 'IMPORT_APPLY requires configVersion' };
         }
+        // D4/R4: the writer is handed over only where the platform can
+        // actually set a binding (Firefox). On Chrome/Edge it stays unset, so the
+        // shortcut dimension is reported as failed with manual guidance instead
+        // of pretending the bindings were applied.
+        const canUpdateCommands = this.adapter.commands.updateSupported();
+        this.importExportService.setShortcutWriter(
+          canUpdateCommands ? this.adapter.commands : undefined,
+        );
         return this.importExportService.applyImport(
           request.payload.file,
           request.payload.intent,
           expectedVersion,
-          // D4: pass the platform capability so APPLY can emit manual-set-up
-          // guidance for the shortcut dimension (Chrome/Edge).
-          { commandsUpdateSupported: this.adapter.commands.updateSupported() },
+          { commandsUpdateSupported: canUpdateCommands },
         );
       }
 

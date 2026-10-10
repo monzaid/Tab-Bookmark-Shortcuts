@@ -231,10 +231,55 @@ export interface ExportScope {
   /** Per-record deselection within a selected dimension (D1 "展开到记录级"). */
   excludedSlotIds?: number[];
   excludedRuleIds?: string[];
+  /**
+   * Fine-grained deselection INSIDE the settings dimension (R4).
+   *
+   * Settings is not one indivisible value: it is three global parts plus a
+   * per-slot part for each slot. Sharing "how switching works" without also
+   * shipping twenty per-slot overrides is a real need, so the selection is
+   * expressed at that granularity.
+   *
+   * Ids are the ones `settingsRecordId` produces (`'matchSettings'`,
+   * `'slot:3:strategy'`, …). `undefined` = carry every part; an entry only ever
+   * REMOVES, mirroring `excludedSlotIds`.
+   */
+  excludedSettingIds?: string[];
+  /**
+   * Fine-grained deselection inside the shortcuts dimension (R10).
+   *
+   * Keyed by command NAME (`'save-slot-3'`), because that is the identity a
+   * shortcut actually has — not a slot number, since `next-match` belongs to no
+   * slot. `undefined` = carry every binding.
+   */
+  excludedShortcutNames?: string[];
 }
 
 /** How a dimension's records combine with the target machine (A1). */
 export type DimensionMode = 'incremental' | 'overwrite';
+
+/**
+ * R9/R10: one settings-part or shortcut row's outcome in the diff.
+ *
+ * Settings parts and shortcut bindings are NOT records (they have no id in a
+ * list), so they cannot be `ImportRecordDiff`s. They are still choices the user
+ * makes one at a time, though, so the diff reports them with the same vocabulary
+ * the record rows use — `status` is the shared `ImportRecordStatus`, which is
+ * what lets one badge component serve both kinds of row.
+ */
+export interface ImportPartDiff {
+  /** `SettingPartId` for settings, the command name for shortcuts. */
+  id: string;
+  /** Human label for the row (e.g. "Match settings", "Save to slot 3"). */
+  label: string;
+  /** Which side of the settings part this row belongs to (drives grouping). */
+  group: 'global' | 'slot' | 'global-shortcut' | 'slot-shortcut';
+  /** Identifies the slot a per-slot row addresses (undefined for global rows). */
+  slotId?: number;
+  status: ImportRecordStatus;
+  before: ImportFieldValue | null;
+  after: ImportFieldValue | null;
+  changed: boolean;
+}
 
 /** A sparse per-record override of the dimension mode (A4). `keep`=leave target. */
 export interface ImportRecordOverride {
@@ -252,6 +297,23 @@ export interface ImportIntent {
   };
   /** Seeded at file-open for every non-`added` row, then edited per row (A4). */
   recordOverrides?: ImportRecordOverride[];
+  /**
+   * R9: the settings PARTS the user chose to take, by `SettingPartId`.
+   *
+   * `undefined` = take every part the file carries (the A1 default — the same
+   * "accept everything" starting point the record checkboxes use). A defined
+   * array is an ALLOW-list, so unticking one part leaves the others alone
+   * instead of silently turning "I did not touch it" into "do not take it".
+   */
+  takeSettingIds?: string[];
+  /**
+   * R10: the shortcut BINDINGS to take, by command name (`'save-slot-3'`).
+   *
+   * Same allow-list semantics as `takeSettingIds`: `undefined` = take all.
+   * Keyed by command name rather than slot because `next-match` is a global
+   * shortcut that belongs to no slot.
+   */
+  takeShortcutNames?: string[];
 }
 
 /** Default import intent: incremental + no overrides (A1 — the safer default). */
@@ -286,7 +348,7 @@ export type ImportFieldValue =
  * whose URL match moved is otherwise indistinguishable from an unchanged one.
  */
 export interface ImportFieldDiff {
-  field: 'title' | 'icon' | 'match-url' | 'match-type';
+  field: 'title' | 'icon' | 'match-url' | 'match-type' | 'priority';
   before: ImportFieldValue | null;
   after: ImportFieldValue | null;
   changed: boolean;
@@ -295,12 +357,65 @@ export interface ImportFieldDiff {
 /** One record's outcome in the diff (A12). */
 export type ImportRecordStatus = 'added' | 'replaced' | 'kept' | 'deleted' | 'skipped';
 
+/**
+ * The target machine's values for one record, ready to render.
+ *
+ * A flat, row-shaped view of what `import-diff.ts` already computes for the
+ * field detail — promoted so a list can show the machine's own title, icon,
+ * match definition and priority without re-deriving them (which would be a
+ * second implementation of the comparison the diff owns).
+ */
+export interface ImportRecordBefore {
+  title: ImportFieldValue | null;
+  icon: ImportFieldValue | null;
+  urlMatch: ImportFieldValue | null;
+  matchType: ImportFieldValue | null;
+  /** Rules only; `undefined` for slots. */
+  priority?: number;
+}
+
 export interface ImportRecordDiff {
   kind: 'slot' | 'rule';
   id: number | string;
   label: string;
   status: ImportRecordStatus;
   fields: ImportFieldDiff[];
+  /**
+   * R3/7: the rule priority the list renders inline.
+   *
+   * Priority is NOT one of the four change facets (A12's fields are title /
+   * icon / match-url / match-type — a facet answers "did this change", and a
+   * list column answers "what is it"). It is carried here as row-level DISPLAY
+   * data instead of being re-derived in the UI from the package, so the list and
+   * the diff can never disagree about which record a number belongs to.
+   *
+   * Optional: slots have no priority, and a diff assembled before this iteration
+   * simply omits it.
+   */
+  priority?: number;
+  /**
+   * The TARGET MACHINE's own fields for this record, in renderable form.
+   *
+   * A row must describe the machine as it is — its own title, icon, match
+   * definition and (for a rule) priority — because a `kept` row shows those and
+   * the field detail reads `<target> → <imported>`. Before this the list borrowed
+   * the FILE's values, so a record the machine already had could be described
+   * with a title, URL or type that only ever existed in the package.
+   *
+   * `null` for an `added` record: the machine genuinely has no such record, which
+   * is a different fact from "the machine has one with empty values".
+   */
+  before?: ImportRecordBefore | null;
+  /**
+   * R2/3/6/7: the icon this ROW displays, in renderable form.
+   *
+   * The same value also appears in `fields` as the `icon` facet, but a list row
+   * needs "the icon that will be there" without walking the facet array and
+   * deciding which side applies. `null` = the record ends up with no icon.
+   *
+   * Optional for the same compatibility reason as `priority`.
+   */
+  icon?: ImportFieldValue | null;
 }
 
 /** Which dimensions the package actually carried (A2/A3 three-state). */
@@ -315,6 +430,18 @@ export interface DimensionPresence {
 export interface ImportDiff {
   records: ImportRecordDiff[];
   dimensions: DimensionPresence;
+  /**
+   * R9: the settings parts the file carries, one row each, with the SAME
+   * status vocabulary the record rows use.
+   *
+   * Optional for backwards compatibility with a diff assembled before this
+   * iteration (and for the `settings`-absent case, where there is nothing to
+   * report). An empty array is meaningful: the dimension was carried but holds
+   * no parts.
+   */
+  settingsParts?: ImportPartDiff[];
+  /** R10: the shortcut bindings the file carries, one row each. */
+  shortcutParts?: ImportPartDiff[];
 }
 
 /** A forgiving-but-disclosed item (unknown field ignored, default filled). */
@@ -347,11 +474,41 @@ export interface ImportInspection {
   configVersion: number;
 }
 
+/**
+ * R6: how ONE dimension fared in an apply.
+ *
+ * `changed` counts the parts of that dimension the import actually took (the
+ * same "not kept" rule the diff rows are drawn from, so the number and the rows
+ * cannot disagree). `failed` counts the ones it could not complete: a record the
+ * domain rules rejected, or a shortcut binding the platform refused to set.
+ * A dimension whose import left everything alone reports `changed: 0`.
+ */
+export interface ImportDimensionOutcome {
+  changed: number;
+  failed: number;
+}
+
+/** Per-dimension outcome, keyed by the same four dimensions as `DimensionPresence`. */
+export interface ImportDimensionOutcomes {
+  slots: ImportDimensionOutcome;
+  rules: ImportDimensionOutcome;
+  settings: ImportDimensionOutcome;
+  shortcuts: ImportDimensionOutcome;
+}
+
 /** Applied-result checklist (§4.3). */
 export interface ImportApplyResult {
   success: boolean;
   configVersion: number;
   counts: { added: number; replaced: number; kept: number; deleted: number; skipped: number };
+  /**
+   * R5/R6: the per-dimension outcome, produced by APPLY itself.
+   *
+   * Derived server-side rather than re-counted in the UI: the report must
+   * describe what the WRITE did (including the shortcut bindings, which the UI
+   * cannot observe), and a second count in the renderer would drift from it.
+   */
+  dimensions: ImportDimensionOutcomes;
   tolerant: TolerantItem[];
   domainViolations: DomainViolation[];
   missingIcons: Array<{ kind: 'slot' | 'rule'; id: number | string }>;
