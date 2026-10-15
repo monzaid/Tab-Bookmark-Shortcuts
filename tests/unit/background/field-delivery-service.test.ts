@@ -55,7 +55,7 @@ describe('T7: FieldDeliveryService', () => {
       await repo.addRule({
         id: 'r1',
         urlMatch: { type: 'exact', value: 'https://a.com/x' },
-        priority: 0,
+        priority: 0, tagIds: [],
         title: 'Rule Title',
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',
@@ -102,7 +102,7 @@ describe('T7: FieldDeliveryService', () => {
       await repo.addRule({
         id: 'r1',
         urlMatch: { type: 'exact', value: 'https://a.com/x' },
-        priority: 0,
+        priority: 0, tagIds: [],
         title: 'Degraded Title',
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',
@@ -124,7 +124,7 @@ describe('T7: FieldDeliveryService', () => {
       await repo.addRule({
         id: 'r1',
         urlMatch: { type: 'exact', value: 'https://a.com/x' },
-        priority: 0,
+        priority: 0, tagIds: [],
         title: 'V1',
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',
@@ -177,7 +177,7 @@ describe('T7: FieldDeliveryService', () => {
         await repo.addRule({
           id: 'r1',
           urlMatch: { type: 'exact', value: 'https://a.com/x' },
-          priority: 0,
+          priority: 0, tagIds: [],
           title: 'Debounced',
           createdAt: '2026-01-01T00:00:00Z',
           updatedAt: '2026-01-01T00:00:00Z',
@@ -219,7 +219,7 @@ describe('T7: FieldDeliveryService', () => {
       await repo.addRule({
         id: 'r1',
         urlMatch: { type: 'exact', value: 'https://a.com/x' },
-        priority: 0,
+        priority: 0, tagIds: [],
         title: 'Retry',
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',
@@ -246,7 +246,7 @@ describe('T7: FieldDeliveryService', () => {
       await repo.addRule({
         id: 'r1',
         urlMatch: { type: 'exact', value: 'https://a.com/x' },
-        priority: 0,
+        priority: 0, tagIds: [],
         title: 'Retry',
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',

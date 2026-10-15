@@ -33,7 +33,7 @@ const RECIPE: IconSource = {
 const rule = (favicon: IconSource): PageRule => ({
   id: 'rule-1',
   urlMatch: { type: 'exact', value: 'https://a.example/' },
-  priority: 0,
+  priority: 0, tagIds: [],
   favicon,
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
@@ -86,13 +86,14 @@ describe('T13: IconSource.textColor survives storage and package round-trips', (
       autoBindGlobal: true,
       slots: [],
       rules: [rule(bare)],
+      tags: [],
     };
     const pkg: ExportPackage = {
       schemaVersion: 1,
       generator: { name: 't', version: '1' },
       exportedAt: 'x',
       scope: { rules: true },
-      rules: [{ id: 'rule-1', urlMatch: { type: 'exact', value: 'https://a.example/' }, priority: 0, favicon: iconToPortable(bare, 'icon:rule-1') }],
+      rules: [{ id: 'rule-1', urlMatch: { type: 'exact', value: 'https://a.example/' }, priority: 0, tags: [], favicon: iconToPortable(bare, 'icon:rule-1') }],
     };
     const diff = computeDiff(pkg, sync, defaultImportIntent());
     const iconField = diff.records[0].fields.find((f) => f.field === 'icon');
@@ -107,6 +108,7 @@ describe('T13: IconSource.textColor survives storage and package round-trips', (
       autoBindGlobal: true,
       slots: [],
       rules: [rule(RECIPE)],
+      tags: [],
     };
     const pkg: ExportPackage = {
       schemaVersion: 1,
@@ -116,7 +118,7 @@ describe('T13: IconSource.textColor survives storage and package round-trips', (
       rules: [{
         id: 'rule-1',
         urlMatch: { type: 'exact', value: 'https://a.example/' },
-        priority: 0,
+        priority: 0, tags: [],
         favicon: { kind: 'recipe', bgColor: '#000000', text: 'A', textColor: '#00FF00' },
       }],
     };

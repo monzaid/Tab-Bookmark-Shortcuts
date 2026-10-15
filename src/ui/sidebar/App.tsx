@@ -17,7 +17,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import type { SlotDefinition, SlotBinding, SyncState, LocalState, IconSource } from '@shared/types';
+import type { SlotDefinition, SlotBinding, SyncState, LocalState, IconSource, TagDefinition } from '@shared/types';
 import { Button, IconButton, Toast, Tooltip, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { getMessageClient } from '@ui/shared/message-client';
 import { openOrReusePage } from '@shared/open-page';
@@ -806,7 +806,7 @@ import type { IconConfig } from '@ui/components/IconEditor';
 import { IconFieldEditor } from '@ui/shared/icon-field-editor';
 import type { IconFieldValue } from '@ui/shared/icon-field-editor';
 import { canonicalIconSource, iconDraftToIconSource, iconSourceForOwner, iconSourceToDraft, iconSourceToFieldSeed } from '@ui/shared/icon-source';
-import { wildcardToRegex } from '@shared/url-utils';
+import { wildcardToRegex, isProtectedUrl } from '@shared/url-utils';
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import type { FieldMode } from '@ui/shared/field-editor';
 import { resolveFieldChain } from '@shared/field-chain';
@@ -1029,7 +1029,7 @@ function IconEditorModal({
 /** A chain for a surface with no live page context (see settings/App.tsx). */
 function emptyChain(field: 'title' | 'favicon' = 'title'): ChainResult {
   return resolveFieldChain(field, {
-    sync: { configVersion: 0, matchSettings: DEFAULT_MATCH_SETTINGS, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
+    sync: { configVersion: 0, matchSettings: DEFAULT_MATCH_SETTINGS, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [], tags: [] },
     local: { bindings: [], cycleCursors: [], lastSuccessSlotId: null, recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [] },
     tabId: -1,
     tabUrl: '',
@@ -1066,7 +1066,15 @@ interface CreateRuleModalProps {
    * a recipe as an upload and destroy it on save (C1).
    */
   defaultIconSource?: IconSource | null;
-  onSave: (data: { url: string; matchType: 'exact' | 'regex'; title?: string; favicon?: IconSource; priority: number }) => Promise<{ success: boolean; message?: string }>;
+  /**
+   * G3: `tagIds` is a SIBLING of the rule fields, not part of them. The caller
+   * sends it as a separate `SET_RULE_TAGS` AFTER the rule exists (A1) — putting
+   * it in the rule payload would route tags through the delivery path (R5).
+   */
+  onSave: (data: { url: string; matchType: 'exact' | 'regex'; title?: string; favicon?: IconSource; priority: number; tagIds?: string[] }) => Promise<{ success: boolean; message?: string }>;
+  /** G3/D-b: the tag vocabulary (select one) and the create-in-place hook. */
+  availableTags?: TagDefinition[];
+  onCreateTag?: (appearance: { name: string; backgroundColor: string; textColor: string }) => Promise<TagDefinition | null>;
   onCancel: () => void;
 }
 
@@ -1100,7 +1108,7 @@ function seedIconFrom(src: IconSource | null, fallback: string): { mode: FieldMo
     : { mode: { kind: 'set', value: fallback } };
 }
 
-function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = '', defaultIconSource = null, defaultMatchType, titleChain: liveTitleChain, iconChain: liveIconChain, onClearTier, resolveSourceForOwner, onSave, onCancel }: CreateRuleModalProps) {
+function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = '', defaultIconSource = null, defaultMatchType, titleChain: liveTitleChain, iconChain: liveIconChain, onClearTier, resolveSourceForOwner, onSave, availableTags, onCreateTag, onCancel }: CreateRuleModalProps) {
   // DT4: the four prefills are snapshotted ONCE on open, from the chain-derived
   // values the caller supplies (no per-keystroke re-seed, no implicit fallback).
   const [url, setUrl] = useState(defaultUrl);
@@ -1118,8 +1126,20 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
   const [iconMode, setIconMode] = useState<FieldMode>(initialIconSeed.mode);
   const [iconConfig, setIconConfig] = useState<IconConfig | undefined>(initialIconSeed.iconConfig);
   const [priority, setPriority] = useState(0);
+  // G3: the tags this new rule will carry. Held as a draft (ids), sent as a
+  // SEPARATE `SET_RULE_TAGS` after the rule is created — never inside the rule
+  // payload (A1/R5).
+  const [tagIds, setTagIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /**
+   * The current page could not be used as the rule's URL (an internal page).
+   *
+   * Not a validation error the user caused — it is the surface explaining why it
+   * did NOT fill the field in, so an empty Match URL reads as deliberate rather
+   * than as a bug.
+   */
+  const [prefillRefused, setPrefillRefused] = useState(false);
 
   // P4: the modal stays mounted (so `Dialog` can restore focus to its trigger
   // on close), therefore the prefill has to be re-seeded on every open — ONCE.
@@ -1138,20 +1158,28 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
     }
     if (seededForOpenRef.current) return; // mid-session prop churn must not reset
     seededForOpenRef.current = true;
-    setUrl(defaultUrl);
+    // An internal page cannot be a rule target (the worker refuses it and the form
+    // validator now flags it), so prefilling it would open the form already red and
+    // unusable — the user would have to work out that the page they are looking at
+    // is the problem. It is NOT prefilled; the reason is stated instead.
+    const usableUrl = isProtectedUrl(defaultUrl) ? '' : defaultUrl;
+    setUrl(usableUrl);
+    setPrefillRefused(defaultUrl.trim() !== '' && usableUrl === '');
     setMatchType(defaultMatchType ?? 'exact');
     setTitleMode(defaultTitle ? { kind: 'set', value: defaultTitle } : { kind: 'use-chain' });
     const seeded = seedIconFrom(defaultIconSource, defaultIcon);
     setIconMode(seeded.mode);
     setIconConfig(seeded.iconConfig);
     setPriority(0);
+    setTagIds([]);
     setSaving(false);
     setSaveError(null);
+    // `prefillRefused` is set above, from the URL that was actually seeded.
   }, [open, defaultUrl, defaultTitle, defaultIcon, defaultIconSource, defaultMatchType]);
 
   const handleSave = useCallback(async () => {
     if (saving) return;
-    const draft: RuleDraftValue = { url, matchType, titleMode, iconMode, iconConfig, priority };
+    const draft: RuleDraftValue = { url, matchType, titleMode, iconMode, iconConfig, priority, tagIds };
     const validation = validateRuleDraft(draft);
     if (!validation.valid) {
       setSaveError(validation.errors[0]?.message ?? 'Invalid form');
@@ -1161,6 +1189,8 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
     // Shared normalisation (regex conversion / clamp / DT5 mode model). T7/C1:
     // the modal hands over the WHOLE IconSource (a recipe stays `type:'template'`)
     // so the caller persists it unchanged — no data-URI flattening here.
+    // `tagIds` rides alongside as a SIBLING of the rule fields, never inside
+    // them: the caller sends it as a separate `SET_RULE_TAGS` after the save.
     const fields = normalizeRuleDraft(draft);
 
     setSaving(true);
@@ -1172,6 +1202,7 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         title: fields.title,
         favicon: fields.favicon,
         priority: fields.priority,
+        ...(fields.tagIds !== undefined ? { tagIds: fields.tagIds } : {}),
       });
       if (!result.success) {
         setSaveError(result.message || 'Failed to create rule');
@@ -1182,7 +1213,7 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
       setSaveError('Failed to create rule');
       setSaving(false);
     }
-  }, [url, matchType, titleMode, iconConfig, iconMode, priority, onSave, saving]);
+  }, [url, matchType, titleMode, iconConfig, iconMode, priority, tagIds, onSave, saving]);
 
   // Item 2.2: the real chains the caller resolved for the Current Page. They let
   // `Use chain` show `override > slot > rule > site` with actual values (2.3).
@@ -1254,6 +1285,16 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
       {/* DT5: an unsaved creation is explicitly labelled as such. */}
       <p className="tbs-modal__hint">This rule is not saved yet.</p>
 
+      {/* Why the Match URL is empty. Stated rather than left to be discovered: an
+          internal page (an extension page, a new tab, a local file) cannot be a rule
+          target, and an empty field with no reason reads as a broken form. */}
+      {prefillRefused && (
+        <p className="tbs-modal__hint tbs-modal__hint--notice" data-testid="rule-prefill-refused">
+          This page is a browser-internal page, so it cannot be used for a rule. Enter the address of a
+          normal website instead.
+        </p>
+      )}
+
       {/* SC8: the SAME field set the settings surfaces use. */}
       <RuleFormFields
         variant="create"
@@ -1264,6 +1305,7 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
           iconMode,
           iconConfig,
           priority,
+          tagIds,
         }}
         onChange={(patch) => {
           if (patch.url !== undefined) setUrl(patch.url);
@@ -1272,6 +1314,7 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
           if (patch.iconMode !== undefined) setIconMode(patch.iconMode);
           if (patch.iconConfig !== undefined) setIconConfig(patch.iconConfig);
           if (patch.priority !== undefined) setPriority(patch.priority);
+          if (patch.tagIds !== undefined) setTagIds(patch.tagIds);
         }}
         prefill={{ url: defaultUrl }}
         chain={chain}
@@ -1297,6 +1340,14 @@ function CreateRuleModal({ open, defaultUrl, defaultTitle = '', defaultIcon = ''
         onClearTitle={() => { setTitleMode({ kind: 'use-chain' }); }}
         onClearIcon={() => { setIconMode({ kind: 'use-chain' }); setIconConfig(undefined); }}
         submitMode={{ kind: 'immediate' }}
+        // G3: the tag selector — the SAME shared field set, so the sidebar's
+        // create flow gets tagging by construction (R23) rather than by a
+        // second, parallel control.
+        availableTags={availableTags ?? []}
+        {...(onCreateTag ? { onCreateTag } : {})}
+        // The modal is a ~288px column, so the tag form's four fields STACK there
+        // and go two-up on the wider settings page (see `TagSelector.layout`).
+        tagLayout="stacked"
         idPrefix="modal-rule"
         // Item 2.4: re-selecting `Custom Title` restores the previous text.
         titleLastValue={titleLastValue}
@@ -1936,16 +1987,57 @@ export function SidebarApp() {
     }
   }, [state.currentTabId, loadState]);
 
-  const handleCreateGlobalRule = useCallback(async (ruleData: { url: string; matchType: 'exact' | 'regex'; title?: string; favicon?: IconSource; priority: number }): Promise<{ success: boolean; message?: string; conflictingRuleId?: string }> => {
+  /**
+   * G3/D-f: create a tag from the sidebar, through the SAME `CREATE_TAG` message
+   * the Tags page uses (one write path — the requirement is that a tag created
+   * in place is indistinguishable from one created on the manage page). The tag
+   * is persisted IMMEDIATELY, so cancelling the rule form leaves it behind (D-f),
+   * which is accepted: it then shows up as an orphan on the Tags page.
+   */
+  const handleCreateTag = useCallback(async (appearance: { name: string; backgroundColor: string; textColor: string }): Promise<TagDefinition | null> => {
     try {
+      const response = await sendMessage('CREATE_TAG', {
+        name: appearance.name,
+        backgroundColor: appearance.backgroundColor,
+        textColor: appearance.textColor,
+      }) as { result?: { success: boolean; tag?: TagDefinition }; success?: boolean; tag?: TagDefinition };
+      const result = response?.result ?? response;
+      if (result?.success && result.tag) {
+        await loadState();
+        return result.tag;
+      }
+      setToast({ variant: 'error', message: 'Could not create tag' });
+      return null;
+    } catch {
+      setToast({ variant: 'error', message: 'Could not create tag' });
+      return null;
+    }
+  }, [loadState]);
+
+  const handleCreateGlobalRule = useCallback(async (ruleData: { url: string; matchType: 'exact' | 'regex'; title?: string; favicon?: IconSource; priority: number; tagIds?: string[] }): Promise<{ success: boolean; message?: string; conflictingRuleId?: string }> => {
+    try {
+      // The rule payload carries NO tag field (A1/R5): a tag written through
+      // this request would travel the delivery path. The ORDER below is the
+      // contract — the rule first (so a real ruleId exists), tags second.
       const response = await sendMessage('CREATE_RULE', {
         urlMatch: { type: ruleData.matchType, value: ruleData.url },
         priority: ruleData.priority,
         title: ruleData.title || undefined,
         favicon: ruleData.favicon,
-      }) as { result?: { success: boolean; message?: string; conflict?: { conflictingRuleId?: string } }; success?: boolean; message?: string };
+      }) as { result?: { success: boolean; message?: string; conflict?: { conflictingRuleId?: string }; rule?: { id: string } }; success?: boolean; message?: string; rule?: { id: string } };
       const result = response?.result ?? response;
       if (result?.success) {
+        const newRuleId = (result as { rule?: { id: string } })?.rule?.id;
+        // A1: tags are a SECOND, independent write. A failure here must NOT roll
+        // the rule back — tags are organisational and do not affect behaviour, so
+        // losing them is a smaller harm than losing the rule the user just made.
+        if (newRuleId && ruleData.tagIds && ruleData.tagIds.length > 0) {
+          try {
+            await sendMessage('SET_RULE_TAGS', { ruleId: newRuleId, tagIds: ruleData.tagIds });
+          } catch {
+            setToast({ variant: 'error', message: 'Rule saved, but tags could not be applied' });
+          }
+        }
         setShowRuleModal(false);
         setRulePrefill(null);
         setToast({ variant: 'success', message: 'Rule created' });
@@ -2588,6 +2680,12 @@ export function SidebarApp() {
       {/* Global rule creation modal (Problem 3c / 5 / 7) */}
       <CreateRuleModal
         open={showRuleModal}
+        // G3/D-f: the tag table to choose from, and the create-in-place hook —
+        // both flow through the ONE `TagService` write path (`CREATE_TAG`), so a
+        // tag made from the sidebar is indistinguishable from one made on the
+        // Tags page.
+        availableTags={state.sync?.tags ?? []}
+        onCreateTag={handleCreateTag}
         defaultUrl={rulePrefill ? rulePrefill.url : state.currentTabUrl}
         defaultTitle={rulePrefill ? rulePrefill.title : ''}
         defaultIcon={rulePrefill ? rulePrefill.icon : ''}

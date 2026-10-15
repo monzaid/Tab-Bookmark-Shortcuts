@@ -36,7 +36,7 @@ function makeRule(id: string): PageRule {
   return {
     id,
     urlMatch: { type: 'regex', value: `^https://r-${id}\\.example\\.com/.*$` },
-    priority: 5,
+    priority: 5, tagIds: [],
     title: `Rule ${id}`,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-03T00:00:00.000Z',
@@ -62,6 +62,7 @@ function makeState(): SyncState {
     autoBindGlobal: false,
     slots,
     rules: [makeRule('a'), makeRule('b'), makeRule('c')],
+    tags: [],
   };
 }
 

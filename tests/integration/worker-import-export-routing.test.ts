@@ -43,6 +43,7 @@ const RULE: PageRule = {
   urlMatch: { type: 'exact', value: 'https://t17.example/' },
   priority: 5,
   title: 'T17 rule',
+  tagIds: [],
   createdAt: '2026-01-01T00:00:00Z',
   updatedAt: '2026-01-01T00:00:00Z',
 };
@@ -55,6 +56,7 @@ function packageFile(rule: PageRule | null): string {
     autoBindGlobal: true,
     slots: [],
     rules: rule ? [rule] : [],
+    tags: [],
   };
   return JSON.stringify(syncStateToPackage(source, { rules: true }));
 }

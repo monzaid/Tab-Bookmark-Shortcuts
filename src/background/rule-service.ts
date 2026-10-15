@@ -151,6 +151,12 @@ export class RuleService {
       title: params.title,
       favicon: params.favicon,
       enabled: params.enabled !== false,
+      // Mechanical completion only: the field is REQUIRED (P1), so this literal
+      // cannot omit it. This file must NOT grow tag BUSINESS logic — tagging is a
+      // separate write routed to TagService, never a side effect of rule
+      // creation. The I1 guard reads the execution chain for tag tokens; this one
+      // empty array is the plan-sanctioned exception (see T1's expected list).
+      tagIds: [],
       createdAt: now,
       updatedAt: now,
     };

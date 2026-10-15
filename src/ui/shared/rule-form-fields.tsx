@@ -25,8 +25,10 @@ import { MatchFields } from './match-fields';
 import { PriorityField } from './priority-field';
 import { ImpactPreview } from './impact-preview';
 import { validateRuleDraft } from './rule-form-submit';
+import { TagSelector } from './tag-selector';
 import type { ChainResult } from '@shared/field-chain';
 import type { IconConfig } from '@ui/components/IconEditor';
+import type { TagDefinition } from '@shared/types';
 
 export type RuleFormVariant = 'create' | 'edit';
 
@@ -38,6 +40,8 @@ export interface RuleFormFieldsValue {
   iconConfig?: IconConfig;
   priority: number;
   enabled?: boolean;
+  /** The rule's selected tags as a form draft (G3). Passed through untransformed. */
+  tagIds?: string[];
 }
 
 export interface RuleFormFieldsProps {
@@ -96,6 +100,30 @@ export interface RuleFormFieldsProps {
    */
   onApplyTier?: (kind: import('@shared/field-chain').TierKey, value: string, owner: import('@shared/field-chain').TierOwner, field: 'title' | 'icon') => void;
   onClearTier?: (owner: import('@shared/field-chain').TierOwner, field: 'title' | 'icon') => void;
+  /**
+   * G3: the tag table to choose from. Read-only here — the form never writes a
+   * tag, it only SELECTS one.
+   */
+  availableTags?: TagDefinition[];
+  /**
+   * G3/D-f: create a tag with its name AND appearance. The PARENT sends the
+   * message (one write path), and it must be the same `TagService` path the Tags
+   * page uses — so this component deliberately holds no message-sending of its
+   * own.
+   *
+   * The appearance travels WITH the name because a tag made in place has to be
+   * the same object as one made on the Tags page; sending only a name produced a
+   * tag that had to be re-opened elsewhere to look like anything.
+   */
+  onCreateTag?: (appearance: { name: string; backgroundColor: string; textColor: string }) => Promise<TagDefinition | null>;
+  /**
+   * How the tag selector's create form lays out its four fields.
+   *
+   * Passed through rather than decided here: the FIELD SET does not know how wide
+   * its container is, and the two consumers are genuinely different (the sidebar
+   * modal is a ~288px column, the settings editors are a wide grid).
+   */
+  tagLayout?: 'stacked' | 'grid';
 }
 
 export function RuleFormFields({
@@ -129,6 +157,9 @@ export function RuleFormFields({
   impactExcludeRuleId,
   onApplyTier,
   onClearTier,
+  availableTags,
+  onCreateTag,
+  tagLayout,
 }: RuleFormFieldsProps) {
   // ─── IMP-7: the ONE derivation point for the clear capability ──────────────
   const canClearChain = variant !== 'create';
@@ -235,6 +266,20 @@ export function RuleFormFields({
             {' '}Enabled
           </label>
         </div>
+      )}
+
+      {/* G3: tags, everywhere a rule is created OR edited. It is one control in
+          the one shared field set, so both entry points are covered by
+          construction rather than by remembering to add it twice (R23/SC8). */}
+      {availableTags !== undefined && (
+        <TagSelector
+          selectedTagIds={value.tagIds ?? []}
+          availableTags={availableTags}
+          onChange={(tagIds) => { onChange({ tagIds }); }}
+          onCreateTag={onCreateTag ?? ((): Promise<TagDefinition | null> => Promise.resolve(null))}
+          disabled={disabled}
+          {...(tagLayout !== undefined ? { layout: tagLayout } : {})}
+        />
       )}
 
       {submitMode.kind === 'draft' && (

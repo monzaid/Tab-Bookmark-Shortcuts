@@ -1,4 +1,4 @@
-﻿/**
+/**
  * T11 / C10 — a REPLACED record must not keep its target-machine icon blob.
  *
  * §3.7: the reference key is derived from the record id (`icon:slot-3`). If the
@@ -82,6 +82,7 @@ describe('T11: replaced records lose their icon slot; kept records do not', () =
       autoBindGlobal: true,
       slots,
       rules: [],
+      tags: [],
     } satisfies SyncState;
     for (const s of slots) {
       adapter.state.localStorage[`icon:slot-${String(s.id)}`] = `ORIGINAL_URI_${String(s.id)}`;
@@ -150,7 +151,7 @@ describe('T11: replaced records lose their icon slot; kept records do not', () =
     await seed([slotWithRef(3)]);
     const stale = repo.getConfigVersion();
     await repo.addRule({
-      id: 'r', urlMatch: exact('https://x/'), priority: 0,
+      id: 'r', urlMatch: exact('https://x/'), priority: 0, tagIds: [],
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     });
 

@@ -28,6 +28,45 @@ function form(overrides: Partial<RuleFormInput>): RuleFormInput {
   };
 }
 
+describe('form-validation — a protected page is refused by the FORM, not by the save', () => {
+  /**
+   * The defect: `chrome://newtab` parsed as a valid URL, so every check passed and
+   * the Save button stayed enabled — the rejection only appeared after the write
+   * ("Cannot create rules for protected internal pages"), with nothing on screen
+   * naming the URL field. The sidebar is most often opened ON a new tab, where
+   * "Add to global rules" prefills exactly this URL.
+   */
+  it('blocks exact-match rules for the internal prefixes the worker also refuses', () => {
+    for (const url of [
+      'chrome://newtab/',
+      'chrome://extensions/',
+      'chrome-extension://abcdef/page.html',
+      'edge://settings/',
+      'about:blank',
+      'file:///Users/me/page.html',
+    ]) {
+      const result = validateRuleForm(form({ url }));
+      expect(result.valid, `${url} must be refused`).toBe(false);
+      // The message names the field it belongs to, so the form can place it inline.
+      expect(result.errors.some((e) => e.field === 'matchUrl' && e.severity === 'block')).toBe(true);
+      expect(result.errors.find((e) => e.field === 'matchUrl')?.message).toBe(MESSAGES.protectedUrl);
+    }
+  });
+
+  it('still accepts ordinary http(s) pages (the check is not simply refusing everything)', () => {
+    for (const url of ['https://example.com/', 'http://localhost:3000/app']) {
+      const result = validateRuleForm(form({ url }));
+      expect(result.valid, `${url} must be accepted`).toBe(true);
+    }
+  });
+
+  it('the message states the reason AND the fix', () => {
+    // "Error messages must state cause + how to fix", not just that it failed.
+    expect(MESSAGES.protectedUrl).toMatch(/http/i);
+    expect(MESSAGES.protectedUrl.length).toBeGreaterThan(30);
+  });
+});
+
 describe('form-validation — regex is converted BEFORE validation (fixes N7)', () => {
   it('accepts a wildcard pattern by converting it first', () => {
     const result = validateRuleForm(form({ matchType: 'regex', url: '*.example.com' }));

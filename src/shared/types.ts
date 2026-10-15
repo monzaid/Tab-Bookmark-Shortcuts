@@ -108,6 +108,32 @@ export interface SlotBinding {
   boundAt: string; // ISO 8601
 }
 
+// ─── Tag (sync) ──────────────────────────────────────────────────────────────
+
+/**
+ * A tag — a purely ORGANISATIONAL dimension of a rule (C1/S1).
+ *
+ * Field ORDER mirrors `IconSource`'s recipe trio (`backgroundColor` / `text` /
+ * `textColor`), so a tag's appearance can be rendered by the same primitives
+ * instead of a second colour model. Reusing that shape is why a tag has no
+ * "style" concept of its own.
+ *
+ * `backgroundColor` / `textColor` are APPEARANCE, never identity: two tags
+ * whose names differ only by surrounding whitespace are duplicates regardless
+ * of colour, and recolouring a tag never changes which rules reference it
+ * (C2 — identity is `normalizeTagName(name)`, byte-for-byte).
+ *
+ * Tags are NOT part of the rule execution chain: they never influence match,
+ * priority, enabled state or delivery. That invariant is structural — see
+ * `TagService`, which holds no delivery entry point (A-a/I1).
+ */
+export interface TagDefinition {
+  id: string;
+  name: string;
+  backgroundColor: string;
+  textColor: string;
+}
+
 // ─── Page Rewrite Rule (sync) ────────────────────────────────────────────────
 
 export interface PageRule {
@@ -119,6 +145,16 @@ export interface PageRule {
   favicon?: IconSource;
   /** Whether this rule is active. Defaults to true if undefined. */
   enabled?: boolean;
+  /**
+   * Ids into `SyncState.tags` (C1/A6).
+   *
+   * REQUIRED, not optional (P1): an optional field would let a dangling
+   * reference be constructed in the type layer, and "a stored id always has a
+   * live definition" (I2) is exactly what the required-ness buys. The cost is
+   * that every existing `PageRule` literal must be migrated — that cost is
+   * paid once, and the compiler enumerates it.
+   */
+  tagIds: string[];
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
 }
@@ -220,7 +256,10 @@ export interface DiagnosticEntry {
 
 // ─── Import / Export — Iteration types (T2) ──────────────────────────────────
 //
-// The four dimensions are FIXED (D5): slots / rules / settings / shortcuts.
+// The five dimensions are FIXED (D5/D0): slots / rules / settings / shortcuts /
+// tags. `tags` is the fifth dimension and is NOT a record dimension — the tag
+// table is a vocabulary carried as a whole, not a list of records with ids
+// (see `ImportPartDiff` for the "part" rows it produces).
 
 export interface ExportScope {
   /** Dimension flags — `true` when the user selected that dimension (D1). */
@@ -228,9 +267,45 @@ export interface ExportScope {
   rules?: boolean;
   settings?: boolean;
   shortcuts?: boolean;
+  /**
+   * The tag vocabulary (D0/S5).
+   *
+   * Semantics of absence follow `PortableSettings` (R24): an ABSENT flag means
+   * the dimension is NOT carried, which is distinct from "carried and empty" —
+   * a package with `tags: []` says "share the vocabulary, and it is empty".
+   */
+  tags?: boolean;
+  /**
+   * A-f/D-e-②: "Leave them out" — carry each rule's tag names AS THEY ARE, even
+   * where the package defines no such tag.
+   *
+   * The OTHER way out of the same dialog needs no flag. "Include them" is
+   * expressed by re-running the export with those names un-excluded, so by the
+   * time the package is built every referenced name IS defined and the projection
+   * below is a no-op. This flag is the one that cannot be expressed that way,
+   * because it asks for the opposite of self-consistency.
+   *
+   * ABSENT (every ordinary export) carries a rule's names AS THEY ARE, even a name
+   * whose tag this package omits — because that state is exactly what
+   * `computeExportSelfConsistency` detects and the D-e dialog asks the user about.
+   * Stripping during the projection would remove the difference before anyone could
+   * be asked, which is the silent resolution the design forbids.
+   *
+   * The rule is always carried; only the unresolvable REFERENCE can be dropped, so
+   * "leave them out" costs a rule a label and never costs the user the rule.
+   */
+  stripOrphanTagNames?: boolean;
   /** Per-record deselection within a selected dimension (D1 "展开到记录级"). */
   excludedSlotIds?: number[];
   excludedRuleIds?: string[];
+  /**
+   * Per-tag deselection inside the tags dimension (A5).
+   *
+   * Keyed by NAME, not id: a package's tag identity IS its name (A4 — the
+   * package carries no tag ids). Only ever REMOVES, mirroring
+   * `excludedSlotIds` (R24).
+   */
+  excludedTagNames?: string[];
   /**
    * Fine-grained deselection INSIDE the settings dimension (R4).
    *
@@ -272,13 +347,22 @@ export interface ImportPartDiff {
   /** Human label for the row (e.g. "Match settings", "Save to slot 3"). */
   label: string;
   /** Which side of the settings part this row belongs to (drives grouping). */
-  group: 'global' | 'slot' | 'global-shortcut' | 'slot-shortcut';
+  group: 'global' | 'slot' | 'global-shortcut' | 'slot-shortcut' | 'tag';
   /** Identifies the slot a per-slot row addresses (undefined for global rows). */
   slotId?: number;
   status: ImportRecordStatus;
   before: ImportFieldValue | null;
   after: ImportFieldValue | null;
   changed: boolean;
+  /**
+   * The row's per-facet detail, rendered by the SAME `RecordFields` the record
+   * rows use — label / value / state, with the `→` written once.
+   *
+   * A tag's difference is not one fact: the name, the background and the text
+   * colour each answer a different question, and only the third of them is visible
+   * anywhere else. Optional so a diff assembled before this field still parses.
+   */
+  fields?: ImportFieldDiff[];
 }
 
 /** A sparse per-record override of the dimension mode (A4). `keep`=leave target. */
@@ -294,6 +378,14 @@ export interface ImportIntent {
     rules: DimensionMode;
     settings: DimensionMode;
     shortcuts: DimensionMode;
+    /**
+     * The tag vocabulary (D0/S5).
+     *
+     * `overwrite` would delete target-side tags the file does not carry, so A8
+     * lets the user re-decide it as `incremental` — expressed as rewriting THIS
+     * field, not as a second code path (`tagOverwriteResolution`, below).
+     */
+    tags: DimensionMode;
   };
   /** Seeded at file-open for every non-`added` row, then edited per row (A4). */
   recordOverrides?: ImportRecordOverride[];
@@ -314,6 +406,48 @@ export interface ImportIntent {
    * shortcut that belongs to no slot.
    */
   takeShortcutNames?: string[];
+  /**
+   * The tags to take, by NAME (a package identifies a tag by name — A4).
+   *
+   * Same allow-list semantics as the other two: `undefined` = take every tag the
+   * file carries. A name that is declined is simply not created from the
+   * VOCABULARY — but a name a TAKEN RULE references is still created, because a
+   * rule cannot be honoured with a reference to a tag that does not exist (C7).
+   * That is a deliberate asymmetry: declining a tag means "do not add this label",
+   * never "break the records that use it".
+   */
+  takeTagNames?: string[];
+  /**
+   * A-f/D-e on the IMPORT side: "Leave them out" — carry no tag references from
+   * this file.
+   *
+   * Deliberately the SAME name as the export-side scope flag, because it is the
+   * same decision: do not carry a tag reference that cannot resolve. The
+   * alternative ("Include them") needs no flag — it is the default, where a
+   * referenced name is created like any other.
+   *
+   * Scoped at the RULE, not at the orphan names: the question the user answered was
+   * whether to include the file's tags, so choosing "leave them out" means the
+   * rules land without their tag references — not merely without the unresolvable
+   * ones. Bullet-scoping it left the reported symptom intact (the rule still showed
+   * a tag), which reads as the answer having been ignored.
+   *
+   * Consequence, disclosed in the dialog before it is taken: rules keep everything
+   * else, and the file's tags are not attached to them.
+   */
+  stripOrphanTagNames?: boolean;
+  /**
+   * A8: how the tags dimension's `overwrite` deletion is resolved.
+   *
+   * `overwrite` on tags is the only mode whose default deletes DATA the file
+   * does not carry (target-side tags, plus every rule reference to them). A8
+   * requires the user be able to re-decide it: `'to-incremental'` is defined as
+   * EQUIVALENT to rewriting `dimensionModes.tags` to `'incremental'` — one
+   * reasoning chain, not a parallel implementation.
+   *
+   * Absent/`'cascade'` = take the `overwrite` semantics as chosen.
+   */
+  tagOverwriteResolution?: 'cascade' | 'to-incremental';
 }
 
 /** Default import intent: incremental + no overrides (A1 — the safer default). */
@@ -324,6 +458,7 @@ export function defaultImportIntent(): ImportIntent {
       rules: 'incremental',
       settings: 'incremental',
       shortcuts: 'incremental',
+      tags: 'incremental',
     },
   };
 }
@@ -338,7 +473,32 @@ export type ImportFieldValue =
   | { kind: 'text'; value: string }
   | { kind: 'url'; value: string }
   | { kind: 'local-ref'; key: string }
-  | { kind: 'recipe'; bgColor: string; text: string; textColor: string };
+  | { kind: 'recipe'; bgColor: string; text: string; textColor: string }
+  /**
+   * A colour, carried as its own kind rather than as `text`.
+   *
+   * A tag's appearance is two colours (background and text), and they are the
+   * substance of what a tag IS — printing `#3366cc` as prose makes the reader
+   * decode a hex string to answer "does this differ", while the row can show the
+   * colour it means. Same reasoning as the `icon` facet's preview: the one thing
+   * that is visual gets rendered, beside the text rather than instead of it.
+   */
+  | { kind: 'color'; value: string }
+  /**
+   * A rule's tags, as renderable chips.
+   *
+   * A FIELD rather than a side-channel on the row, because that is what it is: a
+   * rule's tags are one of the things an import changes about it, and the review
+   * panel already has a place for "which fields does this record carry, and what
+   * does each become" — the Fields detail. Showing them outside it made the tags
+   * the one attribute that escaped the panel's own vocabulary (and the one the
+   * user had to look elsewhere for).
+   *
+   * The chips carry the appearance the import will actually produce, so the row
+   * can render them the way the tag list does rather than as a comma-joined
+   * string — see `ImportTagPreview`.
+   */
+  | { kind: 'tags'; tags: ImportTagPreview[] };
 
 /** Per-field change detail inside a record (A12). */
 /**
@@ -348,7 +508,18 @@ export type ImportFieldValue =
  * whose URL match moved is otherwise indistinguishable from an unchanged one.
  */
 export interface ImportFieldDiff {
-  field: 'title' | 'icon' | 'match-url' | 'match-type' | 'priority';
+  /**
+   * The facet that differs.
+   *
+   * The `tag-*` members exist because a tag's DIFFERENCE is not just its name:
+   * its background and text colours are what the user is being asked to accept,
+   * and a row that reported only "tag added" left the colours unstated — so an
+   * incoming tag silently overwriting the look of one already on the machine was
+   * invisible.
+   */
+  field: 'title' | 'icon' | 'match-url' | 'match-type' | 'priority'
+    | 'tags'
+    | 'tag-name' | 'tag-background' | 'tag-text';
   before: ImportFieldValue | null;
   after: ImportFieldValue | null;
   changed: boolean;
@@ -372,6 +543,19 @@ export interface ImportRecordBefore {
   matchType: ImportFieldValue | null;
   /** Rules only; `undefined` for slots. */
   priority?: number;
+}
+
+/**
+ * A tag as it will look, resolved for PREVIEW.
+ *
+ * The same minimal shape on both sides of a record row, because the question the
+ * row answers is "which tags does this carry, and what do they look like" — not
+ * "which tag table did each side come from".
+ */
+export interface ImportTagPreview {
+  name: string;
+  backgroundColor: string;
+  textColor: string;
 }
 
 export interface ImportRecordDiff {
@@ -424,6 +608,14 @@ export interface DimensionPresence {
   rules: boolean;
   settings: boolean;
   shortcuts: boolean;
+  /**
+   * Whether the package carried the tag vocabulary (D0).
+   *
+   * REQUIRED for the same reason as the other four (R7): every shape that
+   * enumerates the dimensions must be updated in one go, and a missing key here
+   * would silently leave "4 dimensions, 5 cards".
+   */
+  tags: boolean;
 }
 
 /** Record-level + field-level diff over the package against current state (A12). */
@@ -442,6 +634,19 @@ export interface ImportDiff {
   settingsParts?: ImportPartDiff[];
   /** R10: the shortcut bindings the file carries, one row each. */
   shortcutParts?: ImportPartDiff[];
+  /**
+   * The tag vocabulary, one row per tag the file carries (D0).
+   *
+   * Optional for the same "absent dimension reports nothing" reason as the
+   * other part lists. A tag is identified by NAME here, because a package
+   * carries no tag ids (A4).
+   *
+   * Present under `overwrite` too, where a row whose status is `deleted` is the
+   * §7-item-5 DISCLOSURE: the deletion must be visible before it is committed
+   * (A8 — the user may re-decide it as `incremental`, which is the same decision
+   * expressed as a mode change).
+   */
+  tagNames?: ImportPartDiff[];
 }
 
 /** A forgiving-but-disclosed item (unknown field ignored, default filled). */
@@ -488,12 +693,21 @@ export interface ImportDimensionOutcome {
   failed: number;
 }
 
-/** Per-dimension outcome, keyed by the same four dimensions as `DimensionPresence`. */
+/** Per-dimension outcome, keyed by the same five dimensions as `DimensionPresence`. */
 export interface ImportDimensionOutcomes {
   slots: ImportDimensionOutcome;
   rules: ImportDimensionOutcome;
   settings: ImportDimensionOutcome;
   shortcuts: ImportDimensionOutcome;
+  /**
+   * The tag vocabulary's outcome (G-H).
+   *
+   * `changed` = the tag entities this import actually WROTE (created, plus the
+   * reused ones it had to update); `failed` = the ones rejected by a limit or a
+   * duplicate. It is NOT "how many tags the file listed" — the number has to
+   * describe the write, so it can be checked against the diff rows.
+   */
+  tags: ImportDimensionOutcome;
 }
 
 /** Applied-result checklist (§4.3). */
@@ -515,6 +729,16 @@ export interface ImportApplyResult {
   overlaps: MatchOverlap[];
   /** Chrome/Edge: manual-set guidance for the shortcut dimension (D4). */
   shortcutGuidance?: string;
+  /**
+   * A10/S6: how many tags this import had to CREATE because the file named a
+   * tag that neither the file's vocabulary home nor the target machine knew.
+   *
+   * Such tags get the DEFAULT appearance, because the import side has no colour
+   * source for a name the file itself did not define — a registered asymmetry
+   * (§6), not an oversight. The COUNT is reported so the user is told rather
+   * than left to notice the new tags later.
+   */
+  tagsCreatedWithDefaultAppearance?: number;
 }
 
 export interface ExportPackageSummary {
@@ -536,6 +760,15 @@ export interface SyncState {
   autoBindGlobal: boolean;
   slots: SlotDefinition[];
   rules: PageRule[];
+  /**
+   * The GLOBAL tag table (C1): one list for the whole install, referenced by
+   * `PageRule.tagIds`.
+   *
+   * Rules store ids rather than copies so that renaming a tag is a one-cell
+   * write and every reference follows automatically (C1's stated benefit).
+   * There is NO cap on the number of tags (C3) — the cap is per RULE (≤8).
+   */
+  tags: TagDefinition[];
 }
 
 // ─── Site Snapshot (local, strictly sealed — A7/C6) ──────────────────────────
@@ -598,6 +831,15 @@ export type DomainErrorCode =
   | 'RULE_REGEX_TOO_LONG'
   | 'RULE_PROTECTED_URL'
   | 'RULE_NOT_FOUND'
+  // Tags
+  | 'TAG_NAME_DUPLICATE'
+  | 'TAG_NAME_TOO_LONG'
+  | 'TAG_NOT_FOUND'
+  | 'TAG_LIMIT_EXCEEDED'
+  | 'RULE_TAG_LIMIT_EXCEEDED'
+  // The colour reaches the renderer as an inline CSS value, so a malformed one is
+  // rejected at the write rather than stored (see `isTagColorValid`).
+  | 'TAG_COLOR_INVALID'
   // Icons
   | 'ICON_TOO_LARGE'
   | 'ICON_INVALID_FORMAT'

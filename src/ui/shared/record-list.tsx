@@ -13,11 +13,12 @@
  */
 
 import { useMemo, useState, type ReactNode } from 'react';
-import type { ImportFieldDiff, ImportRecordStatus, UrlMatchType } from '@shared/types';
+import type { ImportFieldDiff, ImportFieldValue, ImportRecordStatus, ImportTagPreview, UrlMatchType } from '@shared/types';
 import { MATCH_TYPE_LABELS } from '@shared/match-type-labels';
 import { formatFieldDiff } from '@ui/shared/import-field-format';
 import type { FieldState } from '@ui/shared/import-field-format';
 import { IconPreview, previewFromFieldValue, type IconPreviewSource } from '@ui/shared/icon-preview';
+import { SearchField } from '@ui/shared/search-field';
 
 // ─── Row descriptor ──────────────────────────────────────────────────────────
 
@@ -119,14 +120,12 @@ export function RecordList({
   return (
     <div className="tbs-record-list" data-testid={testIdPrefix}>
       <div className="tbs-record-list__toolbar" role="group" aria-label={label}>
-        <input
-          type="search"
-          className="tbs-settings__search"
-          data-testid={`${testIdPrefix}-search`}
+        <SearchField
+          testId={`${testIdPrefix}-search`}
           value={search}
           placeholder="Search title or Match URL"
-          aria-label={`Search ${label}`}
-          onChange={(e) => { setSearch(e.currentTarget.value); }}
+          ariaLabel={`Search ${label}`}
+          onChange={setSearch}
         />
         <select
           className="tbs-settings__filter-select"
@@ -211,6 +210,28 @@ const STATE_LABELS: Record<FieldState, string> = {
   removed: 'removed',
 };
 
+/**
+ * A facet's colour, when it is one.
+ *
+ * Narrowed through the `kind` rather than reading `.value`, so a non-colour facet
+ * cannot be handed to a `style` (the discriminated union is the only thing that
+ * knows which values are safe to put in CSS).
+ */
+function colorOf(v: ImportFieldValue | null): string | null {
+  return v !== null && v.kind === 'color' ? v.value : null;
+}
+
+/** A tags facet's chips on one side. `undefined` = this side is not a tag set. */
+function tagsOf(v: ImportFieldValue | null | undefined): ImportTagPreview[] | undefined {
+  return v !== null && v !== undefined && v.kind === 'tags' ? v.tags : undefined;
+}
+function beforeTagsOf(f: ImportFieldDiff): ImportTagPreview[] | undefined {
+  return tagsOf(f.before);
+}
+function afterTagsOf(f: ImportFieldDiff): ImportTagPreview[] | undefined {
+  return tagsOf(f.after);
+}
+
 export interface RecordFieldsProps {
   fields: readonly ImportFieldDiff[];
   /** The RECORD's status — what decides added / removed / changed / unchanged. */
@@ -289,6 +310,78 @@ export function RecordFields({ fields, status, testId, testIdPrefix }: RecordFie
                 )}
                 {view.before === null && view.after === null && (
                   <span className="tbs-field-row__none" aria-hidden="true">—</span>
+                )}
+                {/* A TAGS facet shows the tags as the chips they are.
+                    `formatFieldValue` renders the names as text (the fallback
+                    every facet has), and the chips are the readable form of the
+                    same fact — the pair the `icon` facet already establishes
+                    between its preview and its text. Counts are stated when a side
+                    has none, so "removed every tag" is distinguishable from "tags
+                    unchanged, and here they are". */}
+                {f.field === 'tags' && (
+                  <span className="tbs-settings__field-tags">
+                    {view.before !== null && (
+                      <span className="tbs-settings__field-tag-set">
+                        {(beforeTagsOf(f) ?? []).length === 0
+                          ? <span className="tbs-field-row__none" aria-hidden="true">—</span>
+                          : beforeTagsOf(f)?.map((t) => (
+                            <span
+                              key={`b-${t.name}`}
+                              className="tbs-tag-picker__chip"
+                              data-testid={`${testIdPrefix}-tags-before-${t.name}`}
+                              style={{ backgroundColor: t.backgroundColor, color: t.textColor }}
+                            >
+                              {t.name}
+                            </span>
+                          ))}
+                      </span>
+                    )}
+                    {view.before !== null && view.after !== null && (
+                      <span className="tbs-field-row__arrow" aria-hidden="true">→</span>
+                    )}
+                    {view.after !== null && (
+                      <span className="tbs-settings__field-tag-set">
+                        {(afterTagsOf(f) ?? []).length === 0
+                          ? <span className="tbs-field-row__none" aria-hidden="true">—</span>
+                          : afterTagsOf(f)?.map((t) => (
+                            <span
+                              key={`a-${t.name}`}
+                              className="tbs-tag-picker__chip"
+                              data-testid={`${testIdPrefix}-tags-after-${t.name}`}
+                              style={{ backgroundColor: t.backgroundColor, color: t.textColor }}
+                            >
+                              {t.name}
+                            </span>
+                          ))}
+                      </span>
+                    )}
+                  </span>
+                )}
+                {/* A COLOUR facet shows the colour. Same reasoning as the icon
+                    preview above and in the same cell: the value's text is
+                    `#3366cc`, which a reader has to decode to answer "does this
+                    differ" — the swatch answers it at a glance, and the arrow
+                    between the two swatches is what makes the DIRECTION readable. */}
+                {(f.field === 'tag-background' || f.field === 'tag-text') && (
+                  <span className="tbs-settings__field-color">
+                    {colorOf(f.before) !== null && (
+                      <span
+                        className="tbs-settings__color-swatch"
+                        style={{ background: colorOf(f.before) as string }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    {colorOf(f.before) !== null && colorOf(f.after) !== null && (
+                      <span className="tbs-field-row__arrow" aria-hidden="true">→</span>
+                    )}
+                    {colorOf(f.after) !== null && (
+                      <span
+                        className="tbs-settings__color-swatch"
+                        style={{ background: colorOf(f.after) as string }}
+                        aria-hidden="true"
+                      />
+                    )}
+                  </span>
                 )}
               </span>
               <span className="tbs-field-row__state">{STATE_LABELS[view.state]}</span>

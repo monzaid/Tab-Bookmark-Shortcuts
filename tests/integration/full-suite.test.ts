@@ -129,6 +129,7 @@ describe('T24: Integration suite — cross-module compatibility', () => {
           { id: 5, urlMatch: { type: 'exact', value: 'https://new.com' }, strategy: 'inherit', uiMarker: {}, titleSnapshot: 'New', faviconSnapshot: '', createdAt: '', updatedAt: '' },
         ],
         rules: [],
+        tags: [],
       };
       const file = JSON.stringify(syncStateToPackage(source, { slots: true, settings: true }));
 

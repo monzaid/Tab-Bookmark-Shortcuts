@@ -17,6 +17,7 @@ import { StorageRepository } from './storage-repository';
 import { SlotService } from './slot-service';
 import { RecoveryService } from './recovery-service';
 import { RuleService } from './rule-service';
+import { TagService } from './tag-service';
 import { IconService } from './icon-service';
 import { ImportExportService } from './import-export-service';
 import { DiagnosticsService, NotificationService, IncognitoService } from './diagnostics-service';
@@ -98,6 +99,14 @@ const KNOWN_ACTIONS = [
   'OPEN_SIDEBAR',
   'CONFLICT_CANCEL',
   'CONFLICT_OVERWRITE',
+  // Rule Tags iteration: the separate tag message family (A1). Registered here
+  // in the SAME change as the union (G-D) so none of them can be "compiled into
+  // the union but rejected at runtime".
+  'CREATE_TAG',
+  'UPDATE_TAG',
+  'DELETE_TAG',
+  'SET_RULE_TAGS',
+  'RESTORE_TAG',
   'CONTENT_NAVIGATION',
   'CONTENT_READY',
   'SITE_SNAPSHOT_REPORT',
@@ -140,6 +149,14 @@ export class WorkerOrchestrator {
   readonly delivery: FieldDeliveryService;
   /** A7: the site-original value store (strictly local). */
   readonly siteSnapshots: SiteSnapshotStore;
+  /**
+   * A1: the tag table's sole writer.
+   *
+   * Constructed with the repository ALONE — never the adapter or the delivery
+   * service — so the worker cannot accidentally hand it a way to re-apply a
+   * rule (A-a). Note it is NOT given `this.delivery` below, unlike `RuleService`.
+   */
+  readonly tagService: TagService;
 
   private initialized = false;
 
@@ -159,6 +176,9 @@ export class WorkerOrchestrator {
     this.sidebarAdapter = new SidebarAdapter(adapter);
     this.delivery = new FieldDeliveryService(adapter, this.repo);
     this.siteSnapshots = new SiteSnapshotStore(this.repo);
+    // A1/A-a: the tag service is assembled with the REPOSITORY ONLY. Deliberately
+    // no adapter and no delivery — the type makes a delivery call impossible.
+    this.tagService = new TagService(this.repo);
     // A2/A3: every rule write routes through the single delivery entry.
     this.ruleService.setDelivery((tabIds) => this.delivery.recomputeAndRedeliver(tabIds));
   }
@@ -1049,6 +1069,49 @@ export class WorkerOrchestrator {
           await this.handleContentNavigation(tabId, request.payload.url);
         }
         return { success: true };
+      }
+
+      // ─── Tag actions (A1/A-a) ────────────────────────────────────────
+      //
+      // Every one of these goes to `TagService`, which has no delivery entry
+      // point — so a tagging write cannot re-apply a rule. None of them call
+      // `RuleService`, and none of them end in `applyToMatchingTabs` (R5/I1).
+      case 'CREATE_TAG': {
+        return { action: 'CREATE_TAG', result: await this.tagService.createTag(request.payload) };
+      }
+
+      case 'UPDATE_TAG': {
+        const result = await this.tagService.updateTag(
+          request.payload.tagId,
+          request.payload.name,
+          request.payload.backgroundColor,
+          request.payload.textColor,
+        );
+        return { action: 'UPDATE_TAG', result };
+      }
+
+      case 'DELETE_TAG': {
+        const result = await this.tagService.deleteTag(request.payload.tagId);
+        return {
+          action: 'DELETE_TAG',
+          result: result.success
+            ? { success: true, affectedRuleCount: result.affectedRuleCount }
+            : result,
+          // NOT part of the response contract, but the UI needs the snapshot to
+          // hand to the UndoBar: it is a side-channel on the same message.
+          ...(result.success ? { snapshot: result.snapshot } : {}),
+        };
+      }
+
+      case 'SET_RULE_TAGS': {
+        const result = await this.tagService.setRuleTags(request.payload.ruleId, request.payload.tagIds);
+        return { action: 'SET_RULE_TAGS', result };
+      }
+
+      case 'RESTORE_TAG': {
+        // C5/P3: the undo goes through the SAME service path (and therefore the
+        // same atomic mutator) the delete used — not a write path the UI owns.
+        return { action: 'RESTORE_TAG', result: await this.tagService.restoreDeletedTag(request.payload) };
       }
 
       default: {

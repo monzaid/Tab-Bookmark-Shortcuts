@@ -433,6 +433,7 @@ describe('T10: Page rules, field override computation, manual apply', () => {
           priority: 5,
           favicon: { type: 'url', value: 'javascript:alert(1)' },
           enabled: true,
+          tagIds: [],
           createdAt: '2026-01-01T00:00:00Z',
           updatedAt: '2026-01-01T00:00:00Z',
         });

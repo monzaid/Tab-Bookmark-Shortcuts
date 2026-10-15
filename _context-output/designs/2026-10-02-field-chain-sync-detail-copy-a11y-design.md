@@ -33,6 +33,11 @@
 | 清空某层 / 整条链 | **clear / cleared** | `reset` |
 | 撤销一次编辑（纯前端，DT7 ①） | **reset（this edit）** | `revert` / `undo edit` |
 | 破坏性批量清空（Dashboard 顶部两按钮） | **`Clear Shown (N)` / `Clear Selected (N)`** | `Clear All` |
+| 标签 | **tag / tags** | `label` / `keyword` / `category`（Rule Tags 迭代新增） |
+| 表达式 | **expression** | `filter query` / `条件式`（Rule Tags 迭代新增） |
+| 谓词 | **predicate** | `condition` / `term`（Rule Tags 迭代新增） |
+| chip | **chip** | `token` / `pill`（Rule Tags 迭代新增） |
+| 词汇表 | **vocabulary** | `tag dictionary` / `tag pool`（Rule Tags 迭代新增；指**包内**根级 `tags: PortableTag[]`，见 `2026-10-10-rule-tags-detail-interaction-copy-design.md` §2） |
 
 > **✅ 已裁决（2026-10-10 迭代，两次覆盖原决定）**
 >

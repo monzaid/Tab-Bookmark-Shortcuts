@@ -46,8 +46,16 @@ export interface IconEditorProps {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const PRESET_BG_COLORS = ['#2563EB', '#DC2626', '#16A34A', '#D97706', '#7C3AED', '#0891B2', '#DB2777', '#4B5563'];
-const PRESET_TEXT_COLORS = ['#FFFFFF', '#000000', '#DC2626', '#2563EB', '#16A34A', '#F59E0B'];
+/**
+ * The app's colour VOCABULARY, exported so every picker offers the same choices.
+ *
+ * The Tags page's appearance form is the second surface to colour a label, and a
+ * tag picker offering a different palette from the icon picker would be an
+ * inconsistency with no reason behind it — the user's colour taste does not
+ * change when they switch pages.
+ */
+export const PRESET_BG_COLORS = ['#2563EB', '#DC2626', '#16A34A', '#D97706', '#7C3AED', '#0891B2', '#DB2777', '#4B5563'];
+export const PRESET_TEXT_COLORS = ['#FFFFFF', '#000000', '#DC2626', '#2563EB', '#16A34A', '#F59E0B'];
 
 // ─── Utility: luminance-based auto text color ────────────────────────────────
 

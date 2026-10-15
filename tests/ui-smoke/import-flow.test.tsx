@@ -57,7 +57,7 @@ function curRule(id: string, value: string): PageRule {
   return {
     id,
     urlMatch: exact(value),
-    priority: 0,
+    priority: 0, tagIds: [],
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
   };
@@ -75,6 +75,7 @@ const CURRENT: SyncState = {
   autoBindGlobal: false,
   slots: [curSlot(1, 'S1'), curSlot(2, 'S2'), curSlot(3, 'S3')],
   rules: [curRule('r1', 'https://a.example/'), curRule('r2', 'https://b.example/'), curRule('r3', 'https://c.example/')],
+  tags: [],
 };
 
 const FILE_SLOT_2: PortableSlotDef = {
@@ -87,7 +88,7 @@ const FILE_SLOT_2: PortableSlotDef = {
   titleSnapshot: 'FILE-S2',
   faviconSnapshot: '',
 };
-const FILE_RULE_4: PortableRule = { id: 'r4', urlMatch: exact('https://d.example/'), priority: 0 };
+const FILE_RULE_4: PortableRule = { id: 'r4', urlMatch: exact('https://d.example/'), priority: 0, tags: [] };
 
 const PKG: ExportPackage = {
   schemaVersion: 1,
@@ -118,6 +119,7 @@ const FULL_APPLY_RESULT: ImportApplyResult = {
     rules: { changed: 1, failed: 0 },
     settings: { changed: 0, failed: 0 },
     shortcuts: { changed: 0, failed: 0 },
+    tags: { changed: 0, failed: 0 },
   },
   tolerant: [],
   domainViolations: [],
@@ -292,6 +294,231 @@ async function openConfirmDialog(): Promise<HTMLElement> {
   fireEvent.click(apply);
   return screen.findByRole('dialog');
 }
+
+describe('T17 — the import panel reports each TAG’s facets, not just its name', () => {
+  /**
+   * The two gaps this closes, both of which made an incoming tag invisible:
+   *
+   *  1. `computeDiff` assembled `tagNames` and NOTHING rendered it, so the tag
+   *     vocabulary only appeared after the import had already run.
+   *  2. Even rendered, the diff carried only the NAME — so a tag whose look
+   *     differs had nothing to compare, which is exactly the part a user would want
+   *     to review before accepting it.
+   */
+  const TAG_PKG: ExportPackage = {
+    ...PKG,
+    scope: { tags: true },
+    slots: undefined,
+    rules: undefined,
+    tags: [
+      // Already on the machine, but with a different name — the case where the
+      // appearance is the whole difference.
+      { name: 'urgent', backgroundColor: '#112233', textColor: '#aabbcc' },
+      // Brand new to the machine.
+      { name: 'fresh', backgroundColor: '#00ff00', textColor: '#000000' },
+    ],
+  };
+  const TAG_CURRENT: SyncState = {
+    ...CURRENT,
+    slots: [],
+    rules: [],
+    tags: [{ id: 't1', name: 'urgent', backgroundColor: '#cc3333', textColor: '#ffffff' }],
+  };
+
+  it('renders one row per tag as a target -> imported PREVIEW pair', async () => {
+    await openImportSection(makeInspection(TAG_PKG, TAG_CURRENT), TAG_CURRENT, JSON.stringify(TAG_PKG));
+    // The diff only exists once a FILE has been chosen — the section alone shows
+    // the empty state, so a row assertion without this would test nothing.
+    await selectFile();
+
+    const rows = await screen.findByTestId('import-tags-values');
+    expect(within(rows).getByTestId('import-tag-fresh')).toBeDefined();
+    expect(within(rows).getByTestId('import-tag-urgent')).toBeDefined();
+
+    // Each row is two chips with an arrow, NOT a per-field table: a tag is a
+    // coloured label, so the two appearances say everything the row needs to.
+    const row = screen.getByTestId('import-tag-urgent');
+    expect(row.querySelectorAll('.tbs-tag-picker__chip')).toHaveLength(2);
+    expect(row.querySelector('.tbs-field-row__arrow')).not.toBeNull();
+    // ...and the field detail is GONE, which is the point of the change.
+    expect(screen.queryByTestId('import-tag-fields-urgent')).toBeNull();
+  });
+
+  it('shows BOTH sides of a tag whose colours differ (the reused-name case)', async () => {
+    // `urgent` exists on the machine, so its identity is reused — but its colours
+    // are not the same, and the preview is what makes that visible.
+    await openImportSection(makeInspection(TAG_PKG, TAG_CURRENT), TAG_CURRENT, JSON.stringify(TAG_PKG));
+    await selectFile();
+    await screen.findByTestId('import-tags-values');
+
+    const target = screen.getByTestId('import-tag-target-urgent');
+    const imported = screen.getByTestId('import-tag-imported-urgent');
+    // The machine's colour on the left, the file's on the right.
+    expect(target.style.backgroundColor).toBe('rgb(204, 51, 51)');
+    expect(imported.style.backgroundColor).toBe('rgb(17, 34, 51)');
+  });
+
+  it('a NEW tag shows only the imported side (nothing to point from)', async () => {
+    await openImportSection(makeInspection(TAG_PKG, TAG_CURRENT), TAG_CURRENT, JSON.stringify(TAG_PKG));
+    await selectFile();
+    await screen.findByTestId('import-tags-values');
+
+    const row = screen.getByTestId('import-tag-fresh');
+    // One chip and no arrow: there is no machine side to compare against.
+    expect(row.querySelectorAll('.tbs-tag-picker__chip')).toHaveLength(1);
+    expect(row.querySelector('.tbs-field-row__arrow')).toBeNull();
+    expect(screen.getByTestId('import-tag-imported-fresh').style.backgroundColor)
+      .toBe('rgb(0, 255, 0)');
+  });
+
+  it('declining a tag writes the allow-list; the row is muted, not removed', async () => {
+    // `takeTagNames` is a real decision (the vocabulary is what the dimension
+    // carries), so the row checkbox is the same control the other part dimensions
+    // offer — and unticking one leaves the others taken.
+    await openImportSection(makeInspection(TAG_PKG, TAG_CURRENT), TAG_CURRENT, JSON.stringify(TAG_PKG));
+    await selectFile();
+    await screen.findByTestId('import-tags-values');
+
+    const fresh = screen.getByTestId('import-tag-fresh');
+    expect(fresh.getAttribute('data-muted')).toBe('false');
+    fireEvent.click(screen.getByTestId('import-tag-take-fresh'));
+    await waitFor(() => { expect(fresh.getAttribute('data-muted')).toBe('true'); });
+    // It stays in place — "I turned this off" must stay visible.
+    expect(screen.getByTestId('import-tag-fresh')).toBeDefined();
+  });
+});
+
+describe('T17 — a rule’s tags are a FIELD of the record, inside the Fields detail', () => {
+  const RULE_PKG: ExportPackage = {
+    ...PKG,
+    scope: { rules: true, tags: true },
+    slots: undefined,
+    tags: [{ name: 'work', backgroundColor: '#3366cc', textColor: '#fff' }],
+    rules: [{ id: 'r1', urlMatch: { type: 'exact', value: 'https://a/' }, priority: 0, title: 'A', tags: ['work'] }],
+  };
+  const RULE_CURRENT: SyncState = { ...CURRENT, slots: [], rules: [], tags: [] };
+
+  it('renders the tags as a field ROW with chips, not a block beside the list', async () => {
+    // The placement request: tags are one of the things an import changes about a
+    // rule, so they belong in the same detail panel as its title / icon / URL —
+    // otherwise they are the one attribute that escapes the panel's vocabulary.
+    await openImportSection(makeInspection(RULE_PKG, RULE_CURRENT), RULE_CURRENT, JSON.stringify(RULE_PKG));
+    await selectFile();
+
+    const fields = await screen.findByTestId('import-fields-rule-r1');
+    const tagsRow = within(fields).getByTestId('import-field-rule-r1-tags');
+    expect(tagsRow).toBeDefined();
+    // The row is a normal field row, so its label and state are present like any
+    // other facet's.
+    expect(tagsRow.textContent).toContain('Tags');
+    // ...and the value is rendered as the CHIPS the tag is, carrying the appearance
+    // the import will produce (the vocabulary's colours here).
+    const chip = within(fields).getByTestId('import-field-rule-r1-tags-after-work');
+    expect(chip.textContent).toBe('work');
+    expect(chip.style.backgroundColor).toBe('rgb(51, 102, 204)');
+  });
+
+  it('shows BOTH sides for a rule the machine already has', async () => {
+    const EXISTING: SyncState = {
+      ...CURRENT,
+      slots: [],
+      rules: [curRule('r1', 'https://a/')],
+      tags: [{ id: 't1', name: 'local', backgroundColor: '#cc3333', textColor: '#fff' }],
+    };
+    // The machine's rule carries `local`; the file's carries `work`.
+    EXISTING.rules[0].tagIds = ['t1'];
+    await openImportSection(
+      makeInspection(RULE_PKG, EXISTING),
+      EXISTING,
+      JSON.stringify(RULE_PKG),
+    );
+    await selectFile();
+
+    const fields = await screen.findByTestId('import-fields-rule-r1');
+    expect(within(fields).getByTestId('import-field-rule-r1-tags-before-local')).toBeDefined();
+    expect(within(fields).getByTestId('import-field-rule-r1-tags-after-work')).toBeDefined();
+    // The target side keeps the MACHINE's colour, which is what the arrow compares.
+    expect(within(fields).getByTestId('import-field-rule-r1-tags-before-local').style.backgroundColor)
+      .toBe('rgb(204, 51, 51)');
+  });
+
+  it('the tags row is ABSENT for a slot (it is a rule-only field)', async () => {
+    await openImportSection();
+    await selectFile();
+    const fields = await screen.findByTestId('import-fields-slot-2');
+    expect(within(fields).queryByTestId('import-field-slot-2-tags')).toBeNull();
+  });
+});
+
+describe('T17 — the import side ASKS about unresolvable tag references', () => {
+  /** A rule referencing a tag the file does not define. */
+  const ORPHAN_PKG: ExportPackage = {
+    ...PKG,
+    scope: { rules: true, tags: true },
+    slots: undefined,
+    tags: [],
+    rules: [{ id: 'r1', urlMatch: { type: 'exact', value: 'https://a/' }, priority: 0, title: 'A', tags: ['ghost'] }],
+  };
+  const ORPHAN_CURRENT: SyncState = { ...CURRENT, slots: [], rules: [], tags: [] };
+
+  it('discloses the names, and asks before the import runs', async () => {
+    await openImportSection(makeInspection(ORPHAN_PKG, ORPHAN_CURRENT), ORPHAN_CURRENT, JSON.stringify(ORPHAN_PKG));
+    await selectFile();
+    // The notice names the tag...
+    expect(screen.getByTestId('import-orphan-tags').textContent).toContain('ghost');
+
+    // ...and Apply asks rather than deciding. What happens here matters: the
+    // alternative is a tag invented with an appearance no file specified.
+    fireEvent.click(screen.getByTestId('import-apply'));
+    const dialog = await screen.findByRole('dialog', { name: /not included/i });
+    expect(within(dialog).getByTestId('import-orphan-include')).toBeDefined();
+    expect(within(dialog).getByTestId('import-orphan-leave')).toBeDefined();
+    // Neither is defaulted (D-e-D): the user must choose.
+    for (const b of within(dialog).getAllByRole('button')) {
+      expect(b.getAttribute('autofocus')).toBeNull();
+      expect(b.getAttribute('aria-current')).toBeNull();
+    }
+  });
+
+  it('"Include them" proceeds with the default resolution', async () => {
+    await openImportSection(makeInspection(ORPHAN_PKG, ORPHAN_CURRENT), ORPHAN_CURRENT, JSON.stringify(ORPHAN_PKG));
+    await selectFile();
+    fireEvent.click(screen.getByTestId('import-apply'));
+    const dialog = await screen.findByRole('dialog', { name: /not included/i });
+    fireEvent.click(within(dialog).getByTestId('import-orphan-include'));
+
+    // It moves on to the quantized confirmation, and the intent does NOT ask for a
+    // strip (the replan is checked in the dialog below).
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: /not included/i })).toBeNull();
+    });
+    const confirm = await screen.findByRole('dialog', { name: /confirm import/i });
+    fireEvent.click(within(confirm).getByTestId('import-confirm'));
+    await waitFor(() => {
+      const applyCall = (mockSendMessage.mock.calls as Array<[{ action: string; payload?: { intent?: ImportIntent } }]>)
+        .filter((c) => c[0].action === 'IMPORT_APPLY')
+        .pop();
+      expect(applyCall?.[0].payload?.intent?.stripOrphanTagNames).toBeFalsy();
+    });
+  });
+
+  it('"Leave them out" records the decision, so no tag is invented', async () => {
+    await openImportSection(makeInspection(ORPHAN_PKG, ORPHAN_CURRENT), ORPHAN_CURRENT, JSON.stringify(ORPHAN_PKG));
+    await selectFile();
+    fireEvent.click(screen.getByTestId('import-apply'));
+    const dialog = await screen.findByRole('dialog', { name: /not included/i });
+    fireEvent.click(within(dialog).getByTestId('import-orphan-leave'));
+
+    const confirm = await screen.findByRole('dialog', { name: /confirm import/i });
+    fireEvent.click(within(confirm).getByTestId('import-confirm'));
+    await waitFor(() => {
+      const applyCall = (mockSendMessage.mock.calls as Array<[{ action: string; payload?: { intent?: ImportIntent } }]>)
+        .filter((c) => c[0].action === 'IMPORT_APPLY')
+        .pop();
+      expect(applyCall?.[0].payload?.intent?.stripOrphanTagNames).toBe(true);
+    });
+  });
+});
 
 describe('T18 — import section: dimension modes, diff, quantized confirm', () => {
   beforeEach(() => {

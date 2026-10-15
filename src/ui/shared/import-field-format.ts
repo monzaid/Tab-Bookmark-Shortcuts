@@ -23,6 +23,15 @@ export function formatFieldValue(v: ImportFieldValue | null): string {
       return `Local icon (${v.key})`;
     case 'recipe':
       return `Recipe icon (background ${v.bgColor || '—'}, text ${v.text || '—'}, text colour ${v.textColor || '—'})`;
+    // The COLOUR itself, not a description of it: this string is the value cell's
+    // fallback text, and the swatch beside it is the part a reader actually reads.
+    case 'color':
+      return v.value;
+    // Names, comma-joined. The `tags` facet renders its own chips in the value
+    // cell (the readable form, and the one a reader uses); this is the text
+    // fallback every facet has, and it is what a screen reader announces.
+    case 'tags':
+      return v.tags.length === 0 ? 'None' : v.tags.map((t) => t.name).join(', ');
   }
 }
 
@@ -78,6 +87,14 @@ const FIELD_LABELS: Record<ImportFieldDiff['field'], string> = {
   'match-url': 'Match URL',
   'match-type': 'Match Type',
   priority: 'Priority',
+  // A rule's tags, as one field row so the change is described in the Fields
+  // detail like every other attribute of the record.
+  tags: 'Tags',
+  // The tag facets. A tag is identified by NAME in a package (A4), so its name is
+  // the identity facet; the two colours are the appearance.
+  'tag-name': 'Tag name',
+  'tag-background': 'Background',
+  'tag-text': 'Text colour',
 };
 
 /**

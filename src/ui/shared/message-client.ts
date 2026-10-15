@@ -35,6 +35,14 @@ const ERROR_MESSAGES: Record<DomainErrorCode, string> = {
   RULE_REGEX_TOO_LONG: 'The regex pattern exceeds 500 characters.',
   RULE_PROTECTED_URL: 'Rules cannot be created for protected browser pages.',
   RULE_NOT_FOUND: 'The specified rule was not found.',
+  // Mechanical completion: the tag error codes exist in `DomainErrorCode`, so
+  // this exhaustive table must name them. Copy only — no tag logic lives here.
+  TAG_NAME_DUPLICATE: 'A tag with this name already exists.',
+  TAG_NAME_TOO_LONG: 'Tag names are limited to 32 characters.',
+  TAG_NOT_FOUND: 'The specified tag was not found.',
+  TAG_LIMIT_EXCEEDED: 'This tag cannot be added (limit reached).',
+  RULE_TAG_LIMIT_EXCEEDED: 'A rule can carry at most 8 tags.',
+  TAG_COLOR_INVALID: 'Tag colours must be six-digit hex values, like #3366CC.',
   ICON_TOO_LARGE: 'The icon file is too large (max 2MB, 512px).',
   ICON_INVALID_FORMAT: 'Invalid icon format. Use PNG, JPEG, or WebP.',
   ICON_DOWNLOAD_FAILED: 'Icon download failed. You can retry manually.',

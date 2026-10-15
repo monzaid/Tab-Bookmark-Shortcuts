@@ -18,7 +18,7 @@ function chainWith(ruleTitle?: string) {
       ? [{
           id: 'r1',
           urlMatch: { type: 'exact', value: 'https://a.com/' },
-          priority: 0,
+          priority: 0, tagIds: [],
           title: ruleTitle,
           createdAt: '2026-01-01T00:00:00Z',
           updatedAt: '2026-01-01T00:00:00Z',
@@ -172,7 +172,7 @@ describe('T11: FieldEditor', () => {
       rules: [{
         id: 'r1',
         urlMatch: { type: 'exact', value: 'https://a.com/' },
-        priority: 0,
+        priority: 0, tagIds: [],
         title: 'R',
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',

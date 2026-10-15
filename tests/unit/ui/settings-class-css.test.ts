@@ -24,14 +24,19 @@ const CSS_DIR = resolve(process.cwd(), 'src/ui/styles');
  * because it is exactly as invisible when undefined: the row would render as a
  * styleless run of spans, which is the layout bug the prefix was added to fix.
  */
-const CLASS_TOKEN = /tbs-(?:settings__|field-)[a-zA-Z0-9_-]+/g;
+const CLASS_TOKEN = /tbs-(?:settings__|field-|tag-chip|tag-selector|tag-picker|search-field)[a-zA-Z0-9_-]+/g;
 
 /**
  * Classes assembled at runtime, so their full literal never appears in the
  * source. They must be listed here explicitly — an unlisted dynamic class is
  * exactly the case this guard cannot see.
  */
-const DYNAMIC_CLASS_ALLOWLIST: readonly string[] = [];
+const DYNAMIC_CLASS_ALLOWLIST: readonly string[] = [
+  // Assembled as `tbs-tag-selector__new--${layout}`, so the token the scanner can
+  // see is the PREFIX. Both concrete members are defined in base.css
+  // (`--stacked` / `--grid`); this entry only covers the un-satisfiable prefix.
+  'tbs-tag-selector__new--',
+];
 
 /**
  * "Make this flex child fill the row" — asserted as the PROPERTY FAMILY, not one
@@ -97,10 +102,14 @@ function walk(dir: string, out: string[] = []): string[] {
 
 /** Every `.ts`/`.tsx` under `src/ui` that mentions one of the owned prefixes. */
 function sourcesUsingPrefix(): string[] {
-  // Matched with the SAME pattern the scan uses. A second, hand-written
-  // `includes('tbs-settings__')` here would silently leave a file that only uses
-  // `tbs-field-*` out of the scan — the guard would then pass by not looking.
-  const MENTIONS = /tbs-(?:settings__|field-)/;
+  // Matched with the SAME pattern the scan uses — derived from `CLASS_TOKEN`
+  // rather than re-spelled. A second, hand-written list here would silently leave
+  // a file that only uses a NEWLY-OWNED prefix out of the scan, and the guard
+  // would then pass by not looking (which is exactly what happened when the tag
+  // family was added: `MENTIONS` still named only the old two prefixes, so the
+  // new classes were never scanned and a PLANTED undefined tag class did not
+  // fail the suite). Deriving keeps the two in lockstep by construction.
+  const MENTIONS = new RegExp(CLASS_TOKEN.source);
   return walk(UI_ROOT)
     .filter((f) => /\.tsx?$/.test(f))
     .filter((f) => MENTIONS.test(stripComments(readFileSync(f, 'utf8'))));
@@ -178,8 +187,36 @@ describe('settings classes ↔ stylesheets', () => {
       'tbs-settings__definitely-not-defined-xyz',
       // The field-row family is owned too: an undefined one is equally invisible.
       'tbs-field-definitely-not-defined-xyz',
+      // Rule Tags iteration (T18): the chip and selector families joined the
+      // guard, so the detector must flag an undefined member of EACH — otherwise
+      // the new prefix would be scanned but never actually discriminated.
+      'tbs-tag-chip-planted-xyz',
+      'tbs-tag-selector-planted-xyz',
+      // The picker family (import/export panels) joined too, for the same reason:
+      // a new prefix that is scanned but never discriminated would pass vacuously.
+      'tbs-tag-picker-planted-xyz',
+      // ...and the search wrapper (the clear button's positioning context).
+      'tbs-search-field-planted-xyz',
     ];
     const MUST_NOT_FLAG = [
+      // The real tag-family classes ARE defined (proving the flagger is not
+      // simply returning everything matching a new prefix).
+      'tbs-tag-chip',
+      'tbs-tag-chip__label',
+      'tbs-tag-chip__remove',
+      'tbs-tag-chip-input',
+      'tbs-tag-chip-input__field',
+      'tbs-tag-chip-input__candidates',
+      'tbs-tag-selector',
+      'tbs-tag-selector__list',
+      'tbs-tag-selector__option',
+      'tbs-tag-selector__swatch',
+      'tbs-tag-picker',
+      'tbs-tag-picker__option',
+      'tbs-tag-picker__chip',
+      'tbs-search-field',
+      'tbs-search-field__clear',
+      'tbs-shared-search',
       'tbs-field-row',
       'tbs-field-row__label',
       'tbs-field-row__value',
@@ -216,6 +253,98 @@ describe('settings classes ↔ stylesheets', () => {
   });
 });
 
+describe('search boxes keep the keyboard focus ring', () => {
+  const searchBlocks = (): string => {
+    const css = stylesheets();
+    // Every rule whose selector mentions the search input, comments stripped: a
+    // selector quoted in prose is not a rule.
+    return [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*\.tbs-shared-search[^{}]*)\{([^}]*)\}/g)]
+      .map((m) => `${m[1]}{${m[2]}}`)
+      .join('\n');
+  };
+
+  /**
+   * The defect this pins: `:focus { outline: none }` was added to refine the MOUSE
+   * state (a border colour change), and because the global ring is drawn with
+   * `outline`, that one declaration also removed the ring for KEYBOARD users — a
+   * keyboard user tabbing into any search box saw only a 1px border shift. The
+   * accessibility rules require a visible ring, so the mouse rule must not be the
+   * only focus rule.
+   */
+  it('re-asserts a focus-visible outline (the mouse-focus rule alone is not enough)', () => {
+    const blocks = searchBlocks();
+    // The ring is present and uses the shared ring token...
+    expect(blocks).toMatch(/\.tbs-shared-search:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--color-focus-ring\)/);
+    // ...and it is NOT cancelled by a later `outline: none` on the same selector.
+    const focusRules = [...blocks.matchAll(/\.tbs-shared-search:(focus|focus-visible)\s*\{([^}]*)\}/g)];
+    expect(focusRules.length).toBeGreaterThanOrEqual(2);
+    const suppressors = focusRules.filter(([, , body]) => /outline:\s*(none|0)/.test(body));
+    expect(suppressors, 'a bare `:focus` must not cancel the ring').toEqual([]);
+  });
+
+  it('hides the native clear decoration (ours replaces it, uniformly)', () => {
+    // Otherwise two clear affordances can appear at once — the browser's ✕ and
+    // ours — and WebKit's is unstyled while Firefox draws none.
+    expect(searchBlocks()).toMatch(/-webkit-search-cancel-button/);
+  });
+
+  it('does NOT set a per-site font size on the search input', () => {
+    // The drift that motivated the component: the candidate tray shrank its box to
+    // 12px while every other box was 13px. One box, one size — and the wrapping
+    // surface may not override it.
+    const css = stylesheets();
+    const candidate = /\.tbs-tag-chip-input__candidate-search[^{]*\{([^}]*)\}/.exec(css);
+    if (candidate !== null) {
+      expect(candidate[1]).not.toMatch(/font-size/);
+    }
+    // The input itself takes the app's input size.
+    expect(searchBlocks()).toMatch(/\.tbs-shared-search\s*\{[^}]*font-size:\s*var\(--font-size-md\)/);
+  });
+});
+
+describe('the search wrapper does not add space of its own', () => {
+  const css = (): string => stylesheets().replace(/\/\*[\s\S]*?\*\//g, '');
+
+  /**
+   * The defect this pins: the wrapper carried `flex: 1 1 160px` to size the INPUT
+   * inside a horizontal toolbar. `flex-basis` is a MAIN-AXIS length, so inside the
+   * candidate tray's COLUMN container the same declaration became a 160px HEIGHT —
+   * a large gap above and below that one search box, and nowhere else.
+   *
+   * A basis is only meaningful when the container's axis is known, so the rule is:
+   * the DEFAULT must not carry one, and only the row-oriented toolbars may add it.
+   */
+  it('the default wrapper declares no flex-basis', () => {
+    const block = /(?:^|\})\s*\.tbs-search-field\s*\{([^}]*)\}/.exec(css());
+    expect(block).not.toBeNull();
+    const body = block?.[1] ?? '';
+    expect(body).toMatch(/display:\s*flex/);
+    // No LENGTH basis in any spelling (`flex: 1 1 160px`, `flex-basis: 160px`).
+    // Narrowed to a length unit on purpose: `flex: 1 1 auto` legitimately contains
+    // digits (grow/shrink), and an assertion that banned them would red on the very
+    // form this is here to protect.
+    expect(body).not.toMatch(/flex(-basis)?\s*:\s*[^;]*(?:px|rem|em|%|vw|vh|ch|pt)/);
+  });
+
+  it('the column container clears it explicitly', () => {
+    // Belt and braces: the tray's section is the container that broke, so its own
+    // rule states that the wrapper takes no main-axis space. Written as an explicit
+    // override rather than relying on the default, because a future toolbar-centred
+    // default must not be able to reintroduce the gap here.
+    const block = /\.tbs-tag-chip-input__tray-section\s*>\s*\.tbs-search-field\s*\{([^}]*)\}/.exec(css());
+    expect(block, 'the tray section must state the wrapper takes no height').not.toBeNull();
+    expect(block?.[1] ?? '').toMatch(/flex:\s*0\s+0\s+auto/);
+  });
+
+  it('a wrapper carries no vertical spacing of its own', () => {
+    // The gap was not padding — it was the basis — but a padding/margin on the
+    // wrapper would produce the same visible symptom, so both are excluded.
+    const body = /(?:^|\})\s*\.tbs-search-field\s*\{([^}]*)\}/.exec(css())?.[1] ?? '';
+    expect(body).not.toMatch(/(?:^|;)\s*margin(?:-top|-bottom)?\s*:/);
+    expect(body).not.toMatch(/(?:^|;)\s*padding(?:-top|-bottom)?\s*:/);
+  });
+});
+
 describe('affordance matches behaviour', () => {
   /**
    * A dashed, centred box is the universal "drop a file here" idiom. Styling the
@@ -233,6 +362,46 @@ describe('affordance matches behaviour', () => {
       .filter((f) => /\.tsx?$/.test(f))
       .some((f) => /onDrop|onDragOver/.test(stripComments(readFileSync(f, 'utf8'))));
     expect(dropCue && !hasDropHandler).toBe(false);
+  });
+});
+
+describe('the tag system has ONE source for its shared numbers', () => {
+  /**
+   * The default appearance and the list display limit are each a fact about the tag
+   * TABLE, so they belong to the shared layer — and the UI forms had literal copies.
+   * `#6B7280` / `#FFFFFF` appeared in four places and `10` in two, which is how "the
+   * default" comes to mean two different greys, or one list shows twelve tags and
+   * another ten while both claim the same judgement.
+   */
+  const uiSources = (): string => {
+    const files = walk(UI_ROOT).filter((f) => /\.tsx?$/.test(f));
+    return files.map((f) => stripComments(readFileSync(f, 'utf8'))).join('\n');
+  };
+
+  it('no UI file hardcodes the default tag appearance', () => {
+    const src = uiSources();
+    // Scoped to the DEFAULT GREY, which is the value that identifies this pair.
+    // `#FFFFFF` is deliberately NOT asserted on: it is also a legitimate palette
+    // entry (`PRESET_TEXT_COLORS`) and the auto-contrast result, so banning it
+    // everywhere would forbid those — a guard that fails on correct code is a
+    // change detector, not an invariant. The pair travels together through
+    // `DEFAULT_TAG_APPEARANCE`, so asserting the grey is enough to prove it.
+    expect(src).not.toContain('#6B7280');
+    // ...and the definition really is reachable from the shared layer, so the
+    // assertion above cannot pass by the value having moved somewhere unusable.
+    const shared = readFileSync(resolve(process.cwd(), 'src/shared/export-package.ts'), 'utf8');
+    expect(shared).toContain('DEFAULT_TAG_BACKGROUND');
+    expect(shared).toContain('DEFAULT_TAG_APPEARANCE');
+  });
+
+  it('both tag pickers take their display limit from the shared constant', () => {
+    // A private `= 10` in either file is the drift this guards: two numbers claiming
+    // to be "the point where this table becomes a wall".
+    for (const rel of ['src/ui/shared/tag-selector.tsx', 'src/ui/shared/tag-chip-input.tsx']) {
+      const src = stripComments(readFileSync(resolve(process.cwd(), rel), 'utf8'));
+      expect(src, `${rel} must not define its own limit`).not.toMatch(/=\s*10\s*;/);
+      expect(src, `${rel} must import the shared limit`).toContain('TAG_LIST_DISPLAY_LIMIT');
+    }
   });
 });
 

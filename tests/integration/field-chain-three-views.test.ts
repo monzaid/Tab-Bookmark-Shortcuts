@@ -58,7 +58,7 @@ describe('T20: three views = delivered value (SC1)', () => {
     await repo.addRule({
       id: 'r1',
       urlMatch: { type: 'exact', value: 'https://a.com/page' },
-      priority: 0,
+      priority: 0, tagIds: [],
       title: 'Rule R',
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
@@ -81,7 +81,7 @@ describe('T20: three views = delivered value (SC1)', () => {
     await repo.addRule({
       id: 'r1',
       urlMatch: { type: 'exact', value: 'https://a.com/page' },
-      priority: 0,
+      priority: 0, tagIds: [],
       title: 'Only Title',
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * T10 — server-authoritative APPLY bound to the preview's `configVersion` (F4).
  *
  * The design splits INSPECT (read-only, pure over the FILE) from APPLY (the only
@@ -27,7 +27,7 @@ function rule(id: string, value: string): PageRule {
   return {
     id,
     urlMatch: exact(value),
-    priority: 0,
+    priority: 0, tagIds: [],
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
   };
@@ -66,7 +66,7 @@ describe('T10: APPLY is server-authoritative and bound to the preview version', 
 
     const before = JSON.stringify(await repo.getSyncState());
     const result = await service.applyImport(
-      pkgString({ rules: [{ id: 'rule-c', urlMatch: exact('https://c.example/'), priority: 0 }] }),
+      pkgString({ rules: [{ id: 'rule-c', urlMatch: exact('https://c.example/'), priority: 0, tags: [] }] }),
       defaultImportIntent(),
       stale,
     );
@@ -82,8 +82,8 @@ describe('T10: APPLY is server-authoritative and bound to the preview version', 
     const result = await service.applyImport(
       pkgString({
         rules: [
-          { id: 'rule-c', urlMatch: exact('https://c.example/'), priority: 0 },
-          { id: 'rule-d', urlMatch: exact('https://d.example/'), priority: 1 },
+          { id: 'rule-c', urlMatch: exact('https://c.example/'), priority: 0, tags: [] },
+          { id: 'rule-d', urlMatch: exact('https://d.example/'), priority: 1, tags: [] },
         ],
       }),
       defaultImportIntent(),

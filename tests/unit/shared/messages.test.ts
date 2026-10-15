@@ -76,6 +76,14 @@ function handleUiAction(request: UiRequest): string {
     case 'PREV_MATCH_CURRENT': return 'prev-match-current';
     case 'CONFLICT_CANCEL': return 'conflict-cancel';
     case 'CONFLICT_OVERWRITE': return 'conflict-overwrite';
+    // Rule Tags iteration: the tag message family (A1) — the exhaustive switch
+    // must name every action, which is why the union growing is a compile error
+    // here rather than a silent gap.
+    case 'CREATE_TAG': return 'create-tag';
+    case 'UPDATE_TAG': return 'update-tag';
+    case 'DELETE_TAG': return 'delete-tag';
+    case 'SET_RULE_TAGS': return 'set-rule-tags';
+    case 'RESTORE_TAG': return 'restore-tag';
     default: return assertNever(request);
   }
 }
@@ -155,6 +163,7 @@ describe('T2: Domain model and message contract', () => {
         autoBindGlobal: true,
         slots: [],
         rules: [],
+        tags: [],
       };
       const local: LocalState = {
         bindings: [],
@@ -176,6 +185,7 @@ describe('T2: Domain model and message contract', () => {
         urlMatch: { type: 'exact', value: 'https://example.com' },
         priority: 100,
         title: 'Custom Title',
+        tagIds: [],
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',
       };
@@ -323,6 +333,7 @@ describe('T2: Domain model and message contract', () => {
         autoBindGlobal: true,
         slots: [],
         rules: [],
+        tags: [],
       };
       // This test verifies the type structure — tabId is only in LocalState
       const local: LocalState = {

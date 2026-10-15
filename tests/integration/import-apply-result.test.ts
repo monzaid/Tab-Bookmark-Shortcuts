@@ -21,7 +21,9 @@ import type { PageRule } from '@shared/types';
 const exact = (value: string) => ({ type: 'exact' as const, value });
 
 function rule(id: string, value: string, extra: Partial<PortableRule> = {}): PortableRule {
-  return { id, urlMatch: exact(value), priority: 0, ...extra };
+  // `tags: []` — the required fifth-dimension field (T1), defaulted at the ONE
+  // place this file builds a portable rule.
+  return { id, urlMatch: exact(value), priority: 0, tags: [], ...extra };
 }
 
 function pkgString(parts: Partial<ExportPackage>): string {
@@ -40,7 +42,7 @@ function storedRefRule(id: string, ref: string): PageRule {
   return {
     id,
     urlMatch: exact('https://a.example/'),
-    priority: 0,
+    priority: 0, tagIds: [],
     favicon: { type: 'upload', value: ref },
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
@@ -81,7 +83,7 @@ describe('T22 — APPLY result: missing icons (C11/D9)', () => {
 
   it('does NOT report a record that never had an icon (missing ≠ never set)', async () => {
     await repo.addRule({
-      id: 'rule-2', urlMatch: exact('https://b.example/'), priority: 0,
+      id: 'rule-2', urlMatch: exact('https://b.example/'), priority: 0, tagIds: [],
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     });
 
@@ -123,7 +125,7 @@ describe('T22 — APPLY result: missing icons (C11/D9)', () => {
     await repo.addRule({
       id: 'rule-R',
       urlMatch: exact('https://a.example/'),
-      priority: 0,
+      priority: 0, tagIds: [],
       title: 'OLD', // differs from the package title ⇒ `replaced`, not `kept`
       favicon: { type: 'upload', value: ref },
       createdAt: '2026-01-01T00:00:00.000Z',

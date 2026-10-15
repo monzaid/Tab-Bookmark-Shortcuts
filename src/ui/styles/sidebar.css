@@ -572,6 +572,18 @@
   margin: 0;
 }
 
+/* The variant that EXPLAINS a decision (why a field was left empty) rather than
+   describing the form. It carries an info surface and a left rule so it reads as
+   a note attached to the form, not as another line of small print — and it is
+   deliberately NOT error-coloured: nothing has gone wrong yet. */
+.tbs-modal__hint--notice {
+  padding: var(--space-xs) var(--space-sm);
+  border-left: 3px solid var(--color-info, #2563eb);
+  border-radius: var(--radius-sm);
+  background: var(--color-info-bg, #eff6ff);
+  color: var(--color-text);
+}
+
 .tbs-modal__input {
   padding: 6px 8px;
   border: 1px solid var(--color-border-strong);

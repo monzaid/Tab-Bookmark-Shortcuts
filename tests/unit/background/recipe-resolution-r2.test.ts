@@ -56,7 +56,7 @@ describe('R2: read-time recipe materialization', () => {
   const rule = (favicon: IconSource): PageRule => ({
     id: 'rule-a',
     urlMatch: { type: 'exact', value: 'https://a.example/' },
-    priority: 0,
+    priority: 0, tagIds: [],
     favicon,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',

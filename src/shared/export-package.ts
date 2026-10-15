@@ -22,8 +22,12 @@ import type {
   SwitchDirection,
   SlotUiMarker,
   ExportScope,
+  TagDefinition,
 } from './types';
 import { LOCAL_ICON_REF_PREFIX } from './icon-ref';
+// `tags.ts` imports only TYPES from this module (erased at runtime), so this
+// VALUE import does not create a runtime cycle.
+import { selfConsistencyDiff } from './tags';
 
 // ─── Portable shapes ─────────────────────────────────────────────────────────
 
@@ -55,6 +59,23 @@ export interface PortableSlotDef {
   faviconSnapshot: string;
 }
 
+/**
+ * A tag as carried in the package (A4/S2).
+ *
+ * Deliberately NO `id`: a package's tag identity is its NAME. Ids are local to
+ * an install, so shipping one would either be meaningless on the target or
+ * (worse) invite a merge that trusts a foreign id. The colours DO travel, so a
+ * machine receiving the vocabulary for the first time gets the appearance too.
+ *
+ * Byte-for-byte name equality after trimming is the identity rule (C2) — the
+ * name, not the colour, decides whether two entries are the same tag.
+ */
+export interface PortableTag {
+  name: string;
+  backgroundColor: string;
+  textColor: string;
+}
+
 /** A rule as carried in the package — no timestamps (D5). */
 export interface PortableRule {
   id: string;
@@ -63,6 +84,22 @@ export interface PortableRule {
   title?: string;
   favicon?: PortableIcon;
   enabled?: boolean;
+  /**
+   * The rule's tags, inlined as NAMES (A3).
+   *
+   * Ids would be meaningless across installs, so the rule carries the names it
+   * was tagged with and the package's root `tags` list carries their
+   * definitions. Import resolves the names back to local ids.
+   *
+   * OPTIONAL, and that is the truthful type rather than a courtesy: the export
+   * projection always writes it (possibly `[]`), but the TOLERANT READER accepts a
+   * file from an older producer that has no such key — and a hand-built test
+   * fixture reaches the same code. Declaring it required made every read site
+   * carry a "cannot be undefined" guard that the compiler then reported as
+   * unnecessary while the runtime needed it. The type now says what the reader
+   * already believed.
+   */
+  tags?: string[];
 }
 
 /**
@@ -114,6 +151,14 @@ export interface ExportPackage {
   rules?: PortableRule[];
   settings?: PortableSettings;
   shortcuts?: PortableShortcuts;
+  /**
+   * The tag vocabulary, one entry per tag (A3/A4).
+   *
+   * Sibling of `rules` rather than nested inside it because a vocabulary is
+   * shared: more than one rule names the same tag, and a tag may be carried
+   * with NO rule (the "share the vocabulary" case). Absent = not carried.
+   */
+  tags?: PortableTag[];
 }
 
 /**
@@ -138,7 +183,7 @@ export interface ExportPackage {
  */
 const ROOT_KEYS = {
   schemaVersion: true, generator: true, exportedAt: true, scope: true,
-  slots: true, rules: true, settings: true, shortcuts: true,
+  slots: true, rules: true, settings: true, shortcuts: true, tags: true,
 } as const satisfies Record<keyof ExportPackage, true>;
 
 const SLOT_KEYS = {
@@ -158,13 +203,25 @@ const SETTINGS_KEYS = {
 
 const RULE_KEYS = {
   id: true, urlMatch: true, priority: true, title: true, favicon: true, enabled: true,
+  tags: true,
 } as const satisfies Record<keyof PortableRule, true>;
+
+/**
+ * The `tags[]` entry names — the allowlist the tolerant reader compares a
+ * portable tag against. Mirrors `PortableTag`, so a package that tries to ship
+ * an `id` (or any other stray field) is DISCLOSED rather than silently
+ * accepted: the key is simply not in this list (A4).
+ */
+const TAG_KEYS = {
+  name: true, backgroundColor: true, textColor: true,
+} as const satisfies Record<keyof PortableTag, true>;
 
 export const PACKAGE_FIELD_ALLOWLIST = {
   root: Object.keys(ROOT_KEYS),
   slot: Object.keys(SLOT_KEYS),
   rule: Object.keys(RULE_KEYS),
   settings: Object.keys(SETTINGS_KEYS),
+  tag: Object.keys(TAG_KEYS),
 } as const;
 
 // ─── Settings part ids (R4/R9 — ONE vocabulary for both surfaces) ─────
@@ -257,6 +314,15 @@ export interface SyncPatch {
   rules?: PageRule[];
   settings?: PortableSettings;
   shortcuts?: PortableShortcuts;
+  /**
+   * The tag entities a package resolves to on THIS machine (T6/T10).
+   *
+   * Not simply the file's `tags[]`: the patch carries the local `TagDefinition`
+   * list (ids attached), because that is what the sync store holds. Resolving
+   * names to local ids — reuse by name, default appearance for a miss — is the
+   * import side's job (A-e), so T1 only declares where the result lands.
+   */
+  tags?: TagDefinition[];
 }
 
 const SCHEMA_VERSION = 1;
@@ -311,6 +377,40 @@ export interface PackageExtras {
   shortcuts?: PortableShortcuts;
 }
 
+/**
+ * The appearance a tag gets when NOTHING defines it.
+ *
+ * The default lives in the SHARED layer rather than in the background service that
+ * used to own it, because two sides now need the same number: the WRITE
+ * (`TagService.resolveImportedTags`, which creates the tag) and the PREVIEW (the
+ * import diff, which shows the colour the write will produce). A second copy would
+ * let a row promise a colour the write did not use. `tag-service` re-exports these
+ * so existing importers are unchanged.
+ *
+ * A fixed grey is the honest answer: the import side has no colour source for a
+ * dangling name (§6's registered asymmetry), and the result panel discloses how
+ * many tags this happened to.
+ */
+export const DEFAULT_TAG_BACKGROUND = '#6B7280';
+export const DEFAULT_TAG_TEXT_COLOR = '#FFFFFF';
+
+/**
+ * The appearance a NEW tag form starts from.
+ *
+ * The same pair as the miss case above, deliberately: "the default" must be ONE
+ * thing, or a tag created by hand on the Tags page and a tag created by an import
+ * filling in a miss would look different while both being described as default.
+ *
+ * It exists as a named value because the UI forms had literal `#6B7280` /
+ * `#FFFFFF` in THREE more places (`TagSelector`, the Tags page's create form, and
+ * the expression filter's create path) — four sources for one number, none of
+ * which would have moved with the others.
+ */
+export const DEFAULT_TAG_APPEARANCE: { backgroundColor: string; textColor: string } = {
+  backgroundColor: DEFAULT_TAG_BACKGROUND,
+  textColor: DEFAULT_TAG_TEXT_COLOR,
+};
+
 export function syncStateToPackage(
   sync: SyncState,
   scope: ExportScope,
@@ -326,6 +426,25 @@ export function syncStateToPackage(
   const excludedSlots = new Set(scope.excludedSlotIds ?? []);
   const excludedRules = new Set(scope.excludedRuleIds ?? []);
 
+  /**
+   * The vocabulary this package will actually SHIP.
+   *
+   * Derived ONCE, above both consumers — the rule projection (which drops a rule's
+   * references to names the package does not carry) and the `tags` block (which
+   * writes the vocabulary) — so the two cannot disagree about what "defined" means.
+   * Two independent filters is exactly how the earlier behaviour shipped rules
+   * pointing at tags the package had omitted.
+   */
+  // The table read ONCE, defensively: `tsc` requires `tags`, but a hand-built
+  // `SyncState` literal (the shape every export test constructs) legitimately omits
+  // it, and removing the guard threw inside `.map` and blanked the whole panel.
+  // Reading it once means the guard exists in one place instead of at each use.
+  const allTags = sync.tags ?? [];
+  const omittedTagNames = new Set(scope.excludedTagNames ?? []);
+  const carriedTagNames = new Set(
+    allTags.map((t) => t.name).filter((name) => !omittedTagNames.has(name)),
+  );
+
   if (scope.slots) {
     pkg.slots = sync.slots
       .filter((s) => !excludedSlots.has(s.id))
@@ -339,6 +458,12 @@ export function syncStateToPackage(
   }
 
   if (scope.rules) {
+    // Defensive reads, and they are LOAD-BEARING: `tsc` requires `tags` /
+// `tagIds`, but a hand-built `SyncState` literal (the shape every export test
+// constructs) legitimately omits them. Removing the guards threw inside `.map`
+// and blanked the whole export panel — three T19 UI tests caught exactly that.
+// The guard degrades to "no tags" instead, which is what a missing table means.
+    const nameById = new Map(allTags.map((t) => [t.id, t.name]));
     pkg.rules = sync.rules
       .filter((r) => !excludedRules.has(r.id))
       .map((rule) => ({
@@ -348,6 +473,41 @@ export function syncStateToPackage(
         title: rule.title,
         favicon: rule.favicon ? iconToPortable(rule.favicon, `icon:${rule.id}`) : undefined,
         enabled: rule.enabled,
+        // Inline NAMES (A3). A `tagIds` entry with no live definition names
+        // nothing, so there is no name to carry — that projection is what makes
+        // the package's self-consistency checkable (A5): the names carried ARE a
+        // subset of the vocabulary.
+        tags: (rule.tagIds ?? [])
+          .map((id) => nameById.get(id))
+          .filter((name): name is string => name !== undefined)
+          // The names are carried AS THEY ARE by default — including one whose tag
+          // this package happens not to include. That is deliberate and it is what
+          // keeps D-e possible: `computeExportSelfConsistency` detects exactly this
+          // state, and the dialog asks the user which way to resolve it. Stripping
+          // here instead would resolve it silently, and the dialog would never fire
+          // (removing the difference before anyone could be asked about it).
+          //
+          // Stripping happens only when the user has ANSWERED — "Leave them out" —
+          // which is what `stripOrphanTagNames` records. Then the reference goes and
+          // the rule stays, so the choice costs a label and never costs a record.
+          .filter((name) => scope.stripOrphanTagNames !== true || carriedTagNames.has(name)),
+      }));
+  }
+
+  if (scope.tags) {
+    // The vocabulary, carried as a whole (D0). `excludedTagNames` is the
+    // per-tag unticking: a SUBTRACT-only list (same shape as `excludedSlotIds`),
+    // so unticking one tag leaves the others carried rather than turning
+    // "I did not touch it" into "do not carry it".
+    // `omittedTagNames` / `carriedTagNames` were derived above, where the rule
+    // projection needed them: ONE definition of "which tags this package ships",
+    // so the rules and the vocabulary cannot disagree about it.
+    pkg.tags = allTags
+      .filter((tag) => carriedTagNames.has(tag.name))
+      .map((tag) => ({
+        name: tag.name,
+        backgroundColor: tag.backgroundColor,
+        textColor: tag.textColor,
       }));
   }
 
@@ -462,6 +622,13 @@ export function packageToSyncPatch(pkg: ExportPackage, current: SyncState): Sync
         title: portable.title,
         favicon: portable.favicon ? portableToIcon(portable.favicon) : undefined,
         enabled: portable.enabled,
+        // T1 wires the FIELD only. Turning `portable.tags` (names, A3) into
+        // local ids is the import side's call — it owns the reuse-by-name /
+        // default-appearance decision (A-e) and the single resolver lives in
+        // `tags.ts` (`resolveTagIdsByName`, T4) so there is exactly one place
+        // that decides what "the same tag" means. Until that wiring lands
+        // (T10/T11) an imported rule carries no tags rather than inventing ids.
+        tagIds: existing?.tagIds ?? [],
         createdAt: existing?.createdAt ?? now,
         updatedAt: existing?.updatedAt ?? now,
       };
@@ -498,6 +665,64 @@ function markerFromPortable(marker: PortableSlotMarker): SlotUiMarker {
   };
 }
 
+// ─── Export self-consistency (A5/A-f/D-e) ────────────────────────────────────
+
+export interface ExportSelfConsistency {
+  /** Names the carried rules reference that the carried vocabulary omits. */
+  diff: string[];
+  /** The tags that would repair the difference, with the LOCAL colours. */
+  canSupplement: PortableTag[];
+  /** The carried rules that would LOSE a tag if the difference is dropped. */
+  canDrop: PortableRule[];
+}
+
+/**
+ * The export dialog's ONE source: the difference, and both ways out of it.
+ *
+ * `diff` comes from `selfConsistencyDiff` (the shared implementation) rather
+ * than a local recomputation, because the dialog's wording and its two options
+ * are rendered from this object — a second derivation would let the text
+ * disagree with the decision it describes (A-f/D-e).
+ *
+ * `localTags` is required, and that is not incidental: "supplement" must carry
+ * the colour of the tag on THIS machine, and a tag the user deselected is by
+ * definition not in the package, so the package alone cannot supply it. (This is
+ * exactly the export-side advantage over import: here a colour exists, so no
+ * default appearance is needed — the registered asymmetry in §6.)
+ */
+export function computeExportSelfConsistency(
+  pkg: ExportPackage,
+  localTags: TagDefinition[],
+): ExportSelfConsistency {
+  const rules = pkg.rules ?? [];
+  const vocabulary = pkg.tags ?? [];
+  const diff = selfConsistencyDiff(rules, vocabulary);
+
+  const nameSet = new Set(diff);
+  const canSupplement: PortableTag[] = [];
+  const seen = new Set<string>();
+  for (const name of diff) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const local = localTags.find((t) => t.name === name);
+    if (local) {
+      canSupplement.push({
+        name: local.name,
+        backgroundColor: local.backgroundColor,
+        textColor: local.textColor,
+      });
+    }
+  }
+
+  // A rule can LOSE a tag only if it references one of the missing names.
+  // Guarded for the same reason as the projection above: `pkg` reaches here from
+  // a hand-built literal (and, at runtime, from a parsed file whose shape only
+  // `isStructurallyAPackage` has checked), so `rule.tags` can genuinely be absent.
+  const canDrop = rules.filter((rule) => (rule.tags ?? []).some((n) => nameSet.has(n)));
+
+  return { diff, canSupplement, canDrop };
+}
+
 // ─── Shape guard ─────────────────────────────────────────────────────────────
 
 /** A non-null, non-array object. */
@@ -529,6 +754,7 @@ function isStructurallyAPackage(value: unknown): boolean {
   if (value.rules !== undefined && !Array.isArray(value.rules)) return false;
   if (value.settings !== undefined && !isPlainObject(value.settings)) return false;
   if (value.shortcuts !== undefined && !isPlainObject(value.shortcuts)) return false;
+  if (value.tags !== undefined && !Array.isArray(value.tags)) return false;
   return true;
 }
 

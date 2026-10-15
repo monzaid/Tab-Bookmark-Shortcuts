@@ -98,11 +98,15 @@ describe('T14a: import/export protocol — three new actions', () => {
     }
 
     // T14b/T21: 50 → 47 after the legacy trio left the whitelist and contracts.
-    expect(known.size).toBe(47);
+    // Rule Tags iteration: 47 → 52 with the tag message family (A1) —
+    // CREATE_TAG / DELETE_TAG / SET_RULE_TAGS / RESTORE_TAG plus
+    // UPDATE_TAG (which replaced RENAME_TAG, hence the count is still 52), each
+    // registered in the SAME change as its union member (R6).
+    expect(known.size).toBe(52);
     // Symmetric sentinel: the reverse difference below would also catch an empty
-    // `declared`, but this names the failure directly ("declared is not 47")
+    // `declared`, but this names the failure directly ("declared is not 52")
     // instead of leaving it to a filter diff.
-    expect(declared.size).toBe(47);
+    expect(declared.size).toBe(52);
     expect([...declared].filter((a) => !known.has(a)).sort()).toEqual([]); // in union, not whitelisted
     expect([...known].filter((a) => !declared.has(a)).sort()).toEqual([]); // whitelisted, not in union
   });
@@ -149,8 +153,8 @@ describe('T14a: import/export protocol — three new actions', () => {
   // ── Type-level: the three new responses carry the designed payloads ────────
   it('the new responses carry a package string / inspection / apply result', () => {
     const inspection: ImportInspection = {
-      diff: { records: [], dimensions: { slots: false, rules: false, settings: false, shortcuts: false } },
-      dimensions: { slots: false, rules: false, settings: false, shortcuts: false },
+      diff: { records: [], dimensions: { slots: false, rules: false, settings: false, shortcuts: false, tags: false } },
+      dimensions: { slots: false, rules: false, settings: false, shortcuts: false, tags: false },
       tolerant: [],
       domainViolations: [],
       overlaps: [],
@@ -165,6 +169,7 @@ describe('T14a: import/export protocol — three new actions', () => {
         rules: { changed: 0, failed: 0 },
         settings: { changed: 0, failed: 0 },
         shortcuts: { changed: 0, failed: 0 },
+        tags: { changed: 0, failed: 0 },
       },
       tolerant: [],
       domainViolations: [],

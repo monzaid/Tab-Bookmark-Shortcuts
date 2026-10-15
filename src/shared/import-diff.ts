@@ -47,14 +47,17 @@ import type {
   DimensionMode,
   MatchRuleSettings,
 } from './types';
-import type { ExportPackage, PortableIcon, PortableShortcutBinding } from './export-package';
+import type { ExportPackage, PortableIcon, PortableRule, PortableShortcutBinding } from './export-package';
 import {
   packageToSyncPatch,
   iconToPortable,
   summariseMatchSettings,
   slotStrategyPartId,
   slotAutoBindPartId,
+  DEFAULT_TAG_BACKGROUND,
+  DEFAULT_TAG_TEXT_COLOR,
 } from './export-package';
+import type { ImportTagPreview } from './types';
 import { defaultImportIntent } from './types';
 import { matchTypeLabel } from './match-type-labels';
 
@@ -103,6 +106,54 @@ function textFacet(s: string): ImportFieldValue | null {
   return s === '' ? null : { kind: 'text', value: s };
 }
 
+/**
+ * Resolve a rule's tag NAMES to renderable chips: the name with the appearance it
+ * will actually have.
+ *
+ * The appearance follows the SAME rule the import applies (`resolveImportedTags`),
+ * so a row cannot preview a colour the write would not produce:
+ *
+ *   - a name the FILE's vocabulary defines takes the FILE's colours, whether or not
+ *     this machine already has that tag — the vocabulary travels with its
+ *     appearance (A4), and an existing tag IS updated by it. (A-e used to say the
+ *     opposite, that an import never recolours an existing tag; that requirement was
+ *     withdrawn, because the appearance is precisely what a shared vocabulary is
+ *     for);
+ *   - otherwise the MACHINE's colours stand, since the file says nothing about the
+ *     name and there is nothing to apply;
+ *   - a name neither side defines has no colour source at all and renders with the
+ *     default pair — the same asymmetry the result panel already discloses
+ *     (`tagsCreatedWithDefaultAppearance`), shown here BEFORE the write instead of
+ *     only after it.
+ */
+function tagPreviews(
+  // Defensive, and LOAD-BEARING: `tsc` requires `tags` on a `PortableRule`, but a
+  // hand-built package literal (the shape the tolerant-reader fixtures use)
+  // legitimately omits it. Reading it unconditionally threw inside the `.map` and
+  // took the whole diff down — three T22 tests caught exactly that here.
+  names: string[] | undefined,
+  pkg: ExportPackage,
+  current: SyncState,
+): ImportTagPreview[] {
+  const byName = new Map((pkg.tags ?? []).map((t) => [t.name, t]));
+  const previews: ImportTagPreview[] = [];
+  const seen = new Set<string>();
+  for (const name of Array.isArray(names) ? names : []) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const local = current.tags.find((t) => t.name === name);
+    const carried = byName.get(name);
+    previews.push({
+      name,
+      // The FILE first: a carried appearance wins over the machine's, which is the
+      // rule the write applies (see the header).
+      backgroundColor: carried?.backgroundColor ?? local?.backgroundColor ?? DEFAULT_TAG_BACKGROUND,
+      textColor: carried?.textColor ?? local?.textColor ?? DEFAULT_TAG_TEXT_COLOR,
+    });
+  }
+  return previews;
+}
+
 /** The ONLY equality rule. Private: never a contract shape, never rendered. */
 function facetKey(v: ImportFieldValue | null): string {
   if (v === null) return '';
@@ -115,6 +166,17 @@ function facetKey(v: ImportFieldValue | null): string {
       return `local-ref:${v.key}`;
     case 'recipe':
       return `recipe:${v.bgColor}|${v.text}|${v.textColor}`;
+    // A colour compares by its VALUE, in the same namespace as a text facet: a tag
+    // named `#fff` and a background of `#fff` are not the same fact, but neither is
+    // the prefix needed for correctness here — this key only ever compares a facet
+    // against its own counterpart, which is always the same kind.
+    case 'color':
+      return v.value;
+    // A tag set compares by the tag NAMES: the appearance is a consequence of which
+    // names are carried (it is resolved from the two tables), so two sets with the
+    // same names are the same set even if a table's colours changed meanwhile.
+    case 'tags':
+      return `tags:${v.tags.map((t) => t.name).join('\u0000')}`;
   }
 }
 
@@ -144,6 +206,10 @@ function presence(pkg: ExportPackage): DimensionPresence {
     rules: pkg.rules !== undefined,
     settings: pkg.settings !== undefined,
     shortcuts: pkg.shortcuts !== undefined,
+    // The fifth dimension (D0). Presence, not emptiness: a package carrying
+    // `tags: []` HAS the dimension and means "share the vocabulary, which is
+    // empty", which is different from not carrying it at all.
+    tags: pkg.tags !== undefined,
   };
 }
 
@@ -198,11 +264,26 @@ const BASE_FACET_FIELDS = ['title', 'icon', 'match-url', 'match-type'] as const;
  * silently applied: leaving it out meant the detail could say "unchanged" for a
  * rule whose priority the import was about to overwrite.
  */
-function buildFields(before: Facets, after: Facets, priority: PriorityPair): ImportFieldDiff[] {
+function buildFields(
+  before: Facets,
+  after: Facets,
+  priority: PriorityPair,
+  tags?: TagPair,
+): ImportFieldDiff[] {
   const hasPriority = priority.before !== undefined || priority.after !== undefined;
   const fields: Array<ImportFieldDiff['field']> = hasPriority
     ? [...BASE_FACET_FIELDS, 'priority']
     : [...BASE_FACET_FIELDS];
+  // The tags row is appended LAST, for rules only (`TagPair` is supplied by the
+  // rule branches). Same mechanism as `priority`: a rule-only field is reported
+  // because it is one of the things the import changes about the rule, and a
+  // detail panel that omitted it would describe the record incompletely while
+  // looking complete.
+  if (tags !== undefined) fields.push('tags');
+  const tagFacet = (side: 'before' | 'after'): ImportFieldValue | null => {
+    if (tags === undefined) return null;
+    return { kind: 'tags', tags: side === 'before' ? (tags.before ?? []) : (tags.after ?? []) };
+  };
 
   const beforeByField: Record<string, ImportFieldValue | null> = {
     title: before.title,
@@ -210,6 +291,7 @@ function buildFields(before: Facets, after: Facets, priority: PriorityPair): Imp
     'match-url': before.urlMatch,
     'match-type': before.matchType,
     priority: numberFacet(priority.before),
+    tags: tagFacet('before'),
   };
   const afterByField: Record<string, ImportFieldValue | null> = {
     title: after.title,
@@ -217,9 +299,16 @@ function buildFields(before: Facets, after: Facets, priority: PriorityPair): Imp
     'match-url': after.urlMatch,
     'match-type': after.matchType,
     priority: numberFacet(priority.after),
+    tags: tagFacet('after'),
   };
   return fields.map((field) =>
     fieldDiff(field, beforeByField[field], afterByField[field]));
+}
+
+/** A rule's tags on each side, resolved for preview. Absent side = no tags. */
+interface TagPair {
+  before?: ImportTagPreview[];
+  after?: ImportTagPreview[];
 }
 
 /** The priority of each side; `undefined` = the record has none (a slot). */
@@ -229,8 +318,8 @@ interface PriorityPair {
 }
 
 /** The four "unchanged" facets for a kept row (A12 keeps the shape stable). */
-function keptFields(before: Facets, priority: PriorityPair = {}): ImportFieldDiff[] {
-  return buildFields(before, before, priority);
+function keptFields(before: Facets, priority: PriorityPair = {}, tags?: TagPair): ImportFieldDiff[] {
+  return buildFields(before, before, priority, tags);
 }
 
 /** The field diffs for a row whose record is being taken/deleted. */
@@ -238,8 +327,63 @@ function changedFields(
   before: Facets,
   after: Facets,
   priority: PriorityPair = {},
+  tags?: TagPair,
 ): ImportFieldDiff[] {
-  return buildFields(before, after, priority);
+  return buildFields(before, after, priority, tags);
+}
+
+/**
+ * The tag NAMES a carried rule will reference once this import has run.
+ *
+ * The mirror of what the write does, in one place so the preview cannot describe an
+ * outcome the write does not produce. `import-export-service` normalises
+ * `namesByRuleId` with exactly this rule before handing it to `resolveImportedTags`:
+ *
+ *   - `stripOrphanTagNames` ("Leave them out") empties EVERY reference, because the
+ *     question the user answered was whether this import carries the file's tags at
+ *     all — not merely the unresolvable ones;
+ *   - otherwise the names travel as the file states them.
+ *
+ * Without this the rule row showed the file's tags under a "Leave them out" answer,
+ * which reads as the choice having been ignored — while the write was removing them.
+ */
+export function ruleTagNamesAfterImport(
+  portableTags: string[] | undefined,
+  intent: ImportIntent,
+): string[] {
+  if (intent.stripOrphanTagNames === true) return [];
+  return Array.isArray(portableTags) ? portableTags : [];
+}
+
+/**
+ * A both-sides rule's tags: the MACHINE's own set → the set the import would leave.
+ *
+ * Resolved to local names first (a rule stores ids, a package carries names), then
+ * to appearances by `tagPreviews`, so BOTH sides read in the same vocabulary the
+ * tag list uses. `before` uses the machine's own definitions, which is why a rule
+ * whose tags the file does not touch still shows its real chips rather than none.
+ *
+ * `after` goes through `ruleTagNamesAfterImport` rather than reading `portable.tags`
+ * directly: the DECISION the user has already made belongs in the preview, or the
+ * row contradicts the dialog they just answered.
+ */
+function tagPairOf(
+  existing: PageRule,
+  portable: PortableRule,
+  pkg: ExportPackage,
+  current: SyncState,
+  intent: ImportIntent,
+): TagPair {
+  return {
+    before: tagPreviews(
+      (existing.tagIds ?? [])
+        .map((id) => current.tags.find((t) => t.id === id)?.name)
+        .filter((n): n is string => n !== undefined),
+      pkg,
+      current,
+    ),
+    after: tagPreviews(ruleTagNamesAfterImport(portable.tags, intent), pkg, current),
+  };
 }
 
 /** A number as a text facet; a record with no such field yields `null`. */
@@ -438,7 +582,12 @@ export function computeDiff(
           id: portable.id,
           label: portable.title ?? portable.urlMatch.value,
           status: declinedAdded ? 'kept' : 'added',
-          fields: changedFields(NO_FACETS, afterFacets, { after: portable.priority }),
+          fields: changedFields(NO_FACETS, afterFacets, { after: portable.priority },
+            // The machine has no rule, so it has no tags: one side only, which
+            // renders as a single chip set (the same shape an `added` tag uses).
+            // `intent` is passed for the same reason as the both-sides branch: a
+            // "Leave them out" answer empties the set the user is being shown.
+            declinedAdded ? {} : { after: tagPreviews(ruleTagNamesAfterImport(portable.tags, intent), pkg, current) }),
           priority: portable.priority,
           // See the slot case: a record the machine does not have has no side to
           // describe.
@@ -467,8 +616,8 @@ export function computeDiff(
         label: existing.title ?? (afterTitle || portable.urlMatch.value),
         status,
         fields: status === 'kept'
-          ? keptFields(before, { before: existing.priority, after: portable.priority })
-          : changedFields(before, afterFacets, { before: existing.priority, after: portable.priority }),
+          ? keptFields(before, { before: existing.priority, after: portable.priority }, tagPairOf(existing, portable, pkg, current, intent))
+          : changedFields(before, afterFacets, { before: existing.priority, after: portable.priority }, tagPairOf(existing, portable, pkg, current, intent)),
         before: toRecordBefore(before, existing.priority),
         // The list column shows the TARGET's priority — that is the rule as it
         // stands on this machine. The file's number is visible in the field
@@ -508,7 +657,117 @@ export function computeDiff(
     ...(pkg.shortcuts !== undefined
       ? { shortcutParts: shortcutPartDiffs(pkg, intent) }
       : {}),
+    ...(pkg.tags !== undefined
+      ? { tagNames: tagPartDiffs(pkg, current, intent) }
+      : {}),
   };
+}
+
+// ─── Tag vocabulary rows (D0/A7/A8) ──────────────────────────────────
+
+/**
+ * One row per tag the FILE carries, plus — under `overwrite` — one `deleted`
+ * row per target tag the file does NOT carry.
+ *
+ * The deleted rows are the point. `overwrite` on tags removes target-side tags
+ * (and every rule reference to them), which is destructive and irreversible in
+ * the user's eyes; A8 therefore requires it be DISCLOSED and, if the user
+ * wishes, downgraded to `incremental` — which is defined as the SAME change,
+ * expressed by rewriting the dimension mode. Reporting the deletion here is what
+ * keeps the protection from being bypassed (§7 item 5).
+ */
+function tagPartDiffs(pkg: ExportPackage, current: SyncState, intent: ImportIntent): ImportPartDiff[] {
+  const rows: ImportPartDiff[] = [];
+  const carried = new Set((pkg.tags ?? []).map((t) => t.name));
+
+  for (const tag of pkg.tags ?? []) {
+    const existing = current.tags.find((t) => t.name === tag.name);
+    /**
+     * A tag the machine already has under this name is the SAME tag (the name is its
+     * identity, C2/A4), and the import UPDATES its appearance.
+     *
+     * The name-only comparison this replaces reported every existing tag as `kept`,
+     * so a file whose tag had different colours produced "no change", the write had
+     * nothing to do, and the appearance the user was importing silently did not
+     * arrive. Now a difference in either colour makes the row `replaced` — the same
+     * status a rule gets when a field of it moves — and the write applies it.
+     */
+    const appearanceDiffers = existing !== undefined
+      && (existing.backgroundColor !== tag.backgroundColor || existing.textColor !== tag.textColor);
+    const status: ImportRecordStatus = existing === undefined
+      ? 'added'
+      : appearanceDiffers
+        ? 'replaced'
+        : 'kept';
+    /**
+     * The tag's THREE facets, each carrying both sides.
+     *
+     * The colours are reported even for a reused name, because "reused" is a
+     * statement about the IDENTITY (the name) and not about the appearance: the
+     * row has to be able to say that the incoming tag looks different from the one
+     * it will map onto, or that difference is invisible in the only place the user
+     * could act on it.
+     *
+     * Each facet's `changed` flag is computed independently, so a tag whose name
+     * matches but whose colour does not reports exactly that — one boolean for the
+     * whole row would have collapsed three separate questions into one.
+     */
+    const facets: Array<{
+      field: 'tag-name' | 'tag-background' | 'tag-text';
+      before: ImportFieldValue | null;
+      after: ImportFieldValue;
+    }> = [
+      {
+        field: 'tag-name',
+        before: existing ? { kind: 'text', value: existing.name } : null,
+        after: { kind: 'text', value: tag.name },
+      },
+      {
+        field: 'tag-background',
+        before: existing ? { kind: 'color', value: existing.backgroundColor } : null,
+        after: { kind: 'color', value: tag.backgroundColor },
+      },
+      {
+        field: 'tag-text',
+        before: existing ? { kind: 'color', value: existing.textColor } : null,
+        after: { kind: 'color', value: tag.textColor },
+      },
+    ];
+    rows.push({
+      id: tag.name,
+      label: tag.name,
+      group: 'tag',
+      status,
+      before: existing ? { kind: 'text', value: existing.name } : null,
+      after: { kind: 'text', value: tag.name },
+      changed: !existing || appearanceDiffers,
+      // Compared through the SAME equality rule the rest of the diff uses
+      // (`facetKey`), so "did this facet change" has one definition here too —
+      // reading `.value` directly would have needed a second, kind-aware rule.
+      fields: facets.map((f) => ({ ...f, changed: facetKey(f.before) !== facetKey(f.after) })),
+    });
+  }
+
+  // `overwrite` (still cascade, i.e. not re-decided as incremental) removes the
+  // target tags the file lacks.
+  const overwriteStillOn =
+    intent.dimensionModes.tags === 'overwrite' && intent.tagOverwriteResolution !== 'to-incremental';
+  if (overwriteStillOn) {
+    for (const existing of current.tags) {
+      if (carried.has(existing.name)) continue;
+      rows.push({
+        id: existing.name,
+        label: existing.name,
+        group: 'tag',
+        status: 'deleted',
+        before: { kind: 'text', value: existing.name },
+        after: null,
+        changed: true,
+      });
+    }
+  }
+
+  return rows;
 }
 
 // ─── Settings / shortcut parts (R9/R10) ───────────────────────────────

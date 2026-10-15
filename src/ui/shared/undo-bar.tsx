@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react';
-import type { IconSource } from '@shared/types';
+import type { IconSource, TagDefinition } from '@shared/types';
 import { Button } from './components';
 
 // ─── Snapshot model ──────────────────────────────────────────────────────────
@@ -36,6 +36,43 @@ export type UndoLayerWrite =
       customTitle?: string | null;
       /** FIX-A: see `tab-override.favicon`. */
       icon?: IconSource | null;
+    }
+  /**
+   * P3 (Rule Tags): undoing a tag deletion.
+   *
+   * Deliberately a THIRD kind on this existing union rather than a new undo
+   * mechanism — C5 requires the `UndoBar` be reused, and the discriminated union
+   * means adding a kind is a compile error everywhere a `kind` is switched on, so
+   * a consumer that forgets the new case cannot compile.
+   *
+   * The write carries the ENTITY and every rule reference that was stripped, so
+   * one Undo restores both: undoing only the entity would leave rules pointing at
+   * nothing (the dangling state I2 forbids).
+   */
+  | {
+      kind: 'tag-delete';
+      tag: TagDefinition;
+      refs: Array<{ ruleId: string; tagIds: string[] }>;
+    }
+  /**
+   * Undoing a rule's tag-set change — the mirror of a tag deletion.
+   *
+   * `DELETE_TAG` was the only tag write with an undo, so removing ONE tag from ONE
+   * rule ("stop using it here", the association panel's action) was the only
+   * irreversible tag operation in the app — a protection LADDER with a missing
+   * rung: deleting a tag is confirmed AND undoable, deleting its last reference
+   * from a rule was neither.
+   *
+   * The write carries the rule's tag list as it was BEFORE the change, which is all
+   * a restore needs: `SET_RULE_TAGS` writes the whole set, so replaying the previous
+   * set is the exact inverse. Storing the previous set rather than a diff also means
+   * the undo cannot depend on what the intervening write did.
+   */
+  | {
+      kind: 'rule-tags';
+      ruleId: string;
+      /** The rule's `tagIds` before the change, i.e. what the undo restores. */
+      previousTagIds: string[];
     };
 
 export interface UndoSnapshot {

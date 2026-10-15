@@ -84,7 +84,7 @@ function rule(id: string, over: Partial<PageRule> = {}): PageRule {
   return {
     id,
     urlMatch: { type: 'exact', value: TAB_URL },
-    priority: 0,
+    priority: 0, tagIds: [],
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',
     ...over,
@@ -117,7 +117,7 @@ const MATRIX: MatrixCase[] = [
   { name: 'slot only (bound)', sync: { slots: [slot(5, { uiMarker: { customTitle: 'S' } })] }, local: { bindings: [{ slotId: 5, tabId: TAB_ID, windowId: 1, boundAt: '2026-01-01T00:00:00Z' }] } },
   { name: 'override only', sync: {}, local: { tabOverrides: [{ tabId: TAB_ID, title: 'O', createdAt: '2026-01-01T00:00:00Z' }] } },
   { name: 'override + slot + rule', sync: { rules: [rule('r1', { title: 'R' })], slots: [slot(5, { uiMarker: { customTitle: 'S' } })] }, local: { bindings: [{ slotId: 5, tabId: TAB_ID, windowId: 1, boundAt: '2026-01-01T00:00:00Z' }], tabOverrides: [{ tabId: TAB_ID, title: 'O', createdAt: '2026-01-01T00:00:00Z' }] } },
-  { name: 'priority tie (newer wins)', sync: { rules: [rule('r-old', { title: 'Old', priority: 5, createdAt: '2026-01-01T00:00:00Z' }), rule('r-new', { title: 'New', priority: 5, createdAt: '2026-06-01T00:00:00Z' })] }, local: {} },
+  { name: 'priority tie (newer wins)', sync: { rules: [rule('r-old', { title: 'Old', priority: 5, tagIds: [], createdAt: '2026-01-01T00:00:00Z' }), rule('r-new', { title: 'New', priority: 5, tagIds: [], createdAt: '2026-06-01T00:00:00Z' })] }, local: {} },
   { name: 'disabled rule', sync: { rules: [rule('r1', { title: 'R', enabled: false })] }, local: {} },
   { name: 'unsafe favicon at rule tier', sync: { rules: [rule('r1', { title: 'R', favicon: { type: 'url', value: 'javascript:alert(1)' } })] }, local: {} },
   { name: 'unsafe favicon at override tier', sync: {}, local: { tabOverrides: [{ tabId: TAB_ID, title: 'O', favicon: { type: 'url', value: 'file:///etc/passwd' }, createdAt: '2026-01-01T00:00:00Z' }] } },

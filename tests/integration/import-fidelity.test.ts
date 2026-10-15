@@ -27,6 +27,7 @@ function rule(id: string, value: string, priority: number): PageRule {
     urlMatch: exact(value),
     priority,
     title: `title-${id}`,
+    tagIds: [],
     createdAt: `2026-01-0${String(priority + 1)}T00:00:00.000Z`,
     updatedAt: `2026-02-0${String(priority + 1)}T00:00:00.000Z`,
   };

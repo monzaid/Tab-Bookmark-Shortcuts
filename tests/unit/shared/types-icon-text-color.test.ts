@@ -39,6 +39,8 @@ describe('T2: IconSource.textColor + import intent types', () => {
       rules: 'incremental',
       settings: 'incremental',
       shortcuts: 'incremental',
+      // The fifth dimension (D0/S5), defaulted incremental like the rest (A7).
+      tags: 'incremental',
     });
   });
 

@@ -24,6 +24,7 @@ import type {
   DiagnosticEntry,
   DomainErrorCode,
   SiteSnapshotEntry,
+  TagDefinition,
 } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
 import { urlsMatch } from '@shared/url-utils';
@@ -84,6 +85,7 @@ export function createDefaultSyncState(): SyncState {
     autoBindGlobal: true,
     slots: [],
     rules: [],
+    tags: [],
   };
 }
 
@@ -256,7 +258,12 @@ export class StorageRepository {
       switchDirection: state.switchDirection ?? 'next',
       autoBindGlobal: state.autoBindGlobal ?? true,
       slots: state.slots ?? [],
-      rules: state.rules ?? [],
+      // P2: an archive predating tags reads as an EMPTY table with empty
+      // per-rule `tagIds`, per the SAME lenient `??` stance every other top
+      // field already takes (`tags` is not a special case). No migration branch
+      // is written — strictness is reserved for import PACKAGES (C9-②).
+      rules: (state.rules ?? []).map((r) => ({ ...r, tagIds: r.tagIds ?? [] })),
+      tags: state.tags ?? [],
     };
   }
 
@@ -749,6 +756,39 @@ export class StorageRepository {
       found = state.rules.length < len;
     });
     return found;
+  }
+
+  /**
+   * A-g: the tag table, read through the ordinary sync snapshot path.
+   *
+   * Returns a COPY of the array. `getSyncState` already hands back a shallow
+   * copy, and the array itself is cloned here so a caller cannot append to the
+   * live table by holding onto what a read gave it.
+   */
+  async getTags(): Promise<TagDefinition[]> {
+    const state = await this.getSyncState();
+    return state.tags.map((tag) => ({ ...tag }));
+  }
+
+  /**
+   * A-g/A-h: the ONE write primitive for tags and their references.
+   *
+   * A THIN wrapper over the existing private `mutateSync` (same shape as
+   * `addRule`/`updateRuleById`/`removeRuleById`) — deliberately not a public
+   * `mutateSync`, so the exposed surface stays minimal (R4).
+   *
+   * Why it takes a whole mutator rather than a tag-shaped operation: the caller
+   * must be able to change the tag TABLE and N rules' `tagIds` in ONE call. That
+   * single call is one `mutateSync` operation, which is one version bump and one
+   * serialized storage write — the atomicity that C5's batch snapshot and undo
+   * depend on. Splitting a cascade into two calls would produce two bumps and
+   * two write windows (A-g).
+   *
+   * Business rules (trim, dedupe, limits, cascade SEMANTICS) stay in
+   * `TagService`; this layer only moves bytes (P4).
+   */
+  async mutateSyncTags(mutator: (draft: SyncState) => void): Promise<void> {
+    await this.mutateSync(mutator);
   }
 
   // ─── Core: Version-less sync write (serialized queue) ─────────────────────

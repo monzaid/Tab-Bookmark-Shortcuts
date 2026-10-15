@@ -24,7 +24,7 @@ import type {
   IconSource,
 } from '@shared/types';
 import { defaultImportIntent } from '@shared/types';
-import { applyIntent, computeDiff, findMatchOverlaps } from '@shared/import-diff';
+import { applyIntent, computeDiff, findMatchOverlaps, ruleTagNamesAfterImport } from '@shared/import-diff';
 import {
   isExportPackage,
   isValidPortableSettings,
@@ -35,6 +35,7 @@ import {
   type PortableShortcutBinding,
 } from '@shared/export-package';
 import { partitionByDomainRules, type DomainRecord, type DomainRejection } from './domain-rules';
+import { TagService } from './tag-service';
 
 // ─── Narrow collaborator seams (no adapter/service coupling) ─────────────────
 
@@ -136,7 +137,17 @@ export class ImportExportService {
      * pre-iteration behaviour (the dimension is simply not carried).
      */
     private shortcuts?: ShortcutProbe,
-  ) {}
+  ) {
+    // A-e/A10: the import side resolves names -> local ids and creates what is
+    // missing. `TagService` needs only the repository, so it is constructed here
+    // rather than threaded through every caller — and it is used for its
+    // IDENTITY rules, not as a write channel: the resolution happens on the
+    // in-memory `final` state that this service writes in one version-bound
+    // operation, so the import stays a single transaction.
+    this.tagService = new TagService(repo);
+  }
+
+  private readonly tagService: TagService;
 
   /**
    * R4: the writer is supplied per APPLY (not at construction) because
@@ -320,7 +331,59 @@ export class ImportExportService {
     const diff = computeDiff(parsed, current, intent);
 
     // 3. Derive the final state and the destructive summary.
+    //    `applyIntent` produced the record-level result; the TAGS dimension is
+    //    resolved next (A-e), before the single version-bound write, so records,
+    //    vocabulary and references all land in one transaction.
     const final = applyIntent(parsed, current, intent);
+
+    // A8: an `overwrite` on tags deletes target tags the file lacks. The design
+    // defines "re-decide it as incremental" as rewriting the dimension mode, so
+    // the effective mode is computed here and `cascade` is the only value that
+    // actually removes. `to-incremental` is then indistinguishable from
+    // `incremental` (one reasoning chain — no second code path to drift).
+    const tagsOverwrite = intent.dimensionModes.tags === 'overwrite'
+      && intent.tagOverwriteResolution !== 'to-incremental';
+
+    // The names each CARRIED rule references (A3: a package inlines names).
+    //
+    // Normalisation and the A-f/D-e decision ("Leave them out" empties EVERY
+    // reference) both come from `ruleTagNamesAfterImport` — the SAME function the
+    // import DIFF uses to show what the rule will carry. Two implementations of this
+    // rule is how the review panel came to display tags the write was removing: it
+    // read `portable.tags` directly while this layer dropped them. One function
+    // means the preview and the write cannot describe different outcomes.
+    const namesByRuleId = new Map<string, string[]>(
+      (parsed.rules ?? []).map(
+        (r): [string, string[]] => [r.id, ruleTagNamesAfterImport(r.tags, intent)],
+      ),
+    );
+
+    // A7/A8: under a real `overwrite`, drop the target tags the file does not
+    // name, and let the reference resolution below clean up any rule that loses
+    // one. Under incremental (or the re-decided form) the target table is left
+    // alone and only additions/updates happen.
+    if (tagsOverwrite) {
+      const carriedNames = new Set((parsed.tags ?? []).map((t) => t.name));
+      for (const names of namesByRuleId.values()) {
+        for (const name of names) carriedNames.add(name);
+      }
+      final.tags = final.tags.filter((t) => carriedNames.has(t.name));
+    }
+
+    // A-e/A10/S6: names -> local ids, creating misses (default appearance when
+    // nothing defines them, and a count to disclose).
+    // R9-analogue: `takeTagNames` is an ALLOW-list over the VOCABULARY. A declined
+    // name is not created from the file's tags — but it is still resolvable as a
+    // rule REFERENCE below, because a taken rule cannot be honoured without its tag
+    // (the asymmetric rule documented on the field).
+    const tagsTaken = (name: string): boolean =>
+      intent.takeTagNames === undefined || intent.takeTagNames.includes(name);
+    const tagsCreatedWithDefaultAppearance = this.tagService.resolveImportedTags(
+      final,
+      (parsed.tags ?? []).filter((t) => tagsTaken(t.name)),
+      namesByRuleId,
+    );
+
     const overlaps = findMatchOverlaps(final);
 
     // D15: records the domain constraints reject are skipped + disclosed.
@@ -398,6 +461,14 @@ export class ImportExportService {
       ? 0
       : diff.settingsParts.filter((p) => p.status !== 'kept').length;
 
+    // G-H: like settings, the tag vocabulary is a PART dimension, so `changed`
+    // is the number of tag rows this apply actually WROTE (a new name) — the
+    // same "not kept" rule the rows are drawn from, so the number and the rows
+    // cannot disagree.
+    const tagsChanged = diff.tagNames === undefined
+      ? 0
+      : diff.tagNames.filter((p) => p.status !== 'kept').length;
+
     const dimensions = {
       slots: outcomeFor('slot'),
       rules: outcomeFor('rule'),
@@ -406,6 +477,7 @@ export class ImportExportService {
         changed: shortcutOutcome.changed,
         failed: shortcutOutcome.failed,
       },
+      tags: { changed: tagsChanged, failed: 0 },
     };
 
     // C11/D9: the missing-icon list is an APPLY PRODUCT — a one-shot disclosure,
@@ -451,6 +523,9 @@ export class ImportExportService {
         missingIcons,
         overlaps,
         ...(shortcutGuidance !== undefined ? { shortcutGuidance } : {}),
+        // S6/A10: tell the user how many tags arrived with a default appearance,
+        // so a creation they did not plan is DISCLOSED rather than discovered.
+        ...(tagsCreatedWithDefaultAppearance > 0 ? { tagsCreatedWithDefaultAppearance } : {}),
       },
     };
   }

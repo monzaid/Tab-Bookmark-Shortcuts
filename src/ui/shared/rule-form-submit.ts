@@ -29,6 +29,15 @@ export interface RuleDraftValue {
   iconConfig?: IconConfig;
   priority: number;
   enabled?: boolean;
+  /**
+   * The rule's tags as a FORM DRAFT (G3).
+   *
+   * Carried through `normalizeRuleDraft` verbatim — NO trim, NO dedupe, NO
+   * dangling strip. Those are `TagService`'s rules (P4/D3/A-h): re-implementing
+   * them here would create a second answer to "which tags does this rule have",
+   * and the two would drift. The UI's job is to pass what the user picked.
+   */
+  tagIds?: string[];
 }
 
 /**
@@ -68,6 +77,16 @@ export interface NormalizedRuleFields {
   title?: string;
   favicon?: IconSource;
   enabled?: boolean;
+  /**
+   * NOT part of the `CREATE_RULE` / `UPDATE_RULE` payload.
+   *
+   * Tags travel in `SET_RULE_TAGS` (A1), and this field exists only so the
+   * CALLER can send that second message AFTER the rule is saved — the ORDER
+   * matters, because `SET_RULE_TAGS` needs a real `ruleId` to point at. Spreading
+   * this object straight into a rule request would put tags on the delivery path
+   * (R5), so it is a sibling of the payload, never inside it.
+   */
+  tagIds?: string[];
 }
 
 /** Clamp a priority into the persisted range. */
@@ -121,5 +140,10 @@ export function normalizeRuleDraft(value: RuleDraftValue): NormalizedRuleFields 
     ...(title !== undefined ? { title } : {}),
     favicon: resolveDraftFavicon(value),
     ...(value.enabled !== undefined ? { enabled: value.enabled } : {}),
+    // Passed through VERBATIM (see `RuleDraftValue.tagIds`): normalising here
+    // would duplicate `TagService`'s rules. Carried as a sibling of the payload,
+    // for the caller's follow-up `SET_RULE_TAGS` — never spread into a rule
+    // request.
+    ...(value.tagIds !== undefined ? { tagIds: value.tagIds } : {}),
   };
 }

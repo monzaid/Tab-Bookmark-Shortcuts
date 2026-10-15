@@ -16,7 +16,7 @@ function chainWith(ruleTitle: string | null, siteKnown: boolean): ChainResult {
   const sync: SyncState = {
     ...createDefaultSyncState(),
     rules: ruleTitle
-      ? [{ id: 'r1', urlMatch: { type: 'exact', value: 'https://a.com/' }, priority: 0, title: ruleTitle, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }]
+      ? [{ id: 'r1', urlMatch: { type: 'exact', value: 'https://a.com/' }, priority: 0, title: ruleTitle, tagIds: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }]
       : [],
   };
   const local = siteKnown
@@ -116,6 +116,40 @@ describe('T16: Dashboard', () => {
     await openDashboard();
     expect(await screen.findByRole('button', { name: 'Edit Tab 7' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit cp-7' })).toBeNull();
+  });
+
+  it('the row actions are ICON actions, like every other table (one visual language)', async () => {
+    // The Dashboard was the last table whose row actions were TEXT buttons, so the
+    // same Edit/Remove pair read differently here than on Tags, the association
+    // panel and the rules table. They are the shared `IconAction` now: a pencil and
+    // a bin, drawn from the shared set rather than emoji.
+    rows = [row({ id: 'cp-7', label: 'Tab 7' })];
+    await openDashboard();
+
+    const edit = await screen.findByRole('button', { name: 'Edit Tab 7' });
+    const clear = screen.getByRole('button', { name: 'Clear Tab 7' });
+
+    for (const [btn, cls] of [[edit, 'tbs-icon-action'], [clear, 'tbs-icon-action']] as const) {
+      expect(btn.className).toContain(cls);
+      // No text label: the name is carried by `aria-label` / the tooltip.
+      expect(btn.textContent?.trim()).toBe('');
+      // The drawing is the shared SVG set (24-viewBox, stroke 2, currentColor) —
+      // not an emoji, which is what the neighbouring tables used to use.
+      const svg = btn.querySelector('svg');
+      expect(svg?.getAttribute('viewBox')).toBe('0 0 24 24');
+      expect(svg?.getAttribute('stroke')).toBe('currentColor');
+      expect(svg?.getAttribute('aria-hidden')).toBe('true');
+      // The old text buttons left no shared-button class behind.
+      expect(btn.className).not.toContain('tbs-btn');
+    }
+
+    // The destructive one is marked danger — that is what colours the bin, and the
+    // only thing distinguishing it from Edit at a glance.
+    expect(clear.className).toContain('tbs-icon-action--danger');
+    expect(edit.className).not.toContain('tbs-icon-action--danger');
+    // Both carry the label as their tooltip too, so a sighted user can read it.
+    expect(screen.getByRole('button', { name: 'Edit Tab 7' }).getAttribute('title')).toBe('Edit Tab 7');
+    expect(screen.getByRole('button', { name: 'Clear Tab 7' }).getAttribute('title')).toBe('Clear Tab 7');
   });
 
   it('renders the delivery copy for a protected page', async () => {

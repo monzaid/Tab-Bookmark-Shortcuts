@@ -12,18 +12,25 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
 import { Button, Toast, StatusBadge, Confirm, Dialog } from '@ui/shared/components';
 import { Tabs } from '@ui/shared/tabs';
+import { SearchField } from '@ui/shared/search-field';
+import { IconAction, PencilIcon, TrashIcon, GoToIcon, ResetIcon } from '@ui/shared/icons';
 import { EmptyState } from '@ui/shared/empty-state';
 import type { IconConfig } from '@ui/components/IconEditor';
-import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportRecordOverride, ImportApplyResult, ImportDiff, ImportRecordDiff, ImportRecordStatus, ImportPartDiff, DimensionPresence, DimensionMode, ExportScope, SyncState, UrlMatchType } from '@shared/types';
+import { PRESET_BG_COLORS, PRESET_TEXT_COLORS, autoTextColor } from '@ui/components/IconEditor';
+import type { MatchRuleSettings, SwitchDirection, Priority, TabIdMode, RuleCheckMode, SlotDefinition, PageRule, IconSource, TabOverride, DashboardRow, ImportInspection, ImportIntent, ImportRecordOverride, ImportApplyResult, ImportDiff, ImportRecordDiff, ImportRecordStatus, ImportPartDiff, ImportFieldDiff, DimensionPresence, DimensionMode, ExportScope, SyncState, UrlMatchType } from '@shared/types';
 import { MATCH_TYPE_LABELS } from '@shared/match-type-labels';
 import { RecordList, RecordFields } from '@ui/shared/record-list';
-import { previewFromIconSource, previewFromFieldValue } from '@ui/shared/icon-preview';
+import { IconPreview, previewFromIconSource, previewFromFieldValue } from '@ui/shared/icon-preview';
 import type { IconPreviewSource } from '@ui/shared/icon-preview';
 import type { StatusBadgeProps } from '@ui/shared/components';
 import { DEFAULT_MATCH_SETTINGS, defaultImportIntent } from '@shared/types';
+import type { TagDefinition } from '@shared/types';
+import { evaluateExpression, resolveChipDisplayName } from '@shared/tag-expression';
+import type { ChipToken } from '@shared/tag-expression';
+import { TagExpressionInput } from '@ui/shared/tag-chip-input';
 import { applyIntent, computeDiff, quantifyDeletions } from '@shared/import-diff';
-import { isExportPackage, summariseMatchSettings, summariseStrategy, slotStrategyPartId, slotAutoBindPartId } from '@shared/export-package';
-import type { ExportPackage, SettingPartId } from '@shared/export-package';
+import { isExportPackage, summariseMatchSettings, summariseStrategy, slotStrategyPartId, slotAutoBindPartId, syncStateToPackage, computeExportSelfConsistency, DEFAULT_TAG_APPEARANCE } from '@shared/export-package';
+import type { ExportPackage, SettingPartId, ExportSelfConsistency } from '@shared/export-package';
 
 import { RuleFormFields } from '@ui/shared/rule-form-fields';
 import { FieldEditor } from '@ui/shared/field-editor';
@@ -34,9 +41,21 @@ import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
 import { resolveFieldChain } from '@shared/field-chain';
 import type { ChainResult, TierKey, TierOwner } from '@shared/field-chain';
 import { useJumpToRow, JUMP_HIGHLIGHT_CLASS, JUMP_HIGHLIGHT_MS } from '@ui/shared/use-jump-to-row';
+
+/**
+ * How long a cross-section jump waits for its target row to exist.
+ *
+ * The destination section mounts BEFORE it has data, so the row can appear a
+ * render (or a fetch) later. These bound the wait: 15 × 40ms ≈ 600ms, past any
+ * fixture-backed render and short enough that a genuinely absent target gives up
+ * rather than leaving a timer alive.
+ */
+const JUMP_FIND_ATTEMPTS = 15;
+const JUMP_FIND_INTERVAL_MS = 40;
 import { canonicalIconSource, iconSourceForOwner, iconSourceToFieldSeed } from '@ui/shared/icon-source';
-import { UndoBar } from '@ui/shared/undo-bar';
+import { UndoBar, UNDO_DEFAULT_MS } from '@ui/shared/undo-bar';
 import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
+import { countTagReferences, TAG_NAME_MAX, isTagColorValid, isTagNameValid } from '@shared/tags';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
 import { getMessageClient } from '@ui/shared/message-client';
 import { formatFieldValue } from '@ui/shared/import-field-format';
@@ -50,7 +69,7 @@ interface CommandInfo {
   shortcut: string | null;
 }
 
-type SettingsSection = 'slots' | 'rules' | 'strategy' | 'dashboard' | 'import-export' | 'diagnostics';
+type SettingsSection = 'slots' | 'rules' | 'strategy' | 'dashboard' | 'tags' | 'import-export' | 'diagnostics';
 
 /**
  * The minimal `storage.onChanged` surface this page needs.
@@ -95,7 +114,7 @@ function compareRules(a: PageRule, b: PageRule, key: SortKey): number {
  */
 function emptyChain(): ChainResult {
   return resolveFieldChain('title', {
-    sync: { configVersion: 0, matchSettings: DEFAULT_MATCH_SETTINGS, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [] },
+    sync: { configVersion: 0, matchSettings: DEFAULT_MATCH_SETTINGS, switchDirection: 'next', autoBindGlobal: true, slots: [], rules: [], tags: [] },
     local: { bindings: [], cycleCursors: [], lastSuccessSlotId: null, recoverySessions: [], recoverySnapshots: [], tabOverrides: [], iconCache: {}, diagnostics: [] },
     tabId: -1,
     tabUrl: '',
@@ -216,6 +235,10 @@ const NAV_ITEMS: { id: SettingsSection; label: string }[] = [
   { id: 'rules', label: 'Page Rules' },
   { id: 'strategy', label: 'Global Strategy' },
   { id: 'dashboard', label: 'Data Dashboard' },
+  // D-a: the tag vocabulary's own page, beside the other per-domain pages. It is
+  // the ONLY place a tag can be renamed or deleted, and the only place an
+  // unreferenced tag is guaranteed to be reachable (C3).
+  { id: 'tags', label: 'Tags' },
   { id: 'import-export', label: 'Import / Export' },
   { id: 'diagnostics', label: 'Diagnostics' },
 ];
@@ -558,6 +581,15 @@ interface RuleFormState {
   iconMode: FieldMode;
   iconConfig?: IconConfig;
   priority: number;
+  /**
+   * G3: the rule's tags as a FORM DRAFT, alongside the other fields.
+   *
+   * It travels with the form rather than in a parallel piece of state so the
+   * shared field set renders it as one more field of this rule — and so
+   * "what the form holds" and "what gets submitted" are the same object rather
+   * than two things that can drift.
+   */
+  tagIds: string[];
 }
 
 const EMPTY_RULE_FORM: RuleFormState = {
@@ -567,7 +599,1118 @@ const EMPTY_RULE_FORM: RuleFormState = {
   iconMode: { kind: 'use-chain' },
   iconConfig: undefined,
   priority: 0,
+  tagIds: [],
 };
+
+// ─── Tags Section (D-a: the 7th navigation page) ────────────────────────────
+
+/**
+ * The tag management page: list, add, rename, recolour, delete.
+ *
+ * The DELETE flow is the whole reason this page is careful (C4/C5/R3):
+ *
+ *   click Delete  ->  `Confirm` stating the impact  ->  (confirm)  ->  commit
+ *                 ->  THEN `UndoBar`
+ *
+ * Strictly serial, on the existing g2 ruling: a confirmation and an undo bar on
+ * screen at once would offer to undo something that has not happened yet. The
+ * `Confirm` is `danger` with no default button (R4) — a stray Enter must not
+ * delete anything.
+ *
+ * Orphan tags (referenced by no rule) are FIRST-CLASS here: they are listed like
+ * any other tag, because C3 makes "visible" a requirement — an orphan the user
+ * cannot see is an orphan that silently accumulates.
+ */
+/**
+ * The undo snapshot a `DELETE_TAG` response carries, or `undefined`.
+ *
+ * One accessor for the SINGLE delete and the BATCH one: they must read the same
+ * field the same way, or a batch would collect snapshots a single delete would have
+ * accepted (or vice versa) and the undo would silently differ by path. `extractResult`
+ * unwraps the worker's envelope, but the snapshot sits BESIDE `result` rather than
+ * inside it, which is why this is a separate read rather than a field on that type.
+ */
+function deleteSnapshotOf(response: unknown): { tag: TagDefinition; refs: Array<{ ruleId: string; tagIds: string[] }> } | undefined {
+  return (response as { snapshot?: { tag: TagDefinition; refs: Array<{ ruleId: string; tagIds: string[] }> } } | undefined)?.snapshot;
+}
+
+function TagsSection({ onRedirectToRule }: { onRedirectToRule: (ruleId: string) => void }) {
+  const [tags, setTags] = useState<TagDefinition[]>([]);
+  const [rules, setRules] = useState<PageRule[]>([]);
+  const [loadError, setLoadError] = useState(false);
+  /**
+   * Has the first read finished?
+   *
+   * `tags` starts as `[]`, which is ALSO what a genuinely empty table looks like —
+   * so before this the panel's first frame said "No tags yet. Create one with +
+   * New Tag" to every user, including one with fifty tags. The empty state is a
+   * claim about the machine, and it may not be made before the machine has
+   * answered.
+   */
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<TagDefinition | null>(null);
+  /** IMP-6/DT9: the atomic undo for the delete that just happened. */
+  const [undoState, setUndoState] = useState<UndoState | null>(null);
+  /**
+   * Which tags' Edit forms are open UNDER their rows — a SET, so several can be
+   * edited at once.
+   *
+   * A single id was the first cut, and it made comparing or batch-tweaking two
+   * tags a sequence of open/close/open rather than one pass. The rules table
+   * already establishes the multi-open behaviour ("multiple can be open"), so
+   * this is the same convention rather than a new one.
+   */
+  const [editingIds, setEditingIds] = useState<Set<string>>(new Set());
+  /**
+   * Which tags' "which items use this" panels are open.
+   *
+   * Also a set, and for a reason worth stating: if this stayed single-open while
+   * edits became multi-open, opening one panel would have to CLOSE another — so
+   * a user inspecting tag A would lose tag B's open Edit form to a control that
+   * does not mention it. Two independent sets keep each action's blast radius to
+   * the row it was clicked on.
+   */
+  const [inspectingIds, setInspectingIds] = useState<Set<string>>(new Set());
+  /** Is the `+ New Tag` appearance form open? */
+  const [showCreate, setShowCreate] = useState(false);
+  /** Substring match over the tag NAME. `''` = no search. */
+  const [query, setQuery] = useState('');
+  /** `null` = the table's own order. Name is the only sortable column. */
+  const [sortDir, setSortDir] = useState<'asc' | 'desc' | null>(null);
+  /** The rows the bulk affordance operates on (mirrors the rules table's ☑). */
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  /** The bulk bar is showing / a bulk write is running (mirrors the rules table). */
+  const [batchProcessing, setBatchProcessing] = useState(false);
+  /** D-12: the bulk delete is confirmed before it runs — a destructive action (N1). */
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await sendMessage('GET_STATE');
+      const result = extractResult(res);
+      if (result?.success) {
+        const sync = result.sync as { tags?: TagDefinition[]; rules?: PageRule[] } | undefined;
+        setTags(sync?.tags ?? []);
+        setRules(sync?.rules ?? []);
+        setLoadError(false);
+      } else {
+        setLoadError(true);
+      }
+    } catch {
+      setLoadError(true);
+    } finally {
+      // In `finally` rather than per-branch: a failure also means "the read is
+      // over", and leaving the panel in its loading state after an error would
+      // hide the error behind a spinner.
+      setHasLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    const onStorageChanged = (_c: unknown, areaName: string) => {
+      if (areaName === 'sync') void load();
+    };
+    chrome.storage?.onChanged?.addListener(onStorageChanged);
+    return () => { chrome.storage?.onChanged?.removeListener(onStorageChanged); };
+  }, [load]);
+
+  const referenceCount = (tagId: string): number => countTagReferences(tagId, rules);
+
+  /**
+   * The `+ New Tag` form's submit. `appearance` carries all three fields, so a
+   * tag can be created with the colours the user picked rather than appearing in
+   * a default grey they then have to edit (the form is the only chance to set
+   * them before the tag exists).
+   *
+   * Returns the backend's verdict so the form can stay OPEN on a refusal (a
+   * duplicate name) instead of discarding what the user typed.
+   */
+  const handleCreate = async (appearance: TagAppearance): Promise<boolean> => {
+    setBusy(true);
+    try {
+      const res = await sendMessage('CREATE_TAG', {
+        name: appearance.name,
+        backgroundColor: appearance.backgroundColor,
+        textColor: appearance.textColor,
+      });
+      const result = extractResult(res) as { success?: boolean; message?: string } | undefined;
+      if (result && result.success === false) {
+        setToast({ variant: 'error', message: result.message ?? 'Could not create the tag' });
+        return false;
+      }
+      setToast({ variant: 'success', message: 'Tag created' });
+      await load();
+      return true;
+    } catch {
+      setToast({ variant: 'error', message: 'Could not create the tag' });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * The Edit form's submit — name AND both colours in ONE `UPDATE_TAG`.
+   *
+   * One write for one decision: sending a rename plus a separate colour write
+   * could half-succeed, leaving a tag renamed but not recoloured with no single
+   * value to report. C1: the id is untouched, so every referencing rule follows
+   * the new name with no write to any rule — the reference count does NOT move.
+   */
+  const handleUpdate = async (tagId: string, appearance: TagAppearance): Promise<boolean> => {
+    setBusy(true);
+    try {
+      const res = await sendMessage('UPDATE_TAG', {
+        tagId,
+        name: appearance.name,
+        backgroundColor: appearance.backgroundColor,
+        textColor: appearance.textColor,
+      });
+      const result = extractResult(res) as { success?: boolean; message?: string } | undefined;
+      if (result && result.success === false) {
+        setToast({ variant: 'error', message: result.message ?? 'Could not save the tag' });
+        return false;
+      }
+      // Closes THIS row's form only. Closing "the" edit form would be wrong now
+      // that several can be open — saving one tag must not dismiss another.
+      setEditingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(tagId);
+        return next;
+      });
+      setToast({ variant: 'success', message: 'Tag updated' });
+      await load();
+      return true;
+    } catch {
+      setToast({ variant: 'error', message: 'Could not save the tag' });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * "Delete" from the association panel's rule row: remove ONE tag from ONE rule.
+   *
+   * `SET_RULE_TAGS` with the id filtered out — not `DELETE_TAG`, which would
+   * remove the tag everywhere. The distinction is the whole reason the panel can
+   * offer the action at all: from inside "which rules use this tag", the
+   * destructive-sounding verb means "stop using it HERE".
+   */
+  const handleUnlinkRule = async (ruleId: string, tagId: string): Promise<void> => {
+    const rule = rules.find((r) => r.id === ruleId);
+    if (!rule) return;
+    // Captured BEFORE the write: this is exactly what the undo restores.
+    const previousTagIds = [...rule.tagIds];
+    setBusy(true);
+    try {
+      const res = await sendMessage('SET_RULE_TAGS', {
+        ruleId,
+        tagIds: previousTagIds.filter((id) => id !== tagId),
+      });
+      const result = extractResult(res) as { success?: boolean; message?: string } | undefined;
+      if (result && result.success === false) {
+        setToast({ variant: 'error', message: result.message ?? 'Could not remove the tag from that rule' });
+        return;
+      }
+      setToast({ variant: 'success', message: 'Tag removed from the rule' });
+      await load();
+      // Undoable, like every other tag write. The message names the RULE, because
+      // this action is scoped to one rule — "Tag removed" would leave the user
+      // unsure which of several open association panels it referred to.
+      setUndoState({
+        message: `Tag removed from "${rule.title ?? rule.urlMatch.value}"`,
+        snapshot: { writes: [{ kind: 'rule-tags', ruleId, previousTagIds }], affectedTabIds: [] },
+        expiresAt: Date.now() + UNDO_DEFAULT_MS,
+      });
+    } catch {
+      setToast({ variant: 'error', message: 'Could not remove the tag from that rule' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleSort = (): void => {
+    setSortDir((prev) => (prev === null ? 'asc' : prev === 'asc' ? 'desc' : null));
+  };
+
+  /**
+   * Flip one id in a set of open panels.
+   *
+   * One helper for both toggles so the two cannot drift: each returns a NEW set
+   * (a mutated `prev` would not re-render and would silently share identity with
+   * the previous state).
+   */
+  const toggleInSet = (
+    setter: React.Dispatch<React.SetStateAction<Set<string>>>,
+    id: string,
+  ): void => {
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  /** The list the table renders: searched, then sorted. ONE derivation. */
+  const visibleTags = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const matching = needle === ''
+      ? tags
+      : tags.filter((t) => t.name.toLowerCase().includes(needle));
+    if (sortDir === null) return matching;
+    const dir = sortDir === 'asc' ? 1 : -1;
+    // A stable key: `localeCompare` so `Tag 10` follows `Tag 9` the way a reader
+    // expects, rather than falling into lexicographic order.
+    return [...matching].sort((a, b) => dir * a.name.localeCompare(b.name, undefined, { numeric: true }));
+  }, [tags, query, sortDir]);
+
+  // D-13's counterpart on this table: a row that a search hid must not stay
+  // "selected", or a later bulk action would operate on rows the user cannot see.
+  useEffect(() => {
+    const visible = new Set(visibleTags.map((t) => t.id));
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set<string>();
+      for (const id of prev) if (visible.has(id)) next.add(id);
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleTags]);
+
+  /** The commit half of the serial flow. Runs ONLY after the Confirm closes. */
+  const commitDelete = async (tag: TagDefinition): Promise<void> => {
+    setConfirmDelete(null);
+    setBusy(true);
+    try {
+      const res = await sendMessage('DELETE_TAG', { tagId: tag.id });
+      const result = extractResult(res) as { success?: boolean; message?: string; affectedRuleCount?: number } | undefined;
+      const snapshot = deleteSnapshotOf(res);
+      if (result && result.success === false) {
+        setToast({ variant: 'error', message: result.message ?? 'Could not delete the tag' });
+        return;
+      }
+      await load();
+      // Only NOW does the undo bar appear — after the confirm is gone and the
+      // write has happened (C5/R3).
+      if (snapshot) {
+        setUndoState({
+          message: `Tag "${tag.name}" deleted`,
+          snapshot: { writes: [{ kind: 'tag-delete', tag: snapshot.tag, refs: snapshot.refs }], affectedTabIds: [] },
+          expiresAt: Date.now() + UNDO_DEFAULT_MS,
+        });
+      }
+    } catch {
+      setToast({ variant: 'error', message: 'Could not delete the tag' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const selectedTags = tags.filter((t) => selectedIds.has(t.id));
+
+  /**
+   * Delete every selected tag, one `DELETE_TAG` each.
+   *
+   * One message per tag rather than a new bulk action, deliberately: `DELETE_TAG`
+   * is the single delete path (it captures the undo snapshot and cascades the
+   * reference strip atomically), and a second bulk route would be a second
+   * implementation of the same cascade — the shape that drifts. A partial failure
+   * is REPORTED rather than swallowed (D-12), exactly as the rules table's batch
+   * delete does.
+   *
+   * The snapshots are COLLECTED, so one Undo restores the whole batch: the
+   * `UndoBar` already replays a list of `tag-delete` writes, so the batch is one
+   * undoable action rather than N separate bars fighting for the same slot.
+   */
+  const handleBatchDelete = async (): Promise<void> => {
+    setConfirmBatchDelete(false);
+    const ids = [...selectedIds];
+    setBatchProcessing(true);
+    const writes: Array<{ kind: 'tag-delete'; tag: TagDefinition; refs: Array<{ ruleId: string; tagIds: string[] }> }> = [];
+    /**
+     * The tags the write did NOT remove, kept by ID so the selection can name them.
+     *
+     * This used to be a bare counter while `setSelectedIds(new Set())` ran
+     * unconditionally — so a batch that partly failed cleared the selection and
+     * reported only "2 failed", leaving the user to find which two among rows that
+     * may since have been re-sorted or filtered. The failed rows stay SELECTED, so
+     * the answer is still on screen and the retry is the same button.
+     */
+    const failedIds: string[] = [];
+    try {
+      for (const id of ids) {
+        try {
+          const res = await sendMessage('DELETE_TAG', { tagId: id });
+          const result = extractResult(res) as { success?: boolean } | undefined;
+          const snapshot = deleteSnapshotOf(res);
+          if (result && result.success === false) {
+            failedIds.push(id);
+          } else if (snapshot) {
+            writes.push({ kind: 'tag-delete', tag: snapshot.tag, refs: snapshot.refs });
+          }
+        } catch {
+          failedIds.push(id);
+        }
+      }
+      setSelectedIds(new Set(failedIds));
+      await load();
+      const failed = failedIds.length;
+      const deleted = ids.length - failed;
+      setToast(
+        failed === 0
+          ? { variant: 'success', message: `Deleted ${String(deleted)} ${deleted === 1 ? 'tag' : 'tags'}` }
+          : {
+              variant: 'error',
+              // Names them as well as counting: the selection now holds exactly
+              // these rows, so keeping them selected is only useful if the user can
+              // tell WHICH ones they are.
+              message: `Deleted ${String(deleted)} of ${String(ids.length)} · ${String(failed)} failed: ${failedIds.map((id) => `"${tags.find((t) => t.id === id)?.name ?? id}"`).join(', ')}`,
+            },
+      );
+      // Only the tags that WERE deleted go into the undo: replaying one that is
+      // still present would be a write with nothing to restore.
+      if (writes.length > 0) {
+        setUndoState({
+          message: `${String(writes.length)} ${writes.length === 1 ? 'tag' : 'tags'} deleted`,
+          snapshot: { writes, affectedTabIds: [] },
+          expiresAt: Date.now() + UNDO_DEFAULT_MS,
+        });
+      }
+    } finally {
+      setBatchProcessing(false);
+    }
+  };
+
+  return (
+    <section data-testid="tags-section" aria-label="Tags" className="tbs-settings__panel">
+      <header className="tbs-settings__panel-head">
+        <h3 className="tbs-settings__panel-title">Tags</h3>
+        <p className="tbs-settings__panel-sub">
+          Labels for organising rules, each with its own text and background colour. Editing keeps every rule
+          that carries the tag; deleting removes it from all of them.
+        </p>
+      </header>
+
+      {loadError && <p role="alert">Could not load tags.</p>}
+
+      {/* The searches sit under the sentence that says what this list is and
+          ABOVE the table, so narrowing is reachable before the rows. Same control
+          vocabulary as the rules and dashboard lists (`tbs-shared-search`). */}
+      <div className="tbs-settings__toolbar">
+        <SearchField
+          testId="tags-search"
+          placeholder="Search tags..."
+          value={query}
+          onChange={setQuery}
+          ariaLabel="Search tags"
+        />
+        <Button
+          size="sm"
+          variant="primary"
+          onClick={() => { setShowCreate((v) => !v); }}
+          aria-expanded={showCreate}
+        >
+          + New Tag
+        </Button>
+      </div>
+
+      {/* The BULK BAR, shown only while rows are selected — the same affordance the
+          rules table puts above its own table, so "I checked some rows" has one
+          consequence across the app. It sits below the search because narrowing the
+          list is how a user makes a bulk delete safe, and it must be reachable
+          before the destructive control rather than after it (the dashboard's
+          reasoning, applied here). */}
+      {selectedIds.size > 0 && (
+        <div className="tbs-settings__batch-bar" role="toolbar" aria-label="Batch operations">
+          <span>
+            {`${String(selectedIds.size)} selected`}
+            {/* The denominator is the VISIBLE set, not the whole table: selection is
+                pruned to what the search left on screen (D-13), so quoting the full
+                count would claim an "all selected" state the user has not reached. */}
+            {selectedIds.size < visibleTags.length ? ` of ${String(visibleTags.length)}` : ''}
+          </span>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => { setSelectedIds(new Set()); }}
+            disabled={batchProcessing}
+          >
+            Clear selection
+          </Button>
+          <Button
+            size="sm"
+            variant="danger"
+            data-testid="tags-batch-delete"
+            onClick={() => { setConfirmBatchDelete(true); }}
+            disabled={batchProcessing}
+          >
+            {batchProcessing ? 'Processing…' : 'Delete'}
+          </Button>
+        </div>
+      )}
+
+      {/* The create form is a SIBLING of the table, not a row: the tag does not
+          exist yet, so it has no place in an ordered list of tags (the rules
+          table draws the same line with its own form). */}
+      {showCreate && (
+        <TagAppearanceForm
+          legend="New Tag"
+          submitLabel="Create Tag"
+          disabled={busy}
+          onSubmit={handleCreate}
+          onCancel={() => { setShowCreate(false); }}
+        />
+      )}
+
+      <table className="tbs-settings__table" role="table" aria-label="Tags">
+        <thead>
+          <tr>
+            <th scope="col" style={{ width: '32px' }}>
+              <input
+                type="checkbox"
+                checked={visibleTags.length > 0 && selectedIds.size === visibleTags.length}
+                onChange={() => {
+                  setSelectedIds(
+                    selectedIds.size === visibleTags.length
+                      ? new Set()
+                      : new Set(visibleTags.map((t) => t.id)),
+                  );
+                }}
+                aria-label="Select all tags"
+              />
+            </th>
+            {/* The NAME column carries the tag's identity: the colour pair is
+                rendered as a chip, so the columns answer "what is it" (the chip)
+                and "what is it called" (the text) separately. */}
+            <th scope="col">
+              <button
+                type="button"
+                className="tbs-settings__sortable"
+                onClick={toggleSort}
+                aria-label="Sort by Name"
+              >
+                Tag {sortDir === 'asc' ? '▲' : sortDir === 'desc' ? '▼' : ''}
+              </button>
+            </th>
+            <th scope="col">
+              <div className="tbs-settings__actions-head">
+                Actions
+                <button
+                  type="button"
+                  className="tbs-settings__sort-reset"
+                  onClick={() => { setSortDir(null); }}
+                  aria-label="Reset sorting"
+                  title="Reset sorting"
+                >
+                  <ResetIcon size={14} />
+                </button>
+              </div>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {visibleTags.map((tag) => {
+            const count = referenceCount(tag.id);
+            const isInspecting = inspectingIds.has(tag.id);
+            const isEditing = editingIds.has(tag.id);
+            return (
+              <Fragment key={tag.id}>
+                <tr data-testid={`tag-row-${tag.id}`}>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(tag.id)}
+                      onChange={() => {
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(tag.id)) next.delete(tag.id);
+                          else next.add(tag.id);
+                          return next;
+                        });
+                      }}
+                      aria-label={`Select tag ${tag.name}`}
+                    />
+                  </td>
+                  <td>
+                    {/* The icon IS the appearance: name on its own background in
+                        its own text colour, which is the whole of what a tag
+                        looks like. */}
+                    <TagChip tag={tag} />
+                  </td>
+                  <td>
+                    <div className="tbs-settings__row-actions">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Show items using ${tag.name}`}
+                        aria-expanded={isInspecting}
+                        onClick={() => {
+                          // Toggles THIS row's panel and touches no other row:
+                          // several inspections and several edits can be open
+                          // together, so no action here can silently dismiss
+                          // another row's open form.
+                          toggleInSet(setInspectingIds, tag.id);
+                        }}
+                      >
+                        {/* The count rides the Show control, because it is what
+                            the panel behind it contains — and it keeps C3's
+                            "an orphan is legible as an orphan (0)" visible
+                            without a column of its own. */}
+                        {`Show (${String(count)})`}
+                      </Button>
+                      <IconAction
+                        label={`Edit ${tag.name}`}
+                        expanded={isEditing}
+                        onClick={() => { toggleInSet(setEditingIds, tag.id); }}
+                      >
+                        <PencilIcon />
+                      </IconAction>
+                      <IconAction
+                        label={`Delete ${tag.name}`}
+                        danger
+                        onClick={() => { setConfirmDelete(tag); }}
+                      >
+                        <TrashIcon />
+                      </IconAction>
+                    </div>
+                  </td>
+                </tr>
+                {isEditing && (
+                  <tr className="tbs-settings__inline-editor-row">
+                    <td colSpan={3}>
+                      <TagAppearanceForm
+                        legend={`Edit ${tag.name}`}
+                        submitLabel="Save Tag"
+                        disabled={busy}
+                        initial={{ name: tag.name, backgroundColor: tag.backgroundColor, textColor: tag.textColor }}
+                        onSubmit={(appearance) => handleUpdate(tag.id, appearance)}
+                        onCancel={() => { toggleInSet(setEditingIds, tag.id); }}
+                      />
+                    </td>
+                  </tr>
+                )}
+                {isInspecting && (
+                  <tr>
+                    <td colSpan={3}>
+                      <TagAssociations
+                        tagId={tag.id}
+                        rules={rules}
+                        busy={busy}
+                        onRedirect={(ruleId) => { onRedirectToRule(ruleId); }}
+                        onUnlink={(ruleId) => { void handleUnlinkRule(ruleId, tag.id); }}
+                      />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+          {visibleTags.length === 0 && (
+            <tr>
+              <td colSpan={3}>
+                {/* Three states, not two. `!hasLoaded` is "the read is still out",
+                    which is NOT the same claim as "this machine has no tags" — the
+                    second is a fact about the user's data and may only be stated
+                    once it has been read. */}
+                {!hasLoaded ? (
+                  <p className="tbs-settings__loading" role="status" data-testid="tags-loading">
+                    Loading tags…
+                  </p>
+                ) : tags.length === 0 ? (
+                  <EmptyState
+                    variant="empty"
+                    message="No tags yet. Create one with + New Tag, or tag a rule from the sidebar."
+                  />
+                ) : (
+                  <EmptyState variant="no-match" action={{ label: 'Clear search', onClick: () => { setQuery(''); } }} />
+                )}
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+
+      {/* C4: the confirmation states the IMPACT — the rules that will lose the
+          tag, not a generic "are you sure". */}
+      <Confirm
+        open={confirmDelete !== null}
+        title={`Delete tag "${confirmDelete?.name ?? ''}"?`}
+        message={
+          confirmDelete
+            ? (referenceCount(confirmDelete.id) > 0
+                ? `This tag will be removed from ${String(referenceCount(confirmDelete.id))} ${referenceCount(confirmDelete.id) === 1 ? 'rule' : 'rules'}.`
+                : 'No rules use this tag; it will simply be removed.')
+            : ''
+        }
+        confirmLabel="Delete"
+        variant="danger"
+        onCancel={() => { setConfirmDelete(null); }}
+        onConfirm={() => { if (confirmDelete) void commitDelete(confirmDelete); }}
+      />
+
+      {/* C4 applied to the batch: the message states the IMPACT (how many rules lose
+          a tag in total), not a generic "are you sure" — and a batch that would strip
+          nothing is stated as such rather than dressed up as a risk. Names are listed
+          because a bulk delete is the one place the user cannot see the rows they
+          are about to lose (the list may be scrolled or filtered). */}
+      <Confirm
+        open={confirmBatchDelete}
+        title={`Delete ${String(selectedIds.size)} selected ${selectedIds.size === 1 ? 'tag' : 'tags'}?`}
+        message={(() => {
+          const affected = selectedTags.reduce((sum, t) => sum + referenceCount(t.id), 0);
+          const names = selectedTags.map((t) => `"${t.name}"`).join(', ');
+          const impact = affected > 0
+            ? `In total, they will be removed from ${String(affected)} ${affected === 1 ? 'rule' : 'rules'}.`
+            : 'No rules use them; they will simply be removed.';
+          return `${names}. ${impact}`;
+        })()}
+        confirmLabel="Delete"
+        variant="danger"
+        onCancel={() => { setConfirmBatchDelete(false); }}
+        onConfirm={() => { void handleBatchDelete(); }}
+      />
+
+      {undoState && (
+        <UndoBar
+          state={undoState}
+          onUndo={(snapshot) => { void handleTagUndo(snapshot); }}
+          onExpire={() => { setUndoState(null); }}
+        />
+      )}
+
+      {toast && <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />}
+    </section>
+  );
+
+  /** C5/P3: replay the delete's snapshot through ONE atomic `RESTORE_TAG`. */
+  async function handleTagUndo(snapshot: UndoSnapshot): Promise<void> {
+    setBusy(true);
+    try {
+      for (const write of snapshot.writes) {
+        if (write.kind === 'tag-delete') {
+          await sendMessage('RESTORE_TAG', { tag: write.tag, refs: write.refs });
+        } else if (write.kind === 'rule-tags') {
+          // The exact inverse of the unlink: write the set the rule had before.
+          // `SET_RULE_TAGS` replaces the whole list, so replaying it restores the
+          // relationship without needing to know which tag was removed.
+          await sendMessage('SET_RULE_TAGS', { ruleId: write.ruleId, tagIds: write.previousTagIds });
+        }
+      }
+      setUndoState(null);
+      setToast({ variant: 'success', message: 'Tag restored' });
+      await load();
+    } catch {
+      setToast({ variant: 'error', message: 'Could not restore the tag' });
+    } finally {
+      setBusy(false);
+    }
+  }
+}
+
+// ─── Tag appearance form (create + edit) ─────────────────────────────────────
+
+/** The three fields a tag has. One shape, so create and edit cannot drift. */
+interface TagAppearance {
+  name: string;
+  backgroundColor: string;
+  textColor: string;
+}
+
+/**
+ * The defaults a new tag starts from.
+ *
+ * The NAME is empty (the form's own concern) and the colours come from the shared
+ * `DEFAULT_TAG_APPEARANCE` — the same pair the import uses to fill a miss, so a tag
+ * created here and one created by an import cannot look different while both being
+ * called "the default".
+ */
+const NEW_TAG_APPEARANCE: TagAppearance = {
+  name: '',
+  ...DEFAULT_TAG_APPEARANCE,
+};
+
+/**
+ * The tag's own icon: its name drawn in its own text colour on its own background.
+ *
+ * This IS the tag's visual identity — there is no separate glyph to draw, because
+ * a tag is a coloured label. `textColor` carries the name's colour; the outline
+ * keeps a light-on-light pair (which the form permits) from vanishing against a
+ * white row without silently overriding either colour the user chose.
+ */
+function TagChip({ tag }: { tag: TagDefinition }) {
+  return (
+    <span
+      className="tbs-tag-chip tbs-tag-chip--swatch"
+      style={{ backgroundColor: tag.backgroundColor, color: tag.textColor }}
+    >
+      {tag.name}
+    </span>
+  );
+}
+
+/**
+ * The name + colours editor, shared by `+ New Tag` and per-row Edit.
+ *
+ * ONE component for both, because the two forms edit the same three fields and a
+ * second copy is how the validation ("is this a colour") or the palette would
+ * come to differ between creating and editing the same thing.
+ *
+ * `initial` is read ONCE (on mount) rather than on every render: the row's tag
+ * object is replaced by `load()` after any write, and re-seeding from it would
+ * discard whatever the user had typed since.
+ */
+function TagAppearanceForm({
+  legend,
+  submitLabel,
+  disabled,
+  initial,
+  onSubmit,
+  onCancel,
+}: {
+  legend: string;
+  submitLabel: string;
+  disabled: boolean;
+  initial?: TagAppearance;
+  /** Resolves to `true` when the write landed, so the form can close (or stay). */
+  onSubmit: (appearance: TagAppearance) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(initial?.name ?? NEW_TAG_APPEARANCE.name);
+  const [backgroundColor, setBackgroundColor] = useState(initial?.backgroundColor ?? NEW_TAG_APPEARANCE.backgroundColor);
+  const [textColor, setTextColor] = useState(initial?.textColor ?? NEW_TAG_APPEARANCE.textColor);
+  const [localError, setLocalError] = useState<string | null>(null);
+  /**
+   * "A submit is in flight", as a REF.
+   *
+   * `disabled` arrives from the parent's `busy` state, which only changes on the
+   * next render — so two submits in the SAME tick (a double click, a second Enter)
+   * both get past it and both create. A ref is synchronous, so it closes that
+   * window. The service's in-write dedupe is the other half: it decides WHO wins,
+   * this decides that only one is ever sent.
+   */
+  const submittingRef = useRef(false);
+
+  // Mirrors the service's rules so an invalid value never reaches the write. The
+  // SERVICE still validates (the UI is not the boundary); this is so the user
+  // learns it from the form rather than from a round trip.
+  const nameValid = isTagNameValid(name);
+  const colorsValid = isTagColorValid(backgroundColor) && isTagColorValid(textColor);
+  const canSubmit = nameValid && colorsValid && !disabled;
+
+  const submit = async (): Promise<void> => {
+    if (!nameValid) {
+      setLocalError(`Tag names must be 1-${String(TAG_NAME_MAX)} characters.`);
+      return;
+    }
+    if (!colorsValid) {
+      setLocalError('Colours must be hex values, like #3366CC.');
+      return;
+    }
+    if (disabled || submittingRef.current) return;
+    submittingRef.current = true;
+    setLocalError(null);
+    try {
+      // Close ONLY on success: a refused write (a duplicate name) must not discard
+      // what the user typed, which is what a close-on-submit would do.
+      if (await onSubmit({ name: name.trim(), backgroundColor, textColor })) {
+        setName('');
+        setBackgroundColor(NEW_TAG_APPEARANCE.backgroundColor);
+        setTextColor(NEW_TAG_APPEARANCE.textColor);
+        setLocalError(null);
+      }
+    } finally {
+      submittingRef.current = false;
+    }
+  };
+
+  return (
+    <div className="tbs-settings__rule-form" role="form" aria-label={legend}>
+      <h3>{legend}</h3>
+      {localError && <p role="alert" className="tbs-form-error">{localError}</p>}
+      <div className="tbs-settings__rule-form-grid">
+        <label className="tbs-tag-form__field">
+          <span>Name</span>
+          <input
+            type="text"
+            aria-label={`${legend} name`}
+            value={name}
+            maxLength={TAG_NAME_MAX}
+            onChange={(e) => { setName(e.target.value); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void submit(); } }}
+          />
+        </label>
+
+        {/* The preview sits beside the two colour controls, because it shows the
+            pair together — which is the thing being chosen. */}
+        <div className="tbs-tag-form__preview">
+          <span className="tbs-tag-form__preview-label">Preview</span>
+          <TagChip tag={{ id: 'preview', name: name.trim() === '' ? 'Preview' : name, backgroundColor, textColor }} />
+        </div>
+
+        <ColorField
+          label="Background Color"
+          value={backgroundColor}
+          presets={PRESET_BG_COLORS}
+          ariaLabel={`${legend} background color`}
+          onChange={setBackgroundColor}
+        />
+        <ColorField
+          label="Text Color"
+          value={textColor}
+          presets={PRESET_TEXT_COLORS}
+          ariaLabel={`${legend} text color`}
+          onChange={setTextColor}
+        />
+      </div>
+      <div className="tbs-settings__rule-form-actions">
+        <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+        {/* A tag that is white-on-white, or unreadable, is offered a fix rather
+            than blocked: the pair is a legibility judgement the user can make
+            once they can see it, and "Auto" states what it did. */}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => { setTextColor(autoTextColor(backgroundColor)); }}
+        >
+          Auto text colour
+        </Button>
+        <Button size="sm" variant="primary" onClick={() => void submit()} disabled={!canSubmit} loading={disabled}>
+          {submitLabel}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A native colour input plus the app's preset palette.
+ *
+ * The same interaction as the icon editor (`type="color"` + swatches), reusing
+ * `PRESET_BG_COLORS` / `PRESET_TEXT_COLORS` so the two pickers offer one
+ * vocabulary — a tag doing its own palette would be a difference with no reason
+ * behind it.
+ */
+function ColorField({
+  label,
+  value,
+  presets,
+  ariaLabel,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  presets: string[];
+  ariaLabel: string;
+  onChange: (next: string) => void;
+}) {
+  // A native colour input only accepts `#RRGGBB`. A stored `#fff` is therefore
+  // DISPLAYED as-is above (never rewritten) while the swatch input is seeded with
+  // its expanded form, so opening the editor cannot canonicalise a value the user
+  // did not touch.
+  const expanded = value.length === 4
+    ? `#${value[1]}${value[1]}${value[2]}${value[2]}${value[3]}${value[3]}`
+    : value;
+  return (
+    <div className="tbs-tag-form__field">
+      <span>{label}</span>
+      <div className="tbs-icon-editor__colors">
+        <input
+          type="color"
+          value={expanded}
+          onChange={(e) => { onChange(e.currentTarget.value); }}
+          aria-label={ariaLabel}
+          className="tbs-icon-editor__color-input"
+        />
+        {presets.map((c) => (
+          <button
+            key={c}
+            type="button"
+            className={`tbs-icon-editor__swatch${value.toLowerCase() === c.toLowerCase() ? ' tbs-icon-editor__swatch--active' : ''}`}
+            style={{ background: c }}
+            onClick={() => { onChange(c); }}
+            aria-label={`${label} ${c}`}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Tag associations (which items use this tag) ─────────────────────────────
+
+/**
+ * "Which items use this tag", behind the row's Show action.
+ *
+ * A TAB STRIP with one tab, because the rule system is currently the only tag
+ * dimension. The single tab is deliberate rather than a hard-coded list: when a
+ * second dimension gains tags (slots, say) it becomes a second `TabItem` and a
+ * second panel — no restructuring, and the tab strip already behaves correctly
+ * with one entry.
+ *
+ * The rule list mirrors the rules table's vocabulary (search, sortable Title,
+ * reset) with ONE deliberate difference: no Priority sort. Priority orders how
+ * rules COMPETE for a tab; inside "rules using this tag" it orders nothing the
+ * reader is comparing, so offering it would be a control with no question behind
+ * it.
+ *
+ * The two actions are not the same verb:
+ *   - Redirect jumps to the rule on the Page Rules page (the app's one jump);
+ *   - Delete removes THIS tag from that ONE rule (`SET_RULE_TAGS`), never
+ *     `DELETE_TAG` — from inside "which rules use this tag", "delete" means stop
+ *     using it here, and destroying the tag globally from here would be a
+ *     different and much larger act than the button implies.
+ */
+function TagAssociations({
+  tagId,
+  rules,
+  busy,
+  onRedirect,
+  onUnlink,
+}: {
+  tagId: string;
+  rules: PageRule[];
+  busy: boolean;
+  onRedirect: (ruleId: string) => void;
+  onUnlink: (ruleId: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc' | null>(null);
+
+  const linked = rules.filter((r) => r.tagIds.includes(tagId));
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const matching = needle === ''
+      ? linked
+      : linked.filter((r) =>
+          (r.title ?? '').toLowerCase().includes(needle)
+          || r.urlMatch.value.toLowerCase().includes(needle));
+    if (sortDir === null) return matching;
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...matching].sort(
+      (a, b) => dir * (a.title ?? '').localeCompare(b.title ?? '', undefined, { numeric: true }),
+    );
+  }, [linked, query, sortDir]);
+
+  return (
+    <div className="tbs-tag-assoc" data-testid={`tag-associations-${tagId}`}>
+      <Tabs
+        items={[{ id: 'rule', label: 'Rules', badge: String(linked.length) }]}
+        value="rule"
+        onChange={() => { /* one dimension today; see the component note */ }}
+        label={`Items using this tag`}
+        idPrefix={`tag-assoc-${tagId}`}
+      />
+      <div
+        className="tbs-settings__tabpanel"
+        id={`tag-assoc-${tagId}-panel-rule`}
+        role="tabpanel"
+        aria-label="Rules using this tag"
+        tabIndex={0}
+      >
+        {/* The search sits above the list it narrows, matching every other list
+            in the app (rules, dashboard, import) rather than introducing a new
+            position for the same control. */}
+        <div className="tbs-settings__toolbar">
+          <SearchField
+            testId={`tag-assoc-search-${tagId}`}
+            placeholder="Search rules..."
+            value={query}
+            onChange={setQuery}
+            ariaLabel="Search linked rules"
+          />
+        </div>
+
+        {linked.length === 0 ? (
+          // C3: an orphan is stated, not left as an empty box — "nothing uses
+          // this tag" is the fact the panel exists to report.
+          <p className="tbs-settings__result-note">
+            No rules use this tag yet. It is available to pick in any rule.
+          </p>
+        ) : (
+          <table className="tbs-settings__table" role="table" aria-label="Rules using this tag">
+            <thead>
+              <tr>
+                <th scope="col" style={{ width: '32px' }}>Icon</th>
+                <th scope="col">
+                  <button
+                    type="button"
+                    className="tbs-settings__sortable"
+                    onClick={() => { setSortDir((prev) => (prev === null ? 'asc' : prev === 'asc' ? 'desc' : null)); }}
+                    aria-label="Sort linked rules by Title"
+                  >
+                    Title {sortDir === 'asc' ? '▲' : sortDir === 'desc' ? '▼' : ''}
+                  </button>
+                </th>
+                <th scope="col">URL Pattern</th>
+                <th scope="col">Priority</th>
+                <th scope="col">
+                  <div className="tbs-settings__actions-head">
+                    Actions
+                    <button
+                      type="button"
+                      className="tbs-settings__sort-reset"
+                      onClick={() => { setSortDir(null); }}
+                      aria-label="Reset linked-rule sorting"
+                      title="Reset sorting"
+                    >
+                      <ResetIcon size={14} />
+                    </button>
+                  </div>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((rule) => (
+                <tr key={rule.id} data-testid={`tag-assoc-row-${tagId}-${rule.id}`}>
+                  <td>
+                    {/* The rule's OWN icon, rendered through the shared preview so
+                        a recipe is drawn from its values rather than from its
+                        materialised bitmap (R2). */}
+                    <IconPreview source={previewFromIconSource(rule.favicon)} size={16} />
+                  </td>
+                  <td>{rule.title ?? '—'}</td>
+                  <td title={rule.urlMatch.value}>
+                    <code>{rule.urlMatch.type === 'regex' ? `/${rule.urlMatch.value}/` : rule.urlMatch.value}</code>
+                  </td>
+                  <td>{rule.priority}</td>
+                  <td>
+                    <div className="tbs-settings__row-actions">
+                      <IconAction
+                        label={`Go to rule ${rule.title ?? rule.urlMatch.value}`}
+                        onClick={() => { onRedirect(rule.id); }}
+                      >
+                        <GoToIcon />
+                      </IconAction>
+                      <IconAction
+                        label={`Remove this tag from rule ${rule.title ?? rule.urlMatch.value}`}
+                        danger
+                        disabled={busy}
+                        onClick={() => { onUnlink(rule.id); }}
+                      >
+                        <TrashIcon />
+                      </IconAction>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {visible.length === 0 && (
+                <tr>
+                  <td colSpan={5}>
+                    <EmptyState variant="no-match" action={{ label: 'Clear search', onClick: () => { setQuery(''); } }} />
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ─── Inline Rule Editor (Module 2: row-level expandable editor) ─────────────
 
@@ -579,6 +1722,25 @@ interface InlineRuleEditorProps {
     expectedUpdatedAt: string,
   ) => Promise<{ success: boolean; errorCode?: string; message?: string }>;
   onCancel: () => void;
+  /**
+   * The table's CURRENT column count, handed in rather than hard-coded: the
+   * Tags column (D-c) changes it, and a fixed span would leave the editor's row
+   * one cell short of the header the moment the column is toggled on.
+   */
+  colSpan?: number;
+  /** G3: the live tag table, so the editor can show and change this rule's tags. */
+  availableTags: TagDefinition[];
+  /** G3/D-f: create a tag in place — the parent owns the one write path. */
+  onCreateTag: (appearance: { name: string; backgroundColor: string; textColor: string }) => Promise<TagDefinition | null>;
+  /**
+   * G3: write this rule's tags AFTER the rule itself saved.
+   *
+   * `SET_RULE_TAGS` is a separate message (A1: tags cannot reach the delivery
+   * path), so it is a second write — and the ORDER matters: the rule must exist
+   * before a tag can reference it. The parent owns it because it owns the tag
+   * table refresh; this editor only knows which ids the user picked.
+   */
+  onSaveTags: (ruleId: string, tagIds: string[]) => Promise<void>;
 }
 
 /**
@@ -586,7 +1748,7 @@ interface InlineRuleEditorProps {
  * form state (each expanded editor is isolated). Carries the rule's `updatedAt`
  * captured at open time as `expectedUpdatedAt` for lightweight version checking.
  */
-function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
+function InlineRuleEditor({ rule, onSave, onCancel, colSpan = 7, availableTags, onCreateTag, onSaveTags }: InlineRuleEditorProps) {
   const hasIcon = !!rule.favicon?.value;
   // FIX-C: derive from the SOURCE TYPE, never from the value's shape. A recipe
   // whose value was materialized to a PNG would otherwise be classified as an
@@ -616,6 +1778,16 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
   );
   const [priority, setPriority] = useState(rule.priority);
   const [enabled, setEnabled] = useState(rule.enabled !== false);
+  /**
+   * G3: seeded from the RULE, not from the tag table.
+   *
+   * A rule's tags are its own stored state, so the editor opens showing what the
+   * rule currently carries. Reading them from `rule.tagIds` (rather than from
+   * "which tags point back at this rule") also means an id whose tag was deleted is
+   * still submitted back unchanged — the editor does not silently drop a reference
+   * the user never touched.
+   */
+  const [tagIds, setTagIds] = useState<string[]>(rule.tagIds);
   const [status, setStatus] = useState<'idle' | 'saving'>('idle');
   const [error, setError] = useState<string | null>(null);
 
@@ -669,14 +1841,21 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
       );
       return;
     }
+    // G3: the tags are a SECOND write, and only after the rule landed — a tag
+    // reference to a rule that does not exist yet would be the C7 broken state.
+    // A failure here does NOT roll the rule back: tags are an organising
+    // dimension and do not affect delivery, so losing them is a smaller harm than
+    // discarding an edit the user made to the rule itself. It is reported instead
+    // of swallowed (D-f: the write never happens silently).
+    await onSaveTags(rule.id, tagIds);
     setStatus('idle');
     setError(null);
     onCancel();
-  }, [url, matchType, titleMode, iconMode, iconConfig, priority, enabled, rule.id, expectedUpdatedAt, onSave, onCancel]);
+  }, [url, matchType, titleMode, iconMode, iconConfig, priority, enabled, rule.id, expectedUpdatedAt, onSave, onCancel, tagIds, onSaveTags]);
 
   return (
     <InlineEditorShell
-      colSpan={7}
+      colSpan={colSpan}
       title="Edit Rule"
       ariaLabel={`Edit rule ${rule.id}`}
       // D-16 / IMP-15: Escape collapses the row.
@@ -707,6 +1886,7 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
           iconConfig,
           priority,
           enabled,
+          tagIds,
         }}
         onChange={(patch) => {
           if (patch.url !== undefined) setUrl(patch.url);
@@ -716,7 +1896,12 @@ function InlineRuleEditor({ rule, onSave, onCancel }: InlineRuleEditorProps) {
           if (patch.iconConfig !== undefined) setIconConfig(patch.iconConfig);
           if (patch.priority !== undefined) setPriority(patch.priority);
           if (patch.enabled !== undefined) setEnabled(patch.enabled);
+          if (patch.tagIds !== undefined) setTagIds(patch.tagIds);
         }}
+        // G3: the tag table and the create-in-place hook, so this editor edits
+        // tags the same way the sidebar modal does — one shared field set.
+        availableTags={availableTags}
+        onCreateTag={onCreateTag}
         prefill={{ url: rule.urlMatch.value }}
         chain={titleChain}
         titleChain={titleChain}
@@ -776,6 +1961,27 @@ function RulesSection() {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   /** Sort state for the rules table (key + direction). null = no sort (insertion order). */
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' } | null>(null);
+  /**
+   * The tag-table snapshot this section filters against. `tags` is read here (not
+   * passed down) because the expression must resolve names AND detect a deleted
+   * reference, and both are facts about THIS machine's live table.
+   */
+  const [tags, setTags] = useState<TagDefinition[]>([]);
+  /** D0/C6/C7: the chip-expression filter. `[]` = no expression yet. */
+  const [tagExpression, setTagExpression] = useState<ChipToken[]>([]);
+  /**
+   * D-c: whether the Tags column is shown. Default OFF, and OFF means the column
+   * is NOT RENDERED — eight tag chips would otherwise squeeze out URL Pattern,
+   * the highest-density column in the table. The reason is structural, not
+   * aesthetic, which is why "not in the DOM" is the assertion.
+   */
+  const [showTagsColumn, setShowTagsColumn] = useState(false);
+  /**
+   * The expression as a STABLE KEY for the D-13 prune dependency: two equal chip
+   * sequences produce the same string, so re-renders that rebuild the array do
+   * not re-run the prune.
+   */
+  const tagFilterKey = JSON.stringify(tagExpression);
 
   // Load rules from background (D-15: a failure becomes a non-blocking error state).
   const loadRules = useCallback(async () => {
@@ -784,6 +1990,9 @@ function RulesSection() {
       const result = extractResult(res);
       if (result?.success && (result.sync as Record<string, unknown>)?.rules) {
         setRules((result.sync as { rules: PageRule[] }).rules);
+        // D0: the tag table, from the SAME snapshot — the expression resolves
+        // against it and a deleted reference is detected against it.
+        setTags((result.sync as { tags?: TagDefinition[] }).tags ?? []);
         setLoadError(false);
       } else if (result && result.success === false) {
         setLoadError(true);
@@ -802,6 +2011,78 @@ function RulesSection() {
     };
     chrome.storage?.onChanged?.addListener(onStorageChanged);
     return () => { chrome.storage?.onChanged?.removeListener(onStorageChanged); };
+  }, [loadRules]);
+
+  /**
+   * G5/D-b: create a tag from the expression filter's chip input.
+   *
+   * Uses the SAME `CREATE_TAG` message every other create-in-place surface uses
+   * (`TagsSection` above, the sidebar's rule modal) — the requirement is that a
+   * tag created anywhere is indistinguishable from one created on the manage
+   * page, so there is one write path and no second dialect of "new tag".
+   *
+   * This was a STUB (`async () => null`) until now, which is the worst of the
+   * three possible states: worse than not offering the control, because the
+   * create row appears EXACTLY when the typed name matches no existing tag — so
+   * the user is looking at "Create tag X" at the moment it silently does nothing.
+   *
+   * The tag is NOT rolled back if the expression is then cleared: the same D-f
+   * outcome the sidebar documents (it becomes an orphan, visible on the Tags
+   * page). Cancelling a filter is not a reason to delete a tag the user named.
+   */
+  const handleCreateTag = useCallback(async (appearance: { name: string; backgroundColor: string; textColor: string }): Promise<TagDefinition | null> => {
+    try {
+      // The appearance comes from the caller, not from a constant here: the
+      // sidebar's selector offers both colours, so a tag made from a rule form is
+      // the same object as one made on the Tags page.
+      const res = await sendMessage('CREATE_TAG', {
+        name: appearance.name,
+        backgroundColor: appearance.backgroundColor,
+        textColor: appearance.textColor,
+      });
+      const result = extractResult(res);
+      if (result?.success && result.tag) {
+        // Refresh on the section's OWN channel: `loadRules` re-reads the rules
+        // AND the tag table from ONE snapshot, so the new tag both appears as a
+        // candidate chip and resolves as an expression operand. `TagExpressionInput`
+        // appends the created chip from the returned value, so the two agree.
+        await loadRules();
+        return result.tag as TagDefinition;
+      }
+      setToast({ variant: 'error', message: (result?.message as string) || 'Could not create the tag' });
+      return null;
+    } catch {
+      setToast({ variant: 'error', message: 'Could not create the tag' });
+      return null;
+    }
+  }, [loadRules]);
+
+  /**
+   * G3: write a rule's tags — the SECOND half of saving a rule, on both the create
+   * and the edit path.
+   *
+   * `SET_RULE_TAGS` rather than a field on the rule: tags travel in their own
+   * message (A1) so they cannot reach the delivery path. It is called only after
+   * the rule write succeeded, because a tag reference needs its rule to exist.
+   *
+   * A failure is reported and NOT rolled back — the same D-f outcome the sidebar
+   * documents: tags are an organising dimension, so losing them is a smaller harm
+   * than discarding the rule the user just saved.
+   */
+  const handleSaveTags = useCallback(async (ruleId: string, tagIds: string[]): Promise<void> => {
+    try {
+      const res = await sendMessage('SET_RULE_TAGS', { ruleId, tagIds });
+      const result = extractResult(res);
+      if (result && result.success === false) {
+        setToast({ variant: 'error', message: (result.message as string) || 'Could not save the rule\'s tags' });
+        return;
+      }
+      // Re-read on the section's own channel so the Tags column and the tag
+      // reference counts reflect the write without a manual refresh.
+      void loadRules();
+    } catch {
+      setToast({ variant: 'error', message: 'Could not save the rule\'s tags' });
+    }
   }, [loadRules]);
 
   const handleNewRule = () => {
@@ -916,6 +2197,11 @@ function RulesSection() {
       });
       const result = extractResult(res);
       if (result?.success) {
+        // G3: the tags go in AFTER the rule exists. `createRule` returns the new
+        // rule, so its id is what the tag write targets — without it there would be
+        // nothing to reference and the selection would be silently dropped.
+        const createdId = (result.rule as { id?: string } | undefined)?.id;
+        if (createdId) await handleSaveTags(createdId, form.tagIds);
         setShowForm(false);
         setForm(EMPTY_RULE_FORM);
         setToast({ variant: 'success', message: 'Rule created' });
@@ -1021,19 +2307,40 @@ function RulesSection() {
     }
   };
 
+  // C6/C7: the expression's decision, computed ONCE and shared by the filter and
+// the notice. `applied` depends only on the chips and the tag table (never on a
+// rule), so the notice and the list cannot disagree about whether filtering is
+// happening — which is exactly the kind of two-source drift a single computation
+// prevents.
+  const expressionState = evaluateExpression(tagExpression, new Set<string>(), tags);
+
   const filteredRules = (() => {
     const matching = rules.filter((r) =>
       r.urlMatch.value.toLowerCase().includes(search.toLowerCase()) ||
       (r.title ?? '').toLowerCase().includes(search.toLowerCase())
     );
-    if (!sort) return matching;
+    // The expression is a SECOND, independent filter (G6). It applies ONLY when
+    // `applied`: an incomplete/empty expression or a reference to a deleted tag
+    // means "do not filter", which shows EVERYTHING rather than nothing (C6/C7 —
+    // the rejected failure mode was filtering to an empty list).
+    const byExpression = expressionState.applied
+      ? matching.filter((r) => evaluateExpression(tagExpression, new Set(r.tagIds), tags).matched)
+      : matching;
+    if (!sort) return byExpression;
     const dir = sort.dir === 'asc' ? 1 : -1;
-    return [...matching].sort((a, b) => dir * compareRules(a, b, sort.key));
+    return [...byExpression].sort((a, b) => dir * compareRules(a, b, sort.key));
   })();
 
   // D-13 (default (a) AUTO-PRUNE): a selection must never outlive visibility.
   // "What you see is what you operate on" — a hidden id is removed from the
   // selection whenever the visible set changes.
+  //
+  // `tagFilterKey` is the EXPRESSION's input to this effect: a filter that can
+  // hide rows IS a visibility input, so leaving it out would let a selected row
+  // survive while the expression hides it — exactly the state D-13 exists to
+  // prevent (R1). The key is a STRING (the chip sequence serialised) rather than
+  // the chips array, so a re-render that rebuilds an equal array does not re-run
+  // the prune for no reason.
   useEffect(() => {
     const visible = new Set(filteredRules.map((r) => r.id));
     setSelectedIds((prev) => {
@@ -1043,7 +2350,7 @@ function RulesSection() {
       return next.size === prev.size ? prev : next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, sort, rules]);
+  }, [search, sort, rules, tagFilterKey]);
 
   const toggleSort = (key: SortKey) => {
     setSort((prev) => {
@@ -1058,15 +2365,86 @@ function RulesSection() {
     <section aria-label="Page rewrite rules">
       <h2>Page Rewrite Rules</h2>
 
+      {/* G6: the chip expression filter, BESIDE the text search. They answer
+          different questions — the expression asks "which tags?", the search
+          looks for a literal — so neither replaces the other. T15 adds the
+          pause messages and the Tags column on top of this control. */}
+      <TagExpressionInput
+        chips={tagExpression}
+        onChange={setTagExpression}
+        availableTags={tags}
+        // G5/D-b: creating a tag from here writes it like every other surface.
+        // The control used to be wired to a stub, so "Create tag X" appeared and
+        // then did nothing — a dead control wearing the one label that promises
+        // a write.
+        //
+        // The FILTER box only knows a NAME (there is no colour picker in a filter
+        // bar), so it supplies the house default rather than pretending to ask.
+        // The rule-form selector, which does offer both colours, passes its own.
+        onCreateTag={(name) => handleCreateTag({
+          name,
+          ...DEFAULT_TAG_APPEARANCE,
+        })}
+      />
+
+      {/* C6 / C7: the expression is NOT filtering, and WHY differs.
+          They are two notices because they say different things and are fixed
+          differently — merging them loses the one piece of information that
+          makes the paused state diagnosable. */}
+      {!expressionState.applied && (
+        expressionState.missingTagIds.length > 0 ? (
+          // C7: a complete expression referencing a DELETED tag. It NAMES the
+          // tags, using each chip's insert-time name (the live table cannot name
+          // something it no longer has — D2).
+          <p className="tbs-settings__tag-notice tbs-settings__tag-notice--missing" data-testid="tag-filter-notice" role="status">
+            {`The expression uses ${expressionState.missingTagIds
+              .map((id) => {
+                const chip = tagExpression.find((c) => c.kind === 'tag' && c.tagId === id);
+                return chip && chip.kind === 'tag' ? `"${resolveChipDisplayName(chip, tags)}"` : `"${id}"`;
+              })
+              .join(', ')} — already deleted, so nothing is filtered. Adjust the expression.`}
+          </p>
+        ) : (
+          // C6: incomplete or empty — the user is mid-edit. It names NOTHING,
+          // because there is nothing to name and a name here would read as a
+          // problem with a tag rather than with the expression.
+          <p className="tbs-settings__tag-notice" data-testid="tag-filter-notice" role="status">
+            {tagExpression.length === 0
+              ? 'No tag filter — showing all rules.'
+              : 'The expression is incomplete, so nothing is filtered. Finish it to narrow the list.'}
+          </p>
+        )
+      )}
+
       <div className="tbs-settings__toolbar">
-        <input
-          type="text"
-          className="tbs-settings__search"
+        {/* The shared search box. It was a hand-rolled `type="text"` input here —
+        the one site the consolidation missed (every other box was found by
+        searching for `type="search"`), so this toolbar had a box without the clear
+        button and without the keyboard focus ring. */}
+        <SearchField
           placeholder="Search rules..."
           value={search}
-          onChange={(e) => { setSearch(e.target.value); }}
-          aria-label="Search rules"
+          onChange={setSearch}
+          ariaLabel="Search rules"
         />
+        {/* D-c: the Tags column's show/hide control.
+            
+            It was a 20px square carrying `⊘` and nothing else. Two problems, both
+            reported: a glyph is not a label (the accessible name lived only in
+            `aria-label`, so a sighted user saw a symbol they had to guess at), and
+            a 20px target is below the density floor this table is built to. It is a
+            normal small button now, whose TEXT states the state — the same
+            convention as the batch bar's Enable/Disable, and unlike an icon it
+            cannot be misread. */}
+        <Button
+          size="sm"
+          variant="secondary"
+          data-testid="rules-tags-column-toggle"
+          aria-pressed={showTagsColumn}
+          onClick={() => { setShowTagsColumn((v) => !v); }}
+        >
+          {showTagsColumn ? 'Hide Tags column' : 'Show Tags column'}
+        </Button>
         <Button size="sm" variant="primary" aria-label="Create new rule" onClick={handleNewRule}>+ New Rule</Button>
       </div>
 
@@ -1099,8 +2477,14 @@ function RulesSection() {
               iconMode: form.iconMode,
               iconConfig: form.iconConfig,
               priority: form.priority,
+              tagIds: form.tagIds,
             }}
             onChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
+            // G3: the tag table and the create-in-place hook — the SAME two props
+            // the sidebar modal passes, so "which tags does this rule carry" is one
+            // control on every surface that asks it.
+            availableTags={tags}
+            onCreateTag={handleCreateTag}
             prefill={{ url: '' }}
             chain={emptyChain()}
             titleChain={emptyChain()}
@@ -1173,6 +2557,13 @@ function RulesSection() {
                 Priority {sort?.key === 'priority' ? (sort.dir === 'asc' ? '▲' : '▼') : ''}
               </button>
             </th>
+            {/* D-c: rendered ONLY when toggled on — not rendered-and-empty. Tags
+                is not a rule property, so unlike every other column it is NOT
+                sortable; giving it a sort control would offer an ordering the
+                table does not have. */}
+            {showTagsColumn && (
+              <th scope="col" data-testid="rules-col-tags">Tags</th>
+            )}
             <th scope="col">
               <button
                 type="button"
@@ -1193,7 +2584,7 @@ function RulesSection() {
                   aria-label="Reset sorting"
                   title="Reset sorting"
                 >
-                  ↺
+                  <ResetIcon size={14} />
                 </button>
               </div>
             </th>
@@ -1225,6 +2616,25 @@ function RulesSection() {
                   <code>{rule.urlMatch.type === 'regex' ? `/${rule.urlMatch.value}/` : rule.urlMatch.value}</code>
                 </td>
                 <td>{rule.priority}</td>
+                {showTagsColumn && (
+                  <td data-testid={`rule-tags-${rule.id}`}>
+                    {rule.tagIds.length === 0 ? '—' : rule.tagIds.map((id) => {
+                      const tag = tags.find((t) => t.id === id);
+                      // A deleted reference keeps its cell (C7: no auto-removal)
+                      // and names itself as the chip's insert-time name would.
+                      return (
+                        <span
+                          key={id}
+                          className="tbs-tag-chip"
+                          style={tag ? { backgroundColor: tag.backgroundColor } : undefined}
+                          title={tag ? tag.name : 'deleted tag'}
+                        >
+                          {tag ? tag.name : id}
+                        </span>
+                      );
+                    })}
+                  </td>
+                )}
                 <td>
                   <label className="tbs-settings__toggle" title={rule.enabled !== false ? 'Enabled' : 'Disabled'}>
                     <input
@@ -1238,18 +2648,20 @@ function RulesSection() {
                 </td>
                 <td>
                   <div className="tbs-settings__row-actions">
-                    <Button
-                      size="sm"
-                      variant="ghost"
+                    <IconAction
+                      label={`Edit rule ${rule.id}`}
+                      expanded={expandedRuleIds.has(rule.id)}
                       onClick={() => { toggleExpand(rule.id); }}
-                      aria-label={`Edit rule ${rule.id}`}
-                      aria-expanded={expandedRuleIds.has(rule.id)}
                     >
-                      ✏️
-                    </Button>
-                    <Button size="sm" variant="danger" onClick={() => { setConfirmDeleteId(rule.id); }} aria-label={`Delete rule ${rule.title ?? rule.urlMatch.value}`}>
-                      🗑️
-                    </Button>
+                      <PencilIcon />
+                    </IconAction>
+                    <IconAction
+                      label={`Delete rule ${rule.title ?? rule.urlMatch.value}`}
+                      danger
+                      onClick={() => { setConfirmDeleteId(rule.id); }}
+                    >
+                      <TrashIcon />
+                    </IconAction>
                   </div>
                 </td>
               </tr>
@@ -1259,13 +2671,23 @@ function RulesSection() {
                   rule={rule}
                   onSave={handleInlineSave}
                   onCancel={() => { toggleExpand(rule.id); }}
+                  colSpan={showTagsColumn ? 8 : 7}
+                  // G3: this editor edits tags too — the same shared control the
+                  // New Rule form and the sidebar modal render, so "which tags does
+                  // this rule carry" is answered identically on all three.
+                  availableTags={tags}
+                  onCreateTag={handleCreateTag}
+                  onSaveTags={handleSaveTags}
                 />
               )}
             </Fragment>
           ))}
           {filteredRules.length === 0 && (
             <tr>
-              <td colSpan={7}>
+              {/* The empty state must span the columns that are ACTUALLY shown:
+                  a hard-coded 7 would under-span (leaving a gap) once the Tags
+                  column appears. */}
+              <td colSpan={showTagsColumn ? 8 : 7}>
                 {loadError && !hasLoadedOnce ? (
                   <EmptyState variant="error-first" action={{ label: 'Retry', onClick: () => void loadRules() }} />
                 ) : loadError ? (
@@ -2087,16 +3509,14 @@ function DashboardSection() {
           is, and ABOVE the bulk actions: narrowing the list is how a user makes
           a bulk Clear safe, so it must be reachable before the buttons rather
           than after them. Same control vocabulary as the import/export record
-          lists (`tbs-settings__search` + `tbs-settings__filter-select`). */}
+          lists (`tbs-shared-search` + `tbs-settings__filter-select`). */}
       <div className="tbs-settings__toolbar" role="group" aria-label="Filter dashboard items">
-        <input
-          type="search"
-          className="tbs-settings__search"
-          data-testid="dashboard-search"
+        <SearchField
+          testId="dashboard-search"
           placeholder="Search title or Match URL"
           value={query}
-          onChange={(e) => { setQuery(e.currentTarget.value); }}
-          aria-label="Search dashboard items"
+          onChange={setQuery}
+          ariaLabel="Search dashboard items"
         />
         <select
           className="tbs-settings__filter-select"
@@ -2213,7 +3633,7 @@ function DashboardSection() {
                   aria-label="Reset dashboard sort"
                   title="Reset sort"
                 >
-                  ↺
+                  <ResetIcon size={14} />
                 </button>
               </div>
             </th>
@@ -2277,13 +3697,33 @@ function DashboardSection() {
                   </td>
                   <td>
                     <div className="tbs-settings__row-actions">
-                      {/* D-9: the label is the readable name, not the internal id. */}
-                      <Button size="sm" variant="secondary" onClick={() => { openEdit(entry); }} disabled={busy} aria-label={`Edit ${entry.label}`}>
-                        Edit
-                      </Button>
-                      <Button size="sm" variant="danger" onClick={() => { setConfirmReset({ kind: 'entry', id: entry.id }); }} disabled={busy} aria-label={`Clear ${entry.label}`}>
-                        Clear
-                      </Button>
+                      {/* D-9: the label is the readable name, not the internal id.
+                          It is ALSO the tooltip now — an icon-only control has no
+                          visible text, so the name has to be stated somewhere the
+                          user can reach; `IconAction` keeps it in `aria-label`,
+                          the styled tooltip and `title` from one prop, so the
+                          sighted label and the announced one cannot drift.
+
+                          These were the last two TEXT row-actions in the app (the
+                          Tags, association and rule tables already draw icons),
+                          which made the Dashboard the one place where the same
+                          Edit/Remove pair read differently. Same pencil and bin,
+                          same `danger` colour for the destructive one. */}
+                      <IconAction
+                        label={`Edit ${entry.label}`}
+                        disabled={busy}
+                        onClick={() => { openEdit(entry); }}
+                      >
+                        <PencilIcon />
+                      </IconAction>
+                      <IconAction
+                        label={`Clear ${entry.label}`}
+                        danger
+                        disabled={busy}
+                        onClick={() => { setConfirmReset({ kind: 'entry', id: entry.id }); }}
+                      >
+                        <TrashIcon />
+                      </IconAction>
                     </div>
                   </td>
                 </tr>
@@ -2454,7 +3894,7 @@ function ExportSection({
   onRefreshed?: () => void;
 } = {}) {
   const [checked, setChecked] = useState<Record<keyof DimensionPresence, boolean>>({
-    slots: false, rules: false, settings: false, shortcuts: false,
+    slots: false, rules: false, settings: false, shortcuts: false, tags: false,
   });
   /** T19-C: per-record deselection inside a selected dimension (D1). */
   const [excludedSlots, setExcludedSlots] = useState<number[]>([]);
@@ -2463,6 +3903,30 @@ function ExportSection({
   const [excludedSettings, setExcludedSettings] = useState<string[]>([]);
   /** Shortcut bindings (by command name) the user left out. */
   const [excludedShortcuts, setExcludedShortcuts] = useState<string[]>([]);
+  /**
+   * Tags (by NAME — a package's tag identity is its name, A4) the user left out.
+   *
+   * The per-tag picker that FILLS this is T17's; the state and its subtract-only
+   * shape (mirroring `excludedSlotIds`, R24) are established here so the export
+   * scope is complete and `excludedTagNames` exists on the request from the
+   * start. T17 wires the control that writes it.
+   */
+  const [excludedTags, setExcludedTags] = useState<string[]>([]);
+  /**
+   * The export tag picker's own search.
+   *
+   * A vocabulary is a vocabulary: it can be long, and scanning a row of chips for
+   * one name is the same problem every other list here already solved with a
+   * search box. Filtering is by NAME only — that is the tag's identity (A4), and a
+   * colour is not something a user searches by.
+   */
+  const [tagQuery, setTagQuery] = useState('');
+  /**
+   * D-e: the pending self-consistency decision, or null. Holds the computed
+   * difference object itself, so the dialog renders the SAME value the gate
+   * tested (one source for both).
+   */
+  const [consistencyChoice, setConsistencyChoice] = useState<ExportSelfConsistency | null>(null);
   /**
    * The records a package could carry, from the SAME GET_STATE snapshot the
    * import section uses (one source of truth, one fetch per surface). `null`
@@ -2475,6 +3939,7 @@ function ExportSection({
   const [records, setRecords] = useState<{
     slots: SlotDefinition[];
     rules: PageRule[];
+    tags: TagDefinition[];
     matchSettings: MatchRuleSettings;
     switchDirection: SwitchDirection;
     autoBindGlobal: boolean;
@@ -2505,6 +3970,7 @@ function ExportSection({
         ? (result.sync as {
             slots?: SlotDefinition[];
             rules?: PageRule[];
+            tags?: TagDefinition[];
             matchSettings?: MatchRuleSettings;
             switchDirection?: SwitchDirection;
             autoBindGlobal?: boolean;
@@ -2513,6 +3979,10 @@ function ExportSection({
       setRecords({
         slots: sync?.slots ?? [],
         rules: sync?.rules ?? [],
+        // D0: the vocabulary, for the export picker's per-tag unticking. Read
+        // from the SAME GET_STATE snapshot the other records come from, so the
+        // panel never assembles a second view of the machine.
+        tags: sync?.tags ?? [],
         matchSettings: sync?.matchSettings ?? DEFAULT_MATCH_SETTINGS,
         switchDirection: sync?.switchDirection ?? 'next',
         autoBindGlobal: sync?.autoBindGlobal ?? true,
@@ -2615,10 +4085,28 @@ function ExportSection({
     [commands],
   );
 
+  /**
+   * The tags the picker is showing.
+   *
+   * ONE derivation, used by the rows AND by the select-all: the control is a view
+   * of the visible rows (the rule every filtered list here follows), so a filtered
+   * select-all cannot silently include the chips the user cannot see.
+   */
+  const visibleTags = useMemo(() => {
+    const needle = tagQuery.trim().toLowerCase();
+    const all = records?.tags ?? [];
+    return needle === '' ? all : all.filter((t) => t.name.toLowerCase().includes(needle));
+  }, [records, tagQuery]);
+
   const scope: ExportScope = {
     slots: checked.slots, rules: checked.rules, settings: checked.settings, shortcuts: checked.shortcuts,
+    // D0: the fifth dimension. `checked.tags` / `excludedTags` are supplied by
+    // the tags picker (T17); the scope SHAPE is completed here so the export
+    // path type-checks and the dimension is not silently absent.
+    tags: checked.tags,
     excludedSlotIds: excludedSlots, excludedRuleIds: excludedRules,
     excludedSettingIds: excludedSettings, excludedShortcutNames: excludedShortcuts,
+    excludedTagNames: excludedTags,
   };
 
   /**
@@ -2629,7 +4117,7 @@ function ExportSection({
    * exclusion array must still be filled with the rows the user cannot see,
    * otherwised a filtered select-all would silently include them.
    */
-  const toggleExcluded = (kind: 'slot' | 'rule' | 'setting' | 'shortcut', id: number | string) => {
+  const toggleExcluded = (kind: 'slot' | 'rule' | 'setting' | 'shortcut' | 'tag', id: number | string) => {
     switch (kind) {
       case 'slot':
         setExcludedSlots((prev) =>
@@ -2645,6 +4133,12 @@ function ExportSection({
         break;
       case 'shortcut':
         setExcludedShortcuts((prev) =>
+          prev.includes(id as string) ? prev.filter((x) => x !== id) : [...prev, id as string]);
+        break;
+      case 'tag':
+        // A5: keyed by NAME — a package's tag identity is its name (A4), so a
+        // name is what the exclusion list must address.
+        setExcludedTags((prev) =>
           prev.includes(id as string) ? prev.filter((x) => x !== id) : [...prev, id as string]);
         break;
     }
@@ -2672,28 +4166,113 @@ function ExportSection({
   const summary = (() => {
     if (!pkg) return null;
     try {
-      const parsed = JSON.parse(pkg) as { slots?: unknown[]; rules?: unknown[]; settings?: unknown; shortcuts?: unknown };
+      const parsed = JSON.parse(pkg) as { slots?: unknown[]; rules?: unknown[]; settings?: unknown; shortcuts?: unknown; tags?: unknown[] };
       return {
         slots: parsed.slots?.length ?? 0,
         rules: parsed.rules?.length ?? 0,
         settings: parsed.settings ? 1 : 0,
         shortcuts: parsed.shortcuts ? 1 : 0,
+        // The vocabulary is a PART: a carried-but-empty list is still "carried",
+        // so the count is the number of entries (0 is a real answer here).
+        tags: parsed.tags?.length ?? 0,
       };
     } catch {
       return null;
     }
   })();
 
+  /**
+   * D-e/A-f: the self-consistency check that runs BEFORE the package is created.
+   *
+   * The difference is computed from the SAME construction the export uses
+   * (`syncStateToPackage` on this machine's snapshot + the chosen scope), and the
+   * dialog's text and options are rendered from THAT array — so the wording
+   * cannot drift from the decision it describes. An empty difference means the
+   * export proceeds silently; a non-empty one raises the dialog.
+   */
+  const selfConsistency = records === null
+    ? null
+    : computeExportSelfConsistency(
+        syncStateToPackage(
+          {
+            configVersion: 0,
+            matchSettings: records.matchSettings,
+            switchDirection: records.switchDirection,
+            autoBindGlobal: records.autoBindGlobal,
+            slots: records.slots,
+            rules: records.rules,
+            tags: records.tags,
+          },
+          scope,
+        ),
+        records.tags,
+      );
+
   const handleExport = async () => {
+    // Gate on the difference: a real inconsistency is a decision the user must
+    // make, so it is raised instead of being silently resolved either way.
+    if (selfConsistency && selfConsistency.diff.length > 0) {
+      setConsistencyChoice(selfConsistency);
+      return;
+    }
+    // No flag: the ordinary export carries each rule's names as they are, which is
+    // what makes the difference DETECTABLE at all. Passing `false` explicitly would
+    // read as "resolve it for me", and the gate above has already established there
+    // is nothing to resolve.
+    await doExport({ ...scope });
+  };
+
+  /**
+   * Build the package.
+   *
+   * `scopeOverride` exists for the D-e dialog, whose two answers are scope
+   * DECISIONS: their `setState` calls do not change `scope` until React re-renders,
+   * so an export that read the state would build the package the user did not
+   * choose. Passing the decision through makes the choice the thing that is
+   * exported, and keeps the ordinary button (no argument) reading the live scope.
+   */
+  const doExport = async (scopeOverride?: ExportScope) => {
     setExporting(true);
     setPkg(null);
     try {
-      const res = await sendMessage('EXPORT_PACKAGE', { scope });
+      const res = await sendMessage('EXPORT_PACKAGE', { scope: scopeOverride ?? scope });
       const result = extractResult(res);
       if (result?.success && result.package) setPkg(result.package as string);
     } finally {
       setExporting(false);
     }
+  };
+
+  /**
+   * D-e's two options. BOTH just change the scope and re-export:
+   *  - supplement: put the missing tags back into the vocabulary (their colour
+   *    comes from the LOCAL entity — the export side has one);
+   *  - drop: leave them out, which costs the named rules their tags.
+   * Neither is defaulted, because an accidental Enter would either push extra
+   * definitions into a recipient's machine or quietly strip tags from the user's
+   * own rules.
+   */
+  const resolveConsistency = async (choice: 'supplement' | 'drop') => {
+    setConsistencyChoice(null);
+    if (choice === 'drop') {
+      // "Leave them out": ship the rules as they are, orphan references included.
+      //
+      // This used to fall through to a plain re-export, which the projection then
+      // made self-consistent anyway — so the two buttons produced the SAME file and
+      // the difference the dialog had just described was not implemented anywhere.
+      // The flag is the difference.
+      await doExport({ ...scope, stripOrphanTagNames: true });
+      return;
+    }
+    // "Include them": un-exclude exactly the difference's names...
+    const nextExcluded = excludedTags.filter((n) => !(selfConsistency?.diff ?? []).includes(n));
+    setExcludedTags(nextExcluded);
+    // ...and export with THAT scope. Passing it explicitly rather than letting the
+    // export read state is what makes the repair real: `setExcludedTags` does not
+    // update `scope` until React re-renders, so the previous version re-exported the
+    // OLD exclusion list and the missing tags stayed missing. The call looked like
+    // it worked because the dialog closed.
+    await doExport({ ...scope, excludedTagNames: nextExcluded });
   };
 
   /**
@@ -2709,6 +4288,16 @@ function ExportSection({
   const dimensionCount = (dim: keyof DimensionPresence): number | null => {
     if (dim === 'slots') return records?.slots.length ?? 0;
     if (dim === 'rules') return records?.rules.length ?? 0;
+    // Tags ARE a countable list of things being chosen, so the card states how
+    // many the current selection would SHIP — live, because the number the user
+    // needs is "how many am I sending", not "how many exist". It changes as chips
+    // are unticked or excluded by the self-consistency dialog.
+    if (dim === 'tags') {
+      if (!checked.tags) return records?.tags.length ?? 0;
+      return (records?.tags ?? []).filter((t) => !excludedTags.includes(t.name)).length;
+    }
+    // `settings` / `shortcuts` deliberately report `null`: settings carries a fixed
+    // bundle of values rather than a countable list, and shortcuts has no producer.
     return null;
   };
 
@@ -2852,6 +4441,94 @@ function ExportSection({
         </section>
       )}
 
+      {/* D0/A5: the tag vocabulary, listed PER TAG so a user can share their
+          rules without shipping a label they did not mean to. Keyed by NAME —
+          a package has no tag ids (A4). Unticking a tag the exported rules
+          reference is what creates the difference the export dialog then
+          explains. */}
+      {checked.tags && records !== null && (
+        <section className="tbs-settings__pick-detail" data-testid="export-records-tags">
+          <h4 className="tbs-settings__pick-detail-title">Tags to include</h4>
+          {/* Search + select-all, the same two controls every other list here
+              carries. Without the search, finding one tag among a large vocabulary
+              meant reading the whole row of chips; without the select-all, the
+              only way to include nothing was to untick every chip by hand. */}
+          <div className="tbs-settings__pick-toolbar">
+            <SearchField
+              testId="export-tags-search"
+              placeholder="Search tags..."
+              value={tagQuery}
+              onChange={setTagQuery}
+              ariaLabel="Search tags to include"
+            />
+            <label className="tbs-settings__import-take">
+              <input
+                type="checkbox"
+                data-testid="export-tags-select-all"
+                checked={visibleTags.length > 0 && visibleTags.every((t) => !excludedTags.includes(t.name))}
+                ref={(el) => {
+                  if (el) {
+                    el.indeterminate = visibleTags.some((t) => excludedTags.includes(t.name))
+                      && visibleTags.some((t) => !excludedTags.includes(t.name));
+                  }
+                }}
+                onChange={() => {
+                  // A VIEW of the rows: when every visible tag is included, this
+                  // clears them all; in any other state (some or none) it includes
+                  // them all — the same rule `PartsSelectAll` uses, so the two
+                  // controls cannot disagree about what "select all" means.
+                  const allIncluded = visibleTags.length > 0
+                    && visibleTags.every((t) => !excludedTags.includes(t.name));
+                  const names = visibleTags.map((t) => t.name);
+                  setExcludedTags(allIncluded
+                    ? [...new Set([...excludedTags, ...names])]
+                    : excludedTags.filter((n) => !names.includes(n)));
+                }}
+              />
+              {visibleTags.length > 0 && visibleTags.every((t) => !excludedTags.includes(t.name))
+                ? 'Clear all tags'
+                : 'Select all tags'}
+            </label>
+          </div>
+          {/* A tag is not a RECORD (no icon / URL / match type), so it uses the
+              part-shaped picker rather than `RecordList` — the same "record vs
+              part" distinction the diff uses (`ImportPartDiff`).
+
+              A ROW of chips, not one tag per line: the same vocabulary the rule
+              forms' tag picker and the expression filter's candidates use, so
+              "which tags" is one control shape across the whole app. Each chip is
+              the tag's own appearance (background AND text colour), which is what
+              a name-only line was missing. */}
+          <div className="tbs-tag-picker" role="group" aria-label="Tags to include" data-testid="export-tags-values">
+            {visibleTags.map((tag) => {
+              const included = !excludedTags.includes(tag.name);
+              return (
+                <label
+                  key={tag.id}
+                  className="tbs-tag-picker__option"
+                  data-testid={`export-record-tag-${tag.id}`}
+                  data-included={included}
+                >
+                  <input
+                    type="checkbox"
+                    checked={included}
+                    aria-label={`Include tag ${tag.name}`}
+                    onChange={() => { toggleExcluded('tag', tag.name); }}
+                  />
+                  <span
+                    className="tbs-tag-picker__chip"
+                    style={{ backgroundColor: tag.backgroundColor, color: tag.textColor }}
+                    aria-hidden="true"
+                  >
+                    {tag.name}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {/* Settings is broken into its PARTS, so a user can share the global
           behaviour without shipping every per-slot override with it. Only parts
           that exist on this machine are listed (a slot with no explicit auto-bind
@@ -2956,7 +4633,10 @@ function ExportSection({
           aria-live="polite"
         >
           {anyChecked
-            ? `${String(selectedCount)} of 4 parts selected`
+            // Derived from `DIMENSION_LABELS`, not a literal: the "of 4" was a
+            // hard-coded count that would have kept saying 4 after the fifth
+            // dimension landed (the same class of drift the summary list had).
+            ? `${String(selectedCount)} of ${String(DIMENSION_LABELS.length)} parts selected`
             : 'Select at least one part to export.'}
         </p>
         <Button
@@ -2971,6 +4651,58 @@ function ExportSection({
         </Button>
       </footer>
 
+      {/* D-e: the self-consistency dialog. Its numbers and names come from
+          `consistencyChoice.diff` — the SAME array the gate used — so the wording
+          cannot describe a different decision. Two options, NEITHER defaulted
+          (D-e-D): an unthinking Enter must not choose for the user, because the
+          two outcomes affect DIFFERENT machines (the recipient's definitions vs
+          the user's own rules). */}
+      <Dialog
+        open={consistencyChoice !== null}
+        onClose={() => { setConsistencyChoice(null); }}
+        title="Some rules reference tags that are not included"
+        footer={
+          <>
+            {/* Short labels in the BUTTONS, and the consequence in the BODY.
+                The buttons carried the whole sentence ("Include them (2 extra tag
+                definitions)") and were clipped by the dialog's width; a label states
+                the choice, and the paragraph above already carries the numbers it
+                would otherwise repeat. */}
+            <Button
+              variant="secondary"
+              data-testid="export-consistency-include"
+              onClick={() => { void resolveConsistency('supplement'); }}
+            >
+              Include them
+            </Button>
+            <Button
+              variant="secondary"
+              data-testid="export-consistency-leave"
+              onClick={() => { void resolveConsistency('drop'); }}
+            >
+              Leave them out
+            </Button>
+          </>
+        }
+      >
+        <p>
+          {`These tags are used by rules you are exporting but are not in the package: ${(consistencyChoice?.diff ?? []).join(', ')}.`}
+        </p>
+        {/* Both consequences, stated once each beside the button that takes it.
+            The numbers live here rather than in the labels so the labels stay
+            short enough to read — the reason they were clipped before. */}
+        <ul className="tbs-settings__consistency-choices">
+          <li>
+            <strong>Include them</strong>
+            {` — adds ${String(consistencyChoice?.diff.length ?? 0)} extra tag ${(consistencyChoice?.diff.length ?? 0) === 1 ? 'definition' : 'definitions'} to the package.`}
+          </li>
+          <li>
+            <strong>Leave them out</strong>
+            {` — ${String(consistencyChoice?.canDrop.length ?? 0)} ${(consistencyChoice?.canDrop.length ?? 0) === 1 ? 'rule' : 'rules'} keeps its reference, but the tag will not exist on the machine you send it to.`}
+          </li>
+        </ul>
+      </Dialog>
+
       {pkg && summary && (
         <div
           className="tbs-settings__export-summary"
@@ -2984,6 +4716,7 @@ function ExportSection({
             <li>Rules: {summary.rules}</li>
             <li>Settings: {summary.settings}</li>
             <li>Shortcuts: {summary.shortcuts}</li>
+            <li>Tags: {summary.tags}</li>
           </ul>
           <Button size="sm" variant="secondary" data-testid="export-download" onClick={() => { downloadPackage(pkg); }}>
             Download
@@ -2994,12 +4727,22 @@ function ExportSection({
   );
 }
 
-/** T18: the fixed four dimensions (D5), in the order the diff groups them. */
+/**
+ * The fixed FIVE dimensions (D5/D0), in the order the diff groups them.
+ *
+ * `tags` is last because it is the newest and, unlike the others, carries no
+ * record list — its consumers group it as a whole (a vocabulary), not row by row
+ * (see `DIMENSION_META` and `dimensionCount`). Every `DIMENSION_LABELS.map`
+ * consumer (export cards, import cards, result lists — five of them) picks the
+ * new entry up automatically from here, which is why the OLD four-name comment
+ * is now wrong and why nothing is hand-listed per panel.
+ */
 const DIMENSION_LABELS: ReadonlyArray<{ dim: keyof DimensionPresence; label: string }> = [
   { dim: 'slots', label: 'Slots' },
   { dim: 'rules', label: 'Rules' },
   { dim: 'settings', label: 'Settings' },
   { dim: 'shortcuts', label: 'Shortcuts' },
+  { dim: 'tags', label: 'Tags' },
 ];
 
 /**
@@ -3013,6 +4756,10 @@ const DIMENSION_META: Record<keyof DimensionPresence, { title: string; blurb: st
   rules: { title: 'Rules', blurb: 'Title and icon rewrites for matching pages' },
   settings: { title: 'Settings', blurb: 'Matching behaviour, switch direction and auto-bind' },
   shortcuts: { title: 'Shortcuts', blurb: 'Keyboard bindings for your slots' },
+  // A consequence-shaped blurb (D-e): it says what TAKING the vocabulary does,
+  // not what a tag is. The dimension is a whole set, so the wording is about the
+  // set ("the labels your rules are organised by"), not about one tag.
+  tags: { title: 'Tags', blurb: 'The labels your rules are organised by' },
 };
 
 /**
@@ -3098,6 +4845,23 @@ function slotPlaceholder(id: number): string {
  */
 function importRowIcon(r: ImportRecordDiff): IconPreviewSource {
   return previewFromFieldValue(r.before?.icon ?? null);
+}
+
+/**
+ * One side of a tag facet, when that facet is a colour.
+ *
+ * Narrowed through the `kind` before it reaches a `style`, for the same reason
+ * `RecordList`'s own helper exists: only the discriminated union knows which
+ * values are safe to put in CSS. `undefined` means "this side has no colour", so
+ * the chip simply does not set that property rather than setting a guess.
+ */
+function colorFacetOf(
+  fields: ImportFieldDiff[] | undefined,
+  facet: 'tag-background' | 'tag-text',
+  side: 'before' | 'after',
+): string | undefined {
+  const v = (fields ?? []).find((f) => f.field === facet)?.[side];
+  return v !== null && v !== undefined && v.kind === 'color' ? v.value : undefined;
 }
 
 /**
@@ -3247,7 +5011,9 @@ function summariseApplied(result: ImportApplyResult | null): string {
   const parts: string[] = [];
   const failures: string[] = [];
   for (const { dim } of DIMENSION_LABELS) {
-    const outcome = result.dimensions[dim];
+    // See `import-result-dims`: a result that reports fewer dimensions than the
+    // label list reads as "nothing changed" for the missing one, not a crash.
+    const outcome = result.dimensions[dim] ?? { changed: 0, failed: 0 };
     if (outcome.changed > 0) parts.push(`${String(outcome.changed)} ${DIMENSION_META[dim].title}`);
     if (outcome.failed > 0) failures.push(`${String(outcome.failed)} ${DIMENSION_META[dim].title}`);
   }
@@ -3309,6 +5075,15 @@ const SETTINGS_PART_TESTIDS: Record<string, string> = {
  * allow-list is written in one place.
  */
 const allPartsSentinel = '__all__';
+
+/**
+ * The sentinel the tag list's select-all passes.
+ *
+ * Its own constant rather than reusing `allPartsSentinel`: the two address
+ * DIFFERENT intent fields (`takeTagNames` vs `takeSettingIds`), and sharing one
+ * token would make a future change to either silently affect the other.
+ */
+const allTagsSentinel = '__all_tags__';
 
 /**
  * The per-dimension select-all for the settings / shortcut rows.
@@ -3544,8 +5319,55 @@ function ImportExportSection({
    */
   const [applyResult, setApplyResult] = useState<ImportApplyResult | null>(null);
   const [appliedDiff, setAppliedDiff] = useState<ImportDiff | null>(null);
+  /**
+   * The import tag list's bulk selection, as a set of the ids the user chose.
+   *
+   * PRESENTATIONAL, and that is not a shortcut: `ImportIntent` carries no per-tag
+   * take list, because the tags dimension has no per-row decision — the MODE is
+   * the decision (A8's re-decide button is where the destructive one is
+   * revisited). A row checkbox here would therefore be a control with nothing
+   * behind it, which is the dead-control class this codebase removes rather than
+   * adds. What the bulk control does is operable and real: with nothing selected
+   * the list de-emphasises the UNCHANGED rows, so a long vocabulary shows only what
+   * this file actually moves.
+   */
+  /**
+   * Whether a tag the file carries would be taken.
+   *
+   * Read from the intent (`undefined` = take everything), the SAME single source
+   * the per-row checkbox and the select-all use, so the two cannot disagree — and
+   * so the first untick materialises the allow-list from the rows on screen rather
+   * than silently dropping the ones the user never touched.
+   */
+  const tagsTaken = (name: string): boolean =>
+    intent.takeTagNames === undefined || intent.takeTagNames.includes(name);
+
+  const setTagTaken = (name: string, take: boolean, allNames: string[]): void => {
+    setIntent((prev) => {
+      if (name === allTagsSentinel) {
+        return { ...prev, takeTagNames: take ? [...allNames] : [] };
+      }
+      const seed = prev.takeTagNames ?? allNames;
+      return {
+        ...prev,
+        takeTagNames: take ? [...new Set([...seed, name])] : seed.filter((n) => n !== name),
+      };
+    });
+  };
   /** The quantized confirmation is CONSTANT (D7) — opened by Apply, always. */
   const [confirming, setConfirming] = useState(false);
+  /**
+   * A-f/D-e on this side: the orphan-tag decision, pending the user's answer.
+   *
+   * The EXPORT gate asks the same question before a package is built; a file can
+   * still reach this machine without having been through it (hand-edited, sent by
+   * an older version, or sent after the sender chose "leave them out"), so the
+   * decision has to be offered here too. Until it is answered the import must NOT
+   * proceed — resolving it either way on the user's behalf is exactly what the
+   * design forbids, and here the consequence is a tag created with an appearance no
+   * file ever specified.
+   */
+  const [orphanChoice, setOrphanChoice] = useState<string[] | null>(null);
   const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -3708,6 +5530,34 @@ function ImportExportSection({
     current && pkg ? computeDiff(pkg, current, intent) : inspection?.diff;
 
   /**
+   * A-f/D-e on the IMPORT side: names a carried rule references that the file's
+   * own vocabulary does not define.
+   *
+   * The export side already asks about this state before creating a package. A file
+   * can reach this machine from anywhere (hand-edited, produced by a version that
+   * allowed it, or sent after the sender chose "leave them out"), so the SAME
+   * situation has to be disclosed here — and the consequence is sharper on this
+   * side, because there is no tag table to find the colour in: the tag is created
+   * with a DEFAULT appearance. The panel already discloses that AFTER the write
+   * (`tagsCreatedWithDefaultAppearance`); this states it before.
+   *
+   * Derived from the PACKAGE rather than the resolved diff: the diff reports the
+   * names this machine will end up with, while the question is specifically "what
+   * does the file fail to define".
+   */
+  const importOrphanTagNames = (() => {
+    if (!pkg) return [];
+    const defined = new Set((pkg.tags ?? []).map((t) => t.name));
+    const orphans = new Set<string>();
+    for (const rule of pkg.rules ?? []) {
+      for (const name of rule.tags ?? []) {
+        if (!defined.has(name)) orphans.add(name);
+      }
+    }
+    return [...orphans];
+  })();
+
+  /**
    * What this import is about to change, per dimension.
    *
    * Derived from the LIVE diff — the same rows the panel shows and the same
@@ -3734,6 +5584,14 @@ function ImportExportSection({
       } else if (dim === 'settings') {
         const parts = liveDiff.settingsParts ?? [];
         rows.push({ dim, changed: parts.filter((p) => p.status !== 'kept').length, total: parts.length, unit: 'parts' });
+      } else if (dim === 'tags') {
+        // TAGS, not "bindings" — the `else` this used to fall into was the SHORTCUT
+        // branch, so the confirm dialog reported the tag dimension as "0 bindings",
+        // a unit that does not exist for tags. The count is the tag rows the user's
+        // choices actually change (`replaced` included now that a colour difference
+        // is a change).
+        const parts = liveDiff.tagNames ?? [];
+        rows.push({ dim, changed: parts.filter((p) => p.status !== 'kept').length, total: parts.length, unit: 'tags' });
       } else {
         const parts = liveDiff.shortcutParts ?? [];
         rows.push({ dim, changed: parts.filter((p) => p.status !== 'kept').length, total: parts.length, unit: 'bindings' });
@@ -3781,12 +5639,30 @@ function ImportExportSection({
 
   const handleApply = () => {
     if (!file || !inspection) return;
+    // A-f/D-e: an unresolvable tag reference is a DECISION, so it is asked before
+    // the quantized confirmation rather than after it — the user is choosing what
+    // the import will contain, and that choice belongs with the others (dimension
+    // modes, per-record takes) rather than behind a "confirm" they have already
+    // read.
+    if (importOrphanTagNames.length > 0 && intent.stripOrphanTagNames !== true) {
+      setOrphanChoice(importOrphanTagNames);
+      return;
+    }
     // D7: the dialog is constant — there is no "0 deletions" fast path.
     setConfirming(true);
   };
 
   const handleConfirmApply = async () => {
     if (!file || !inspection) return;
+    // Re-entrancy guard, and it is not theoretical: the confirmation writes with the
+    // version INSPECT read, so a second submission carries the SAME expectedVersion
+    // — the first write succeeds (bumping the version), and the second is refused
+    // with CONFIG_CONFLICT. The data is imported and the user is shown a failure,
+    // which is the worst pairing: it invites a retry of something that already
+    // happened. The button is `disabled` while `importing`, so this only catches a
+    // double dispatch (a synthetic event, or a second Enter), but the guard belongs
+    // with the handler rather than with the widget that happens to call it.
+    if (importing) return;
     setConfirming(false);
     setImporting(true);
     try {
@@ -3955,7 +5831,11 @@ function ImportExportSection({
               here, which is exactly what "did my shortcuts import?" needs. */}
           <ul className="tbs-settings__result-dims" data-testid="import-result-dims">
             {DIMENSION_LABELS.map(({ dim }) => {
-              const outcome = applyResult.dimensions[dim];
+              // `?? {0,0}`: a result produced before this dimension existed (or by
+              // a caller that reports fewer dimensions) must render as "nothing
+              // happened here", not crash the whole result panel. The dimension
+              // list is what grew, so the list is where the tolerance belongs.
+              const outcome = applyResult.dimensions[dim] ?? { changed: 0, failed: 0 };
               return (
                 <li key={dim} data-testid={`import-result-dim-${dim}`}>
                   <span className="tbs-settings__part-label">{`${DIMENSION_META[dim].title}: `}</span>
@@ -4053,6 +5933,17 @@ function ImportExportSection({
             </p>
           )}
 
+          {/* S6/A10: tags that had to be created with a DEFAULT appearance,
+              because the file neither defined them nor did this machine know
+              them. The count is disclosed so the user is TOLD rather than left to
+              notice new, greyer tags later — the asymmetry (no colour source on
+              the import side) is registered, not hidden. */}
+          {(applyResult.tagsCreatedWithDefaultAppearance ?? 0) > 0 && (
+            <p className="tbs-settings__result-note" data-testid="import-default-appearance">
+              {`${String(applyResult.tagsCreatedWithDefaultAppearance)} ${applyResult.tagsCreatedWithDefaultAppearance === 1 ? 'tag was' : 'tags were'} created with a default appearance.`}
+            </p>
+          )}
+
           <footer className="tbs-settings__panel-foot">
             <p className="tbs-settings__panel-status" />
             <Button
@@ -4087,12 +5978,23 @@ function ImportExportSection({
             // in the file's order made the list unscannable. The diff's own
             // record order (which tests may rely on) is deliberately untouched.
             const shown = dim === 'slots' ? bySlotId(records) : records;
+            // `slots` and `rules` are RECORD dimensions: they carry a list of
+            // items with ids, so they render one row per record. The other
+            // dimensions are PART dimensions (settings parts, shortcut
+            // bindings, and — from the Rule Tags iteration — the tag
+            // vocabulary): they are carried as a whole and render part rows
+            // instead. `dim === 'tags'` must therefore NOT be captured here;
+            // it takes the part-shaped pipeline like `settings`/`shortcuts`.
             const isRecordDimension = dim === 'slots' || dim === 'rules';
             const changedCount = records.filter((r) => r.status !== 'kept').length;
             // The settings parts and shortcut bindings the file carries,
             // read from the LIVE diff (so their status follows the user's choices).
             const shownParts = dim === 'settings' ? (liveDiff?.settingsParts ?? []) : [];
             const shortcutParts = dim === 'shortcuts' ? (liveDiff?.shortcutParts ?? []) : [];
+            // The tag vocabulary, one row per tag the file carries. Read from the
+            // LIVE diff, so each row's status follows the user's choices — the
+            // per-row take-allow-list (`takeTagNames`) and the dimension mode.
+            const tagRows = dim === 'tags' ? (liveDiff?.tagNames ?? []) : [];
             // No separate record lookup: every cell of a row comes from the diff
             // itself (`before` / `icon` / `priority`), which is the one place that
             // already resolved "does this exist on the machine, and did the user
@@ -4109,12 +6011,24 @@ function ImportExportSection({
                   {/* A count, not a status word: "3 of 5 change" says both the
                       size of the part and how much of it the import will touch,
                       which is what decides whether the user opens it. */}
-                  <span className="tbs-settings__card-meta">
+                  {/* The live count of what this import would actually WRITE.
+                      A record dimension states "how many of them change"; a PART
+                      dimension states how many of its parts are taken — which for
+                      tags is the number the user is looking for ("how many tags am
+                      I importing"), and which the word "included" answered with
+                      nothing. Derived from the user's own take-allow-list, so
+                      unticking a row moves the number immediately. */}
+                  <span
+                    className="tbs-settings__card-meta"
+                    data-testid={`import-dim-count-${dim}`}
+                  >
                     {!carried(dim)
                       ? 'not in this file'
                       : isRecordDimension
                         ? `${String(changedCount)} of ${String(records.length)} change`
-                        : 'included'}
+                        : dim === 'tags'
+                          ? `${String(tagRows.filter((t) => tagsTaken(t.id)).length)} of ${String(tagRows.length)} selected`
+                          : 'included'}
                   </span>
                 </header>
                 {!carried(dim) ? (
@@ -4153,6 +6067,21 @@ function ImportExportSection({
                           : `Records in this file are added or replaced; ${meta.title.toLowerCase()} you already have stay.`}
                       </span>
                     </div>
+                    {/* A8: OVERWRITE on tags deletes target-side tags the file
+                        lacks — a destructive default the user may re-decide.
+                        "Re-decide" is defined as the SAME decision expressed as a
+                        mode change, so choosing here just sets the mode to
+                        `incremental` (one reasoning chain, no second path). */}
+                    {dim === 'tags' && intent.dimensionModes[dim] === 'overwrite' && (
+                      <button
+                        type="button"
+                        className="tbs-settings__mode-alternative"
+                        data-testid="import-tags-to-incremental"
+                        onClick={() => { setDimensionMode('tags', 'incremental'); }}
+                      >
+                        Keep my existing tags instead (do not delete)
+                      </button>
+                    )}
                     {dim === 'settings' && shownParts.length > 0 && (
                       <ImportSettingsParts
                         parts={shownParts}
@@ -4178,6 +6107,116 @@ function ImportExportSection({
                           setPartTaken('shortcuts', allPartsSentinel, take, shortcutParts.map((p) => p.id));
                         }}
                       />
+                    )}
+                    {/* The tag DIFF: one row per tag, each with its three facets
+                        (name / background / text colour) as label → value → state.
+                        This is what makes the vocabulary's content reviewable before
+                        the import runs — including the appearance, which no other
+                        part of this panel shows and which decides whether an
+                        incoming tag will look like the one it maps onto. */}
+                    {/* #3: the same disclosure the export gate asks about, on the
+                        side where the outcome is worse — an undefined tag is created
+                        with a DEFAULT appearance here, because this machine has no
+                        colour source for it. Stated before the write, with the names,
+                        so "why did my imported tags come out grey" is answered at the
+                        point the user can still act on it. */}
+                    {dim === 'tags' && importOrphanTagNames.length > 0 && (
+                      <p
+                        className="tbs-settings__hint tbs-settings__hint--notice"
+                        data-testid="import-orphan-tags"
+                        role="status"
+                      >
+                        {`Some rules in this file reference tags it does not define: ${importOrphanTagNames.join(', ')}. ${importOrphanTagNames.length === 1 ? 'That tag' : 'Those tags'} will be created with a default appearance.`}
+                      </p>
+                    )}
+                    {dim === 'tags' && tagRows.length > 0 && (
+                      <ul className="tbs-settings__import-records" data-testid="import-tags-values">
+                        {/* Select all / none, the same control the settings and
+                            shortcut dimensions carry, writing the same kind of
+                            allow-list (`takeTagNames`). */}
+                        <li>
+                          <PartsSelectAll
+                            ids={tagRows.map((t) => t.id)}
+                            taken={(id) => tagsTaken(id)}
+                            onToggleAll={(take) => {
+                              setTagTaken(allTagsSentinel, take, tagRows.map((t) => t.id));
+                            }}
+                            noun="tags"
+                          />
+                        </li>
+                        {tagRows.map((tag) => (
+                          <li
+                          key={tag.id}
+                          data-testid={`import-tag-${tag.id}`}
+                          // A DECLINED tag is de-emphasised rather than removed:
+                          // the row keeps its place so "I turned this off" stays
+                          // visible, and the vocabulary keeps its length.
+                          data-muted={!tagsTaken(tag.id)}
+                        >
+                            {/* The tag's PREVIEW, target → imported, and nothing
+                                else. A tag is a coloured label, so the two
+                                appearances side by side say everything the row
+                                needs to: what the machine has now, and what the
+                                import would leave. A per-field table would spell
+                                that out as three sentences about a thing the
+                                reader can simply look at — and it was the field
+                                detail, not the appearance, that made this list
+                                tall enough to hide the vocabulary it describes. */}
+                            <span className="tbs-settings__import-tag-preview">
+                              {/* The TARGET side exists only when the machine HAS
+                                  the tag. For a file-only (`added`) row there is
+                                  nothing to point from, so the row is a single
+                                  chip — an empty first chip with an arrow into the
+                                  real one would depict a comparison that does not
+                                  exist. This is also what makes the row's shape
+                                  itself report "new" at a glance. */}
+                              {tag.status !== 'added' && (
+                                <span
+                                  className="tbs-tag-picker__chip"
+                                  data-testid={`import-tag-target-${tag.label}`}
+                                  style={{
+                                    backgroundColor: colorFacetOf(tag.fields, 'tag-background', 'before'),
+                                    color: colorFacetOf(tag.fields, 'tag-text', 'before'),
+                                  }}
+                                >
+                                  {tag.label}
+                                </span>
+                              )}
+                              {tag.status !== 'added' && tag.status !== 'deleted' && (
+                                <span className="tbs-field-row__arrow" aria-hidden="true">→</span>
+                              )}
+                              {tag.status !== 'deleted' && (
+                                <span
+                                  className="tbs-tag-picker__chip"
+                                  data-testid={`import-tag-imported-${tag.label}`}
+                                  style={{
+                                    backgroundColor: colorFacetOf(tag.fields, 'tag-background', 'after'),
+                                    color: colorFacetOf(tag.fields, 'tag-text', 'after'),
+                                  }}
+                                >
+                                  {tag.label}
+                                </span>
+                              )}
+                            </span>
+                            <StatusBadge status={RECORD_BADGE[tag.status]} label={tag.status} />
+                            {/* The per-row decision, exactly like the other part
+                                dimensions: `takeTagNames` is an allow-list, so
+                                unticking one tag leaves the others taken. */}
+                            <label className="tbs-settings__import-take">
+                              <input
+                                type="checkbox"
+                                data-testid={`import-tag-take-${tag.label}`}
+                                checked={tagsTaken(tag.id)}
+                                aria-label={`Take ${tag.label}`}
+                                onChange={(e) => {
+                                  setTagTaken(tag.id, e.currentTarget.checked, tagRows.map((t) => t.id));
+                                }}
+                              />
+                              Take
+                            </label>
+                          </li>
+                        ))}
+                      </ul>
                     )}
                     {isRecordDimension && shown.length > 0 && (
                       <RecordList
@@ -4208,6 +6247,10 @@ function ImportExportSection({
                           // The field ROWS are `RecordFields`, not a `<ul>` built
                           // here: label / value / state is a layout, and inline
                           // markup is how per-row wording drifts between panels.
+                          // The tags now live INSIDE the Fields detail, as one more
+                          // field row (see the `tags` facet) — so a rule's change is
+                          // described in the panel's own vocabulary rather than in a
+                          // block of its own beside it.
                           detail: r.fields.length > 0 ? (
                             <RecordFields
                               fields={r.fields}
@@ -4300,6 +6343,68 @@ function ImportExportSection({
         </div>
       )}
 
+      {/* A-f/D-e: the SAME decision the export gate asks about, asked here because
+          a file can arrive without having been through that gate. Answered BEFORE
+          the quantized confirmation, so the user decides what the import contains
+          while they are still choosing (dimension modes, per-record takes) rather
+          than behind a confirmation they have already read.
+
+          Two real options, neither defaulted: "Include them" is the default
+          RESOLUTION (the tag is created like any other referenced name), so
+          choosing it simply proceeds; "Leave them out" records the decision so the
+          reference is dropped and no tag is invented. */}
+      <Dialog
+        open={orphanChoice !== null}
+        onClose={() => { setOrphanChoice(null); }}
+        title="Some rules reference tags that are not included"
+        footer={
+          <>
+            <Button
+              size="sm"
+              variant="secondary"
+              data-testid="import-orphan-include"
+              onClick={() => {
+                setOrphanChoice(null);
+                // "Include them" = create the tags, which is what the default does;
+                // the flag is explicitly cleared so a previous "leave them out" on
+                // this file cannot survive the change of mind.
+                setIntent((prev) => ({ ...prev, stripOrphanTagNames: false }));
+                setConfirming(true);
+              }}
+            >
+              Include them
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              data-testid="import-orphan-leave"
+              onClick={() => {
+                setOrphanChoice(null);
+                setIntent((prev) => ({ ...prev, stripOrphanTagNames: true }));
+                setConfirming(true);
+              }}
+            >
+              Leave them out
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => { setOrphanChoice(null); }}>Cancel</Button>
+          </>
+        }
+      >
+        <p>
+          {`These tags are referenced by rules in this file but are not included in it: ${(orphanChoice ?? []).join(', ')}.`}
+        </p>
+        <ul className="tbs-settings__consistency-choices">
+          <li>
+            <strong>Include them</strong>
+            {` — creates ${String(orphanChoice?.length ?? 0)} ${(orphanChoice?.length ?? 0) === 1 ? 'tag' : 'tags'} with a default appearance, because this file does not say what they look like.`}
+          </li>
+          <li>
+            <strong>Leave them out</strong>
+            {' — those rules arrive without their tags, and no tag from this file is created.'}
+          </li>
+        </ul>
+      </Dialog>
+
       {/* D7: the quantized confirmation is CONSTANT — opened by Apply, even with
           zero deletions. A9: "Export backup" and the confirm action are SIBLINGS
           (backup is a choice, not a prerequisite), so applying is a separate,
@@ -4343,9 +6448,17 @@ function ImportExportSection({
                 <li key={row.dim} data-testid={`import-confirm-change-${row.dim}`}>
                   <span className="tbs-settings__part-label">{`${DIMENSION_META[row.dim].title}: `}</span>
                   <span className="tbs-settings__part-value">
-                    {row.changed === 0
-                      ? `no change (${String(row.total)} ${row.unit} in the file)`
-                      : `${String(row.changed)} of ${String(row.total)} ${row.unit} change`}
+                    {/* Three cases, because there are three facts. "no change (0
+                        tags in the file)" conflated "the file carries this
+                        dimension and nothing would move" with "the file carries no
+                        tags at all" — and those lead to different next steps (carry
+                        on vs. go and find a file that has what you meant to send).
+                        A dimension with nothing in it is STATED as empty. */}
+                    {row.total === 0
+                      ? 'nothing in this file'
+                      : row.changed === 0
+                        ? `no change (${String(row.total)} ${row.unit} in the file)`
+                        : `${String(row.changed)} of ${String(row.total)} ${row.unit} change`}
                   </span>
                 </li>
               ))}
@@ -4523,15 +6636,49 @@ export function SettingsApp() {
     const selector = importFocus.kind === 'slot'
       ? `[data-testid="slot-row-${String(importFocus.id)}"]`
       : `[data-testid="rule-row-${String(importFocus.id)}"]`;
-    const el = document.querySelector<HTMLElement>(selector);
-    if (!el) return; // surface not rendered yet; a later render re-runs this
-    // jsdom has no layout engine; a missing scroll must never cost the
-    // highlight (the cue is the point) — mirror the dashboard's approach.
-    if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
-    el.classList.add(JUMP_HIGHLIGHT_CLASS);
-    const timer = setTimeout(() => { el.classList.remove(JUMP_HIGHLIGHT_CLASS); }, JUMP_HIGHLIGHT_MS);
-    setImportFocus(null);
-    return () => { clearTimeout(timer); };
+
+    let cancelled = false;
+    let attempt = 0;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let clear: ReturnType<typeof setTimeout> | null = null;
+
+    /**
+     * Retries until the row exists, because the target surface FETCHES after it
+     * mounts.
+     *
+     * This used to be a single attempt whose comment claimed "a later render
+     * re-runs this" — untrue, since the effect's only dependency is
+     * `importFocus`, which does not change again. So the pass that mattered ran
+     * while the rules/slots table was still empty, found nothing, and returned:
+     * a cross-section jump was a SILENT no-op whenever the destination loaded
+     * asynchronously (which is every section that holds records). The import
+     * panel's existing jump had the same hole; it is now shared correctly.
+     *
+     * Bounded rather than infinite: a target that never appears must not leave a
+     * timer running for the life of the page.
+     */
+    const run = (): void => {
+      if (cancelled) return;
+      const el = document.querySelector<HTMLElement>(selector);
+      if (!el) {
+        attempt += 1;
+        if (attempt < JUMP_FIND_ATTEMPTS) retry = setTimeout(run, JUMP_FIND_INTERVAL_MS);
+        return;
+      }
+      // jsdom has no layout engine; a missing scroll must never cost the
+      // highlight (the cue is the point) — mirror the dashboard's approach.
+      if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+      el.classList.add(JUMP_HIGHLIGHT_CLASS);
+      clear = setTimeout(() => { el.classList.remove(JUMP_HIGHLIGHT_CLASS); }, JUMP_HIGHLIGHT_MS);
+      setImportFocus(null);
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      if (retry !== null) clearTimeout(retry);
+      if (clear !== null) clearTimeout(clear);
+    };
   }, [importFocus]);
 
   // Load state
@@ -4907,6 +7054,17 @@ export function SettingsApp() {
                   />
                 </div>
               </>
+            )}
+            {activeSection === 'tags' && (
+              <TagsSection
+                // 1.4: the association panel's Redirect action reuses the app's ONE
+                // jump mechanism (`importFocus`) rather than inventing a second way
+                // to reveal a row — same switch-then-highlight, same visual cue.
+                onRedirectToRule={(ruleId) => {
+                  setActiveSection('rules');
+                  setImportFocus({ kind: 'rule', id: ruleId });
+                }}
+              />
             )}
             {activeSection === 'diagnostics' && <DiagnosticsSection />}
           </>

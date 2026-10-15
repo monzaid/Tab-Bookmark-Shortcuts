@@ -182,7 +182,7 @@ export function previewFromIconSource(icon: {
  * asks for a preview when it is drawing the `icon` facet.
  */
 export function previewFromFieldValue(value: {
-  kind: 'text' | 'url' | 'local-ref' | 'recipe';
+  kind: 'text' | 'url' | 'local-ref' | 'recipe' | 'color' | 'tags';
   value?: string;
   key?: string;
   bgColor?: string;
@@ -191,6 +191,13 @@ export function previewFromFieldValue(value: {
 } | null): IconPreviewSource {
   if (!value) return { kind: 'none' };
   switch (value.kind) {
+    // A colour is not an icon either, for the same reason `text` is not: the
+    // caller only asks for a preview on the `icon` facet.
+    case 'color':
+      return { kind: 'none' };
+    // ...and a tag set is not an icon; the tags row renders its own chips.
+    case 'tags':
+      return { kind: 'none' };
     case 'url':
       return value.value ? { kind: 'image', value: value.value } : { kind: 'none' };
     case 'local-ref':

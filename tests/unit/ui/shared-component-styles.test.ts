@@ -40,6 +40,50 @@ function isDefined(css: string, cls: string): boolean {
   return css.includes(`.${cls}`);
 }
 
+/**
+ * The stylesheets each ENTRY POINT actually loads, read from its own import list.
+ *
+ * This is the dimension the coverage scan above cannot see: that scan concatenates
+ * every stylesheet under `src/ui/styles/`, so a class defined in `settings.css`
+ * "has a definition" even when the entry point rendering it never loads that file.
+ * That is exactly how the sidebar's New-Rule modal shipped with an entirely
+ * unstyled tag control: the classes were defined, just not anywhere the modal could
+ * reach. Derived from the imports rather than hard-coded, so a new import is
+ * reflected without editing the test.
+ */
+const UI_ROOT = resolve(process.cwd(), 'src/ui');
+const STYLES = resolve(process.cwd(), 'src/ui/styles');
+
+function entryStylesheets(entrySource: string): string[] {
+  return [...entrySource.matchAll(/import\s+'(?:@ui\/styles|\.\.?\/styles)\/([a-z0-9-]+)\.css'/g)]
+    .map((m) => join(STYLES, `${m[1]}.css`));
+}
+function entrySource(rel: string): string {
+  return readFileSync(join(UI_ROOT, rel), 'utf-8');
+}
+/** Every stylesheet an entry point can reach, including its `@import` chain. */
+function reachableCss(rel: string): string {
+  const queue = entryStylesheets(entrySource(rel));
+  const seen = new Set<string>();
+  let out = '';
+  while (queue.length > 0) {
+    const file = queue.shift() as string;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const text = readFileSync(file, 'utf-8');
+    out += text;
+    for (const m of text.matchAll(/@import\s+'(?:\.\/)?([a-z0-9-]+)\.css'/g)) {
+      queue.push(join(STYLES, `${m[1]}.css`));
+    }
+  }
+  return out;
+}
+
+/** A class is defined by a rule whose selector contains it. */
+function defines(css: string, cls: string): boolean {
+  return css.includes(`.${cls}`);
+}
+
 describe('shared component chain — every used class has a CSS definition', () => {
   const css = readAllCss();
 
@@ -91,6 +135,81 @@ describe('shared component chain — every used class has a CSS definition', () 
     // `1fr 1fr` (the old rule) would squeeze both editors on a 288px sidebar.
     expect(css).toMatch(/\.tbs-settings__rule-form-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
     expect(css).toMatch(/@media\s*\(max-width:\s*559px\)\s*\{[^}]*\.tbs-settings__rule-form-grid/);
+  });
+
+  /**
+   * Reachability, not just existence.
+   *
+   * The scan above proves every class HAS a definition somewhere; this proves the
+   * entry points that RENDER the affected components can actually load one. The
+   * dependency graph is declared here (rather than inferred by walking imports)
+   * because it is a REVIEW fact: "which entry points render this component" is the
+   * claim being verified, and inferring it would let a new consumer be added
+   * without the graph being updated.
+   */
+  it('should style every shared component in EVERY entry point that renders it', () => {
+    const CONSUMERS: Array<{
+      /** The file whose CSS IMPORTS define what this surface can load. */
+      entry: string;
+      /** The file that renders the components (may differ from `entry`). */
+      surface: string;
+      /** Import specifiers the surface must mention, for the claim to be live. */
+      renders: string[];
+      classes: string[];
+    }> = [
+      {
+        // The New Global Page Rule modal renders the shared field set, so the tag
+        // control and the look-up field must be reachable from the SIDEBAR's own
+        // stylesheets — the settings page loading them proves nothing for it.
+        entry: 'sidebar/App.tsx',
+        surface: 'sidebar/App.tsx',
+        renders: ['@ui/shared/rule-form-fields', '@ui/shared/tag-selector'],
+        classes: [
+          'tbs-tag-selector',
+          'tbs-tag-selector__list',
+          'tbs-tag-selector__option',
+          'tbs-tag-selector__selected',
+          'tbs-tag-selector__pill',
+          'tbs-tag-selector__chip',
+          'tbs-tag-selector__new',
+          'tbs-shared-search',
+        ],
+      },
+      {
+        // The settings entry point is `main.tsx` (it is what imports the
+        // stylesheets); the surface that renders the control is `App.tsx`.
+        entry: 'settings/main.tsx',
+        surface: 'settings/App.tsx',
+        renders: ['@ui/shared/rule-form-fields', '@ui/shared/tag-selector'],
+        classes: ['tbs-tag-selector', 'tbs-shared-search', 'tbs-form-error'],
+      },
+    ];
+
+    const failures: string[] = [];
+    for (const c of CONSUMERS) {
+      const reachable = reachableCss(c.entry);
+      // The declared consumer must actually import the component: a stale entry in
+      // this table would otherwise assert reachability for a surface that no longer
+      // uses the control (a guard passing by not looking).
+      const surfaceText = entrySource(c.surface);
+      const rendersAtLeastOne = c.renders.some((spec) => surfaceText.includes(spec));
+      if (!rendersAtLeastOne) failures.push(`${c.surface} declares consumers it does not import`);
+      for (const cls of c.classes) {
+        if (!defines(reachable, cls)) failures.push(`${c.entry} cannot reach a rule for .${cls}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  it('the reachability guard can FAIL (a settings-only class is not reachable from the sidebar)', () => {
+    // The case table: proves the check above discriminates rather than passing
+    // because everything is reachable. `tbs-settings__panel` is defined — in
+    // settings.css — and the sidebar does not load that file.
+    const sidebar = reachableCss('sidebar/App.tsx');
+    expect(defines(readAllCss(), 'tbs-settings__panel')).toBe(true);
+    expect(defines(sidebar, 'tbs-settings__panel')).toBe(false);
+    // ...and base.css IS reachable, so the check is not simply returning nothing.
+    expect(defines(sidebar, 'tbs-form-field')).toBe(true);
   });
 
   it('should keep the sidebar source popover free of a separate trigger element', () => {

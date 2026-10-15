@@ -111,6 +111,64 @@ body {
 .tbs-icon-btn--md { width: 32px; height: 32px; font-size: 16px; }
 .tbs-icon-btn--lg { width: 40px; height: 40px; font-size: 20px; }
 
+/* ─── Icon action (icon-only button, label on hover/focus) ────────────────── */
+
+/* The same box as `.tbs-btn--sm` (24px tall, `--radius-sm`), so an icon action and
+   a text button sit on one baseline in the same row — the row's height does not
+   change when an emoji is swapped for a drawing.
+
+   The emoji this replaces were laid out by their FONT: an em box is taller than its
+   glyph, so the pencil and the bin sat visually high in a 32px button and their
+   apparent weight differed. A fixed flex box with a centred SVG removes both. */
+.tbs-icon-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 28px rather than the 24px a `.tbs-btn--sm` occupies: the target is icon-only,
+     so it has no text to widen it, and the extra 4px keeps the hit area usable
+     without changing the row's height (the row is sized by the tallest child). */
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--easing),
+              color var(--duration-fast) var(--easing),
+              border-color var(--duration-fast) var(--easing);
+}
+
+.tbs-icon-action:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+/* The remove actions. `currentColor` on the SVG is what lets one rule recolour the
+   drawing — with the emoji, the bin stayed red on hover while its neighbour went
+   grey, because a glyph's colour is its own. */
+.tbs-icon-action--danger {
+  color: var(--color-error);
+}
+
+.tbs-icon-action--danger:hover:not(:disabled) {
+  background: var(--color-error-bg, var(--color-bg-hover));
+  color: var(--color-error);
+}
+
+.tbs-icon-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The keyboard ring, on the button. `:focus-visible` so a mouse click does not
+   draw it — the same treatment every other control in the app gets. */
+.tbs-icon-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* ─── Tooltip ─────────────────────────────────────────────────────────────── */
 
 .tbs-tooltip-wrapper {
@@ -213,9 +271,39 @@ body {
   justify-content: flex-end;
   gap: var(--space-sm);
   flex: 0 0 auto;
+  /**
+   * WRAPPING + a generous basis, and both are load-bearing.
+   *
+   * `.tbs-btn` is `white-space: nowrap`, and a flex item's automatic minimum is
+   * `min-content` — the full label on ONE line. Two long labels ("Include them
+   * (2 extra tag definitions)" ≈ 38 characters each) therefore needed ~2×250px
+   * inside a dialog capped at `max-width: 480px` minus this padding (~384px
+   * available). Flex had to shrink them below their min-content, `nowrap` refused
+   * to wrap the text, and the labels were CLIPPED: the reported "button text is
+   * not fully shown".
+   *
+   * `flex-wrap` lets the pair become a column when they cannot both fit, which is
+   * the only correct resolution here — a decision between two long, equally
+   * weighted options must stay readable, and forcing them side by side is what
+   * made it unreadable.
+   */
+  flex-wrap: wrap;
+  align-items: center;
   padding: var(--space-md) var(--space-xl) var(--space-lg);
   border-top: 1px solid var(--color-border);
   background: var(--color-bg);
+}
+
+/* The buttons in a decision dialog, given room to be READ.
+ *
+ * With `flex-wrap` above, the two long labels stack instead of clipping, but a
+ * wrapped row still shrinks each button below its label before it wraps unless the
+ * basis is stated — so each one asks for its full width and wraps only when the
+ * pair genuinely cannot fit. `min-width` equals that basis for the same reason. */
+.tbs-dialog__footer > .tbs-btn {
+  flex: 1 1 200px;
+  min-width: 200px;
+  max-width: 100%;
 }
 
 /* ─── Toast ───────────────────────────────────────────────────────────────── */
@@ -1320,3 +1408,740 @@ body {
   max-height: 90vh;
   overflow-y: auto;
 }
+
+/* ─── Shared tag + look-up styles (used by BOTH the settings page and the sidebar) ──
+  
+   These live in base.css because that is what every entry point loads. The
+   TagSelector is rendered by the ONE shared field set (RuleFormFields), which the
+   sidebar rule modal uses too — so a rule for it in settings.css was reachable from
+   one surface and INVISIBLE from the other (the sidebar loads only base + sidebar).
+   The acceptance review found the modal's tag control rendering entirely unstyled.
+   
+   The same applies to the look-up field (search box) and the inline form error,
+   which the shared field set renders on BOTH surfaces. Their old 	bs-settings__
+   prefix named the surface rather than the component, which is exactly how they
+   came to be filed under a stylesheet the other surface never loads: a component
+   that lives in two surfaces must not claim one of their namespaces.
+/* ─── Search (ONE box, used by every list) ─────────────────────────────────
+ *
+ * `tbs-shared-search` is the INPUT and is an implementation detail of
+ * `SearchField` (see `search-field.tsx`); `tbs-search-field` is the wrapper that
+ * positions the clear control. Callers pass props, not classes — the class stayed
+ * because a few toolbars size the input directly, and renaming it would churn
+ * selectors without changing behaviour.
+ *
+ * Every value here is a TOKEN or a shared metric: 13px is `--font-size-md` (the
+ * same size `.tbs-form-field input` uses), 6/10px padding and `--radius-sm` are the
+ * app's input metrics. The previous candidate-tray override used 12px, which is
+ * exactly the drift this consolidation removes.
+ */
+.tbs-shared-search {
+  flex: 1;
+  min-width: 160px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  background: var(--color-bg);
+  /* The box grows/shrinks with the toolbar rather than snapping: border and
+     background are the MOUSE state, and both are animatable (no layout property
+     is animated). */
+  transition: border-color var(--duration-fast) var(--easing),
+              background-color var(--duration-fast) var(--easing);
+}
+
+.tbs-shared-search::placeholder {
+  /* Muted, but a step darker than `--color-text-tertiary`: a placeholder is a
+     hint the user must be able to READ, and the faintest grey fails contrast on
+     the white surface. */
+  color: var(--color-text-secondary);
+  opacity: 1;
+}
+
+.tbs-shared-search:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+/* The MOUSE focus state, and deliberately NOT `outline: none`.
+ *
+ * Removing the outline here also removed the global `:focus-visible` ring (that
+ * rule sets an OUTLINE, and `outline: none` in a later, more specific rule wins) —
+ * so a keyboard user tabbing into a search box got a 1px border change and nothing
+ * else. The ring is now re-asserted below for keyboard focus, and the border
+ * handles the mouse, which is what the outline was being suppressed for. */
+.tbs-shared-search:focus {
+  border-color: var(--color-primary);
+}
+
+/* The keyboard ring, restored. Same shape as every other focusable control in the
+   app (2px, 2px offset, the shared ring token). */
+.tbs-shared-search:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.tbs-shared-search:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The native `type="search"` decorations are replaced by `SearchField`'s own clear
+   button: WebKit's ✕ is an unstyled glyph, Firefox's is absent, and the cancel
+   button's size differs between them. Hiding them makes the control look the same
+   everywhere and gives the clear action a real, labelled, hit-testable element. */
+.tbs-shared-search::-webkit-search-cancel-button,
+.tbs-shared-search::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* ── The search wrapper (input + clear) ───────────────────────────────────── */
+
+.tbs-search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  /* Sized by the AXIS its container uses.
+   *
+   * `flex-basis` applies to the MAIN axis, so one value cannot serve both: a
+   * horizontal toolbar wants a ~160px width, while a COLUMN container (the
+   * candidate tray's section) would read that same value as a 160px HEIGHT — which
+   * is exactly the gap that appeared above and below the candidate search box.
+   * The two cases are spelled separately so a column caller cannot inherit a height
+   * it never asked for. */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* A row-oriented toolbar: the wrapper is the flexible item, so it asks for a
+   sensible minimum width and the input fills whatever is left. */
+.tbs-settings__toolbar > .tbs-search-field,
+.tbs-tag-selector__toolbar > .tbs-search-field,
+.tbs-settings__pick-toolbar > .tbs-search-field,
+.tbs-record-list__toolbar > .tbs-search-field {
+  flex: 1 1 160px;
+}
+
+/* A COLUMN container: the wrapper is a plain block that must be exactly as tall as
+   the input, so it takes no space of its own along the main axis. */
+.tbs-tag-chip-input__tray-section > .tbs-search-field {
+  flex: 0 0 auto;
+}
+
+/* Room for the clear button, reserved by PADDING on the input rather than by a
+   margin on the button: the input's own width stays 100% of the wrapper, so the
+   caret and the text do not slide around when the button appears or disappears. */
+.tbs-search-field:has(.tbs-search-field__clear) .tbs-shared-search {
+  padding-right: 28px;
+}
+
+.tbs-search-field__clear {
+  position: absolute;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 24px: the mouse-density target this desktop surface uses (the same floor the
+     tag rows are built to). The `-4px` offset keeps the ICON visually 10px from
+     the border while the hit area stays 24px. */
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--easing),
+              background-color var(--duration-fast) var(--easing);
+}
+
+.tbs-search-field__clear:hover {
+  color: var(--color-text);
+  background: var(--color-bg-hover);
+}
+
+.tbs-search-field__clear:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* ── Icon preview (import/export) ──────────────────────────────────────────── */
+
+/* `object-fit` matters: these are 16px cells and a favicon is usually square,
+   but a recipe is rendered at 2× and must scale down cleanly rather than clip. */
+.tbs-icon-preview {
+  display: inline-block;
+  object-fit: contain;
+  border-radius: 2px;
+  flex: none;
+  vertical-align: middle;
+}
+
+.tbs-icon-preview--empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-tertiary);
+}
+.tbs-form-error {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}
+/* The TagSelector fieldset (base class; the __list/__option/__swatch rules follow). */
+.tbs-tag-selector {
+  border: none;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+/* The tag picker is a ROW of chips, not a column of rows.
+ *
+ * It was a full-width row per tag, which took a line per tag and made the field as
+ * tall as the table. The expression filter's candidate tray already solves the same
+ * display problem (`tbs-tag-chip-input__candidates`), so this borrows that
+ * vocabulary exactly: a wrapping flex row of small chips, each chip carrying its
+ * tag's own colours. One line at rest, wrapping only when there are more tags than
+ * fit — and the values below are that component's, so the two read as one control.
+ *
+ * No `max-height`/scroll: a wrapping row grows by lines, and a scroll container
+ * inside a form clips the chips the user is looking for. */
+.tbs-tag-selector__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The search + the selected tally, above the list they narrow. Same control
+   vocabulary as every other list in the app (`tbs-shared-search`). */
+.tbs-tag-selector__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  min-width: 0;
+}
+
+.tbs-tag-selector__toolbar .tbs-shared-search {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+/* The tally sits at the right edge, so it reads as a summary of the control
+   rather than as another search affordance. `auto` pushes it there without
+   taking part in the flex growth. */
+.tbs-tag-selector__count {
+  margin-left: auto;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* A search that matches nothing: states the query back and names the way out.
+   A blank list would leave the user unsure whether the table is empty. */
+.tbs-tag-selector__empty {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* "… +N more": a disclosure, not a tag. Dashed so it cannot be mistaken for a tag
+   whose name starts with an ellipsis, and it STATES the hidden count because that
+   is the question the control has to answer. It sits in the SAME chip row as the
+   tags (hence no `align-self`/`margin-top`), exactly as the candidate tray's does,
+   so revealing the rest does not move the control around. */
+.tbs-tag-selector__more {
+  padding: 2px 8px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  min-height: 24px;
+}
+
+.tbs-tag-selector__more:hover {
+  color: var(--color-text);
+}
+
+/* One CHIP = one target, matching the candidate tray's chip geometry exactly
+   (border, radius, padding, type size, min-height) so the two pickers are visually
+   the same control. The whole chip toggles, so the hit area is the chip — not just
+   its checkbox. */
+.tbs-tag-selector__option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px 8px;
+  border: 1px solid var(--tbs-border, #d0d5dd);
+  border-radius: 4px;
+  background: var(--tbs-surface, #fff);
+  font-size: 12px;
+  color: var(--color-text);
+  cursor: pointer;
+  min-height: 24px;
+  min-width: 0;
+}
+
+/* SELECTED reads as a state of the chip, which is what makes the row scannable:
+   the cap's "which of these are on" question is answered by weight and tint rather
+   than by hunting for a ticked box among words. */
+.tbs-tag-selector__option:has(input:checked) {
+  border-color: var(--color-primary);
+  background: var(--color-primary-subtle, var(--color-bg-hover));
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+/* Feedback on hover and on press — the row had NEITHER, so nothing said the row
+   was clickable until the checkbox itself was hit. */
+.tbs-tag-selector__option:hover {
+  background: var(--color-bg-hover);
+}
+
+.tbs-tag-selector__option:active {
+  background: var(--color-bg-secondary);
+}
+
+/* The keyboard ring lives on the ROW, because the row is the target: the native
+   checkbox's own outline is a 13px square nobody can see at a glance, and
+   `:has()` is what lets the row know its box was reached by keyboard. */
+.tbs-tag-selector__option:has(input:focus-visible) {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.tbs-tag-selector__option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* The "+ New tag" chip: the same geometry as a tag chip (so the row stays one
+   rhythm) but styled as an ACTION — dashed and primary-coloured — rather than as a
+   tag that happens to be called "New tag". Identical treatment to the candidate
+   tray's own create chip. */
+.tbs-tag-selector__option--add {
+  border-style: dashed;
+  border-color: var(--color-primary);
+  background: transparent;
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.tbs-tag-selector__option--add:hover {
+  background: var(--color-bg-hover);
+}
+
+.tbs-tag-selector__option--add:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* The swatch is the tag's own appearance in miniature: background AND text
+   colour, so the row shows what each tag IS rather than only its name — the same
+   swatch, at the same 16px, as the candidate tray's. The ring is load-bearing: a
+   light-background tag on a white chip is otherwise an invisible shape. */
+.tbs-tag-selector__swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+  outline: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent);
+  outline-offset: -1px;
+}
+
+/* ─── The tag PICKER (a row of chips) ───────────────────────────────────────── */
+
+/* One shared shape for every "choose tags" surface: the rule forms' selector, the
+   import/export panels. Deliberately the same wedding as
+   `tbs-tag-chip-input__candidates` — same gap, same chip metrics — so the app has
+   ONE answer to "which tags" rather than three that happen to look similar. */
+.tbs-tag-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+/* The whole chip is the target; the checkbox inside is the state, not the only
+   thing to hit. A chip whose tag is EXCLUDED is dimmed rather than removed, so the
+   row keeps its length and "what I turned off" stays visible. */
+.tbs-tag-picker__option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.tbs-tag-picker__option[data-included='false'] {
+  opacity: 0.45;
+}
+
+/* The chip IS the tag: name in its own text colour on its own background, with the
+   hairline ring that keeps a light-on-light pair visible on a white surface. */
+.tbs-tag-picker__chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 200px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  outline: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent);
+  outline-offset: -1px;
+}
+
+/* ─── The import tag rows (a chip, a status, and the facet detail) ──────────── */
+
+/* The tag row: the preview pair on the left, the status on the right. One line
+   per tag, which is what keeps a long vocabulary scannable. */
+.tbs-settings__import-records > li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* A row this import does not move. Muted rather than hidden: hiding it would make
+   "my tag is gone from the list" indistinguishable from "my tag is unchanged". */
+.tbs-settings__import-records > li[data-muted='true'] {
+  opacity: 0.55;
+}
+
+.tbs-settings__import-tag-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+/* The two consequences in the export self-consistency dialog, one line each beside
+   the button that takes it. A list rather than prose so the two are compared
+   side by side, which is the decision being made. */
+.tbs-settings__consistency-choices {
+  margin: var(--space-sm) 0 0;
+  padding-left: var(--space-lg);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.tbs-settings__consistency-choices strong {
+  color: var(--color-text);
+}
+
+/* The export tag picker's own toolbar: the search + the bulk control, above the
+   chips they act on — the placement every other list in the app uses. */
+.tbs-settings__pick-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tbs-settings__pick-toolbar .tbs-shared-search {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+/* A colour facet's swatches, in the value cell beside the hex text: the pair and
+   the arrow between them are what make "these two colours are different" a fact
+   the reader can see rather than decode. */
+.tbs-settings__field-color {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-left: var(--space-xs);
+}
+
+/* The tag-set cells inside the Fields detail: a wrapping row of chips per side,
+   so the before → after pair reads as two sets rather than as a wall of names. */
+.tbs-settings__field-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tbs-settings__field-tag-set {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xxs);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tbs-settings__color-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  outline: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent);
+  outline-offset: -1px;
+}
+
+/* ─── The selected row (a selection the list cannot hide) ───────────────────── */
+
+/* Above the list and independent of the filter and the cap: resolved from the
+   selected IDS, so a checked tag can never be scrolled, filtered or folded out of
+   reach — which is exactly the state the search + disclosure could produce. */
+.tbs-tag-selector__selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  margin-top: var(--space-sm);
+  min-width: 0;
+}
+
+/* The pill IS the chip it represents, with a remove affordance. Same visual
+   language as the expression's chips, so "a selected tag" looks like a tag
+   everywhere in the app. */
+.tbs-tag-selector__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 999px;
+}
+
+.tbs-tag-selector__pill:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.tbs-tag-selector__pill:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.tbs-tag-selector__chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 160px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* The same ring as the list swatch, for the same reason: a light-on-light pair
+     is a permitted choice and must stay visible on a white surface. */
+  outline: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent);
+  outline-offset: -1px;
+}
+
+/* The remove mark only resolves on hover/focus, so a row of chips does not read
+   as a row of ×s. It stays in the DOM (and in the accessible name) either way. */
+.tbs-tag-selector__pill-x {
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  color: var(--color-text-tertiary);
+}
+
+.tbs-tag-selector__pill:hover .tbs-tag-selector__pill-x,
+.tbs-tag-selector__pill:focus-visible .tbs-tag-selector__pill-x {
+  color: var(--color-text);
+}
+
+/* The create form: a labelled stack, so it reads as a form rather than as a row
+   of unlabelled controls nested inside the rule form. */
+.tbs-tag-selector__new {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  min-width: 0;
+}
+
+.tbs-tag-selector__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  min-width: 0;
+}
+
+.tbs-tag-selector__field > span:first-child {
+  font-weight: 500;
+}
+
+.tbs-tag-selector__field input[type='text'] {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  min-height: 30px;
+}
+
+.tbs-tag-selector__colors {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+/* Two columns: the fields on the left, the live preview pinned to the right so it
+   is visible while EITHER colour control is being used (they sit one above the
+   other, and a preview below both would be off-screen at the moment it matters). */
+.tbs-tag-selector__new-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-sm);
+  align-items: start;
+  min-width: 0;
+}
+
+.tbs-tag-selector__preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  min-width: 0;
+}
+
+.tbs-tag-selector__preview-label {
+  font-weight: 500;
+}
+
+.tbs-tag-selector__new-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+/* Pushes the submit pair to the right edge, so Cancel/Create are grouped and
+   separated from the "Auto text colour" assistant rather than reading as a third
+   action of equal rank. */
+.tbs-tag-selector__new-spacer {
+  margin-left: auto;
+}
+
+/* ─── The legend's collapse control ─────────────────────────────────────────── */
+
+/* A quiet text button beside the field name: it manages the field's height, which
+   is a preference, not a decision — so it must not compete with the tag rows for
+   attention. The count rides it when collapsed, so a collapsed field still says
+   how many tags are selected. */
+.tbs-tag-selector__legend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+}
+
+.tbs-tag-selector__collapse {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: underline;
+  min-height: 20px;
+}
+
+.tbs-tag-selector__collapse:hover {
+  color: var(--color-text);
+}
+
+/* Collapsed with nothing selected: stated rather than left as an empty gap, or
+   the field would look broken rather than deliberately empty. */
+.tbs-tag-selector__selected-empty {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+}
+
+/* The table has no tags AT ALL. Sits inside the chip row, so the `+ New tag` chip
+   that answers it stays on the same line — the sentence and the way out are read
+   together. Deliberately NOT the `--selected-empty` styling above: that one
+   describes a CHOICE ("nothing selected"), this one describes the DATA. */
+.tbs-tag-selector__empty {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+}
+
+/* ─── The create form's two layouts ─────────────────────────────────────────── */
+
+/* `stacked` — four rows. The sidebar's modal is a ~288px column, where two colour
+   pickers side by side would each be too narrow to use. */
+.tbs-tag-selector__new--stacked .tbs-tag-selector__new-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+/* `grid` — two rows of two, pairing each control with the one it belongs to
+   (name + preview, background + text). The settings editors have the width for
+   it, and pairing shortens the form by half. */
+.tbs-tag-selector__new--grid .tbs-tag-selector__new-body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+  align-items: start;
+}
+
+/* Narrower than two usable columns: fall back to one rather than squashing the
+   colour pickers. */
+@media (max-width: 559px) {
+  .tbs-tag-selector__new--grid .tbs-tag-selector__new-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The success cue for a create. A `status` line, so it is announced politely and
+   reads as a confirmation rather than as a problem (the error line is the alert). */
+.tbs-tag-selector__notice {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--font-size-sm);
+  color: var(--color-success, #16a34a);
+}
+
+/* ─── The create form's actions ─────────────────────────────────────────────── */
+
+/* The three actions are the shared `.tbs-btn` now (`ghost` for the helper and
+   Cancel, `primary` for Create), so the `__auto` / `__cancel` / `__create`
+   families are GONE. They existed only to give these three buttons a look of their
+   own — which is exactly what the Tags page and this form came to disagree about,
+   even though both ask the same question. One component, one visual language. */

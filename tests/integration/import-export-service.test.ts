@@ -1,4 +1,4 @@
-﻿import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
 import { ImportExportService } from '@background/import-export-service';
@@ -100,12 +100,13 @@ describe('T14b/T21: import service (redesigned protocol)', () => {
   const apply = (file: string) =>
     service.applyImport(file, defaultImportIntent(), repo.getConfigVersion());
 
+  // A PORTABLE rule as a package carries it (no timestamps, tags inlined as names
+// — A3). `tags: []` is the required fifth-dimension field (T1).
   const rule = (id: string, value: string, type: 'exact' | 'regex' = 'exact') => ({
     id,
     urlMatch: { type, value },
     priority: 0,
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
+    tags: [] as string[],
   });
 
   describe('D15 — domain constraints are SKIPPED + disclosed, not a whole-apply rejection', () => {

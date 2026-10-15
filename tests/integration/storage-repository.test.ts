@@ -468,9 +468,11 @@ describe('T7: Storage repository, cache, versioned writes, cleanup', () => {
       // configVersion is NOT bumped by normalization.
       expect(sync.configVersion).toBe(7);
       // The normalized state has exactly the new key set — the legacy field is
-      // gone entirely (not read, not preserved).
+      // gone entirely (not read, not preserved). `tags` joins it as the fifth
+      // dimension (D0/S5): the normalized state carries an EMPTY table, which is
+      // the lenient-read default (P2), not a preserved legacy value.
       expect(Object.keys(sync).sort()).toEqual(
-        ['autoBindGlobal', 'configVersion', 'matchSettings', 'rules', 'slots', 'switchDirection'].sort(),
+        ['autoBindGlobal', 'configVersion', 'matchSettings', 'rules', 'slots', 'switchDirection', 'tags'].sort(),
       );
     });
   });

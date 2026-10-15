@@ -32,6 +32,7 @@ const FULL_RESULT: ImportApplyResult = {
     rules: { changed: 3, failed: 1 },
     settings: { changed: 1, failed: 0 },
     shortcuts: { changed: 1, failed: 0 },
+    tags: { changed: 1, failed: 0 },
   },
   tolerant: [
     { kind: 'unknown-field', detail: 'futureTopLevel' },
@@ -59,6 +60,7 @@ const EMPTY_RESULT: ImportApplyResult = {
     rules: { changed: 0, failed: 0 },
     settings: { changed: 0, failed: 0 },
     shortcuts: { changed: 0, failed: 0 },
+    tags: { changed: 0, failed: 0 },
   },
   tolerant: [],
   domainViolations: [],

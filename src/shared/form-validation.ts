@@ -12,6 +12,7 @@
  */
 
 import {
+  isProtectedUrl,
   isSafeFaviconProtocol,
   validateRegex,
   wildcardToRegex,
@@ -61,6 +62,10 @@ export const MESSAGES = {
   emptyMatchUrl: 'Enter a URL pattern',
   fullUrl: 'Enter a full URL (https://…)',
   invalidRegex: 'Enter a valid regular expression',
+  // Names the reason AND the fix, and mirrors the worker's own wording
+  // ("Cannot create rules for protected internal pages") so the inline message and
+  // the request-time error read as the same judgement.
+  protectedUrl: 'Internal browser pages cannot have rules. Use a normal http(s) URL.',
   unsafeIcon: 'Unsupported favicon protocol. Use http(s) or a data: image.',
 } as const;
 
@@ -106,6 +111,21 @@ function validateMatchUrl(matchType: 'exact' | 'regex', url: string): Validation
   // is not sufficient — parseability must be checked explicitly.
   if (!isParseableUrl(trimmed)) {
     return [{ field: 'matchUrl', message: MESSAGES.fullUrl, severity: 'block' }];
+  }
+
+  // A PROTECTED page is a match target the worker will refuse, so the form refuses
+  // it first. `chrome://newtab` is parseable, so every check above passes it — and
+  // the sidebar is most often opened ON a new tab, where "Add to global rules"
+  // prefills exactly that URL. The result was a form that looked valid, a Save
+  // button that was enabled, and a rejection the user only saw AFTER clicking
+  // ("Cannot create rules for protected internal pages"), with nothing on screen
+  // pointing at the URL field.
+  //
+  // Same predicate as the worker (`isProtectedUrl` over the ONE generated prefix
+  // list), so the pre-check cannot drift from the write and become a new
+  // "passes the form, fails the save" path.
+  if (isProtectedUrl(trimmed)) {
+    return [{ field: 'matchUrl', message: MESSAGES.protectedUrl, severity: 'block' }];
   }
   return [];
 }

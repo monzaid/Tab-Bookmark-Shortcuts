@@ -21,6 +21,7 @@ import type {
   SyncState,
   LocalState,
   DashboardRow,
+  TagDefinition,
 } from './types';
 
 // ─── Base Message Envelope ───────────────────────────────────────────────────
@@ -120,6 +121,77 @@ export interface UpdateRuleRequest extends RequestBase {
 export interface DeleteRuleRequest extends RequestBase {
   action: 'DELETE_RULE';
   payload: { ruleId: string };
+}
+
+// Tag operations (A1 — a SEPARATE message family).
+//
+// These are deliberately NOT fields on `CREATE_RULE`/`UPDATE_RULE`: a rule write
+// ends in `applyToMatchingTabs` (the delivery path), and tags must never reach
+// it. A distinct action keeps the two lifecycles apart, so `TagService` can hold
+// no delivery entry point at all (A-a/I1).
+export interface CreateTagRequest extends RequestBase {
+  action: 'CREATE_TAG';
+  payload: {
+    name: string;
+    backgroundColor: string;
+    textColor: string;
+  };
+}
+
+/**
+ * Edit a tag: its name, its text colour and its background colour.
+ *
+ * ONE action for all three fields rather than a rename action plus a colour
+ * action. The Tags page edits one tag in one form and submits once, so two
+ * actions would mean two writes for one user decision — and two writes can
+ * half-fail, leaving a tag renamed but not recoloured with no single value to
+ * report. It also keeps the "one write path per concept" rule (A1) literally
+ * true for "edit a tag".
+ *
+ * This REPLACES `RENAME_TAG` outright rather than living beside it: a rename is
+ * just an edit whose colours happen to be unchanged, and keeping both would have
+ * left two actions that write the same three fields.
+ *
+ * The id is untouched, which is the point of storing ids — every referencing
+ * rule follows a new NAME automatically, with no write to any rule (C1).
+ */
+export interface UpdateTagRequest extends RequestBase {
+  action: 'UPDATE_TAG';
+  payload: {
+    tagId: string;
+    name: string;
+    backgroundColor: string;
+    textColor: string;
+  };
+}
+
+export interface DeleteTagRequest extends RequestBase {
+  action: 'DELETE_TAG';
+  payload: { tagId: string };
+}
+
+export interface SetRuleTagsRequest extends RequestBase {
+  action: 'SET_RULE_TAGS';
+  payload: {
+    ruleId: string;
+    tagIds: string[];
+  };
+}
+
+/**
+ * C5/P3: replay a tag deletion's snapshot.
+ *
+ * Needed because the undo lives in the UI while the write path is the service:
+ * the `UndoBar`'s `tag-delete` write is replayed through this action so the
+ * restore goes through the SAME atomic mutator the delete used, rather than a
+ * second write path the UI invented.
+ */
+export interface RestoreTagRequest extends RequestBase {
+  action: 'RESTORE_TAG';
+  payload: {
+    tag: TagDefinition;
+    refs: Array<{ ruleId: string; tagIds: string[] }>;
+  };
 }
 
 // Tab override operations
@@ -446,7 +518,12 @@ export type UiRequest =
   | NextMatchCurrentRequest
   | PrevMatchCurrentRequest
   | ConflictCancelRequest
-  | ConflictOverwriteRequest;
+  | ConflictOverwriteRequest
+  | CreateTagRequest
+  | UpdateTagRequest
+  | DeleteTagRequest
+  | SetRuleTagsRequest
+  | RestoreTagRequest;
 
 export type ContentRequest =
   | ContentNavigationReport
@@ -532,6 +609,36 @@ export interface RecoveryResponse {
 export interface GenericResponse {
   action: string;
   result: { success: true } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+// ─── Tag responses ───────────────────────────────────────────────────────────
+
+export interface CreateTagResponse {
+  action: 'CREATE_TAG';
+  result: { success: true; tag: TagDefinition } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+export interface UpdateTagResponse {
+  action: 'UPDATE_TAG';
+  result: { success: true; tag: TagDefinition } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+export interface DeleteTagResponse {
+  action: 'DELETE_TAG';
+  /**
+   * `affectedRuleCount` is what the Confirm wording is built from (C4): the
+   * number of rules the deletion strips the tag from. Returning it from the
+   * write itself keeps the number and the action describing the same event.
+   */
+  result:
+    | { success: true; affectedRuleCount: number }
+    | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+export interface SetRuleTagsResponse {
+  action: 'SET_RULE_TAGS';
+  /** The FINAL stored ids — after dedupe and dangling-strip (D3/A-h). */
+  result: { success: true; tagIds: string[] } | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
 // ─── Worker → Content Messages ───────────────────────────────────────────────

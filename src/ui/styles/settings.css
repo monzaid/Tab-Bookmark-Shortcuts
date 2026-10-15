@@ -87,6 +87,19 @@
   line-height: 1.5;
 }
 
+/* A hint that DISCLOSES a consequence rather than describing the panel — the
+   import side's "these referenced tags are not defined, so they will be created
+   with a default appearance". Info-tinted and bordered because it is a fact the
+   user should act on, not body prose; deliberately NOT error-coloured, since
+   nothing has failed and the import is still theirs to make. */
+.tbs-settings__hint--notice {
+  padding: var(--space-xs) var(--space-sm);
+  border-left: 3px solid var(--color-info);
+  border-radius: var(--radius-sm);
+  background: var(--color-info-bg);
+  color: var(--color-text);
+}
+
 /* ─── Setting Rows (Global Matching Settings, ACC#2) ─────────────────────── */
 
 /**
@@ -272,10 +285,16 @@
   border-radius: var(--radius-sm);
   width: 20px;
   height: 20px;
-  line-height: 1;
+  /* Centred by FLEX now, not `line-height`. The mark used to be the `↺` GLYPH,
+     which `line-height: 1` centred by its font metrics; with an SVG inside, that
+     centres the inline box rather than the drawing, and the icon sat a pixel high.
+     `font-size` went with it — nothing inside is text any more. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   cursor: pointer;
   color: var(--color-text-secondary);
-  font-size: var(--font-size-sm);
 }
 .tbs-settings__sort-reset:hover {
   color: var(--color-text);
@@ -603,22 +622,6 @@
   color: var(--color-error);
 }
 
-.tbs-settings__search {
-  flex: 1;
-  min-width: 160px;
-  padding: 6px 10px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  font-family: inherit;
-  font-size: var(--font-size-md);
-  color: var(--color-text);
-  background: var(--color-bg);
-}
-
-.tbs-settings__search:focus {
-  border-color: var(--color-primary);
-  outline: none;
-}
 
 /* ─── Strategy Radio Cards ────────────────────────────────────────────────── */
 
@@ -1611,27 +1614,6 @@
   }
 }
 
-/* ── Icon preview (import/export) ──────────────────────────────────────────── */
-
-/* `object-fit` matters: these are 16px cells and a favicon is usually square,
-   but a recipe is rendered at 2× and must scale down cleanly rather than clip. */
-.tbs-icon-preview {
-  display: inline-block;
-  object-fit: contain;
-  border-radius: 2px;
-  flex: none;
-  vertical-align: middle;
-}
-
-.tbs-icon-preview--empty {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  line-height: 1;
-  color: var(--color-text-tertiary);
-  background: var(--color-bg-tertiary);
-}
 
 /* The Icon field's before → after pair (R8). Only shown when the icon
    CHANGES, so it is a deliberate, uncommon decoration rather than row furniture. */
@@ -1984,3 +1966,692 @@
     transition: none;
   }
 }
+/* ─── Tag chips (Rule Tags iteration, T12) ──────────────────────────────────── */
+
+/* The expression box.
+ *
+ * Three changes from the first cut, all of them from the same complaint:
+ *
+ *   - it is BOUNDED (a control, not a panel): a border, a surface, and a visible
+ *     NAME — the placeholder used to be the only label, and it disappears the
+ *     moment the first chip lands;
+ *   - the candidate tray is inside a popover-like region that is HIDDEN when the
+ *     user is not choosing, so the box is one line tall at rest rather than two
+ *     rows of buttons permanently pushing the rules table down;
+ *   - the flow gets a real focus treatment (`:focus-within`), because the field
+ *     inside is the only place a keystroke goes and nothing said so. */
+.tbs-tag-chip-input {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm);
+  background: var(--color-bg);
+  /* The containing block for the sweep rectangle, which is positioned against
+     this box rather than the viewport. */
+  position: relative;
+}
+
+/* Visible focus for the WHOLE control.
+ *
+ * The focusable descendant is the text field, so `:focus-within` is the only
+ * selector that can draw the ring around the box the user perceives as the
+ * control. Without it, tabbing into the expression changed nothing on screen
+ * (guideline: never remove a focus indicator without replacing it). */
+.tbs-tag-chip-input:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
+}
+
+/* While a sweep is running, text under the marquee must not appear selected:
+   the sweep IS the selection gesture, and a wash of browser-blue over the chip
+   labels competes with it. */
+.tbs-tag-chip-input__field-row.is-sweeping {
+  user-select: none;
+}
+
+/* ─── The header: a name, and the two ways into the tray ────────────────────── */
+
+.tbs-tag-chip-input__label-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+/* One headed section per question. `flex: 1 1 240px` lets the two sit side by
+   side when there is room and stack when there is not — they are independent
+   lists, so stacking them loses no meaning. */
+.tbs-tag-chip-input__tray-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.tbs-tag-chip-input__label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.tbs-tag-chip-input__field-row {
+  min-width: 0;
+}
+
+.tbs-tag-chip-input__chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ─── The tray ──────────────────────────────────────────────────────────────── */
+
+/* The collapse control for the tray.
+ *
+ * A plain disclosure, horizontal, above the region it governs — the tray is now
+ * optional (the keyboard can build the whole expression through the popup), so
+ * it gets a control the user can find, rather than only the ability to be
+ * defaulted open. */
+.tbs-tag-chip-input__tray-toggle {
+  align-self: flex-start;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  min-height: 22px;
+}
+
+.tbs-tag-chip-input__tray-toggle:hover {
+  color: var(--color-text);
+}
+
+.tbs-tag-chip-input__tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+/* `hidden` must actually hide: the `display: flex` above outranks the browser's
+   `[hidden] { display: none }`, so without this the collapsed tray would stay on
+   screen and the control would do nothing. */
+.tbs-tag-chip-input__tray[hidden] {
+  display: none;
+}
+
+/* ─── The composition popup (the "input method" window) ─────────────────────── */
+
+/* FLOATED, and that is the point: it appears and disappears on every keystroke,
+   so taking part in the layout would move the page under the user's cursor
+   (Content Jumping). Overlaid, the rows below never move.
+ *
+ * POSITIONED AGAINST THE CARET, not the control. It is rendered inside the slot
+ * for the gap the caret occupies, so `left: 0` is the caret's own place on the
+ * line and `top: 100%` is just under the slot's row — which is "under the cursor"
+ * for a caret that is mid-expression, and follows it onto a wrapped line.
+ *
+ * FIXED WIDTH, because an auto width would track the slot (a chip is ~60px, the
+ * slot is wider with the field in it) and give a menu too narrow to read a tag
+ * name in. A width plus a `min()` keeps it inside the control on a narrow pane
+ * instead of overflowing the panel. */
+.tbs-tag-chip-input__ime {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  top: 100%;
+  margin-top: 2px;
+  width: 260px;
+  max-width: min(260px, calc(100vw - 48px));
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-xxs);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  box-shadow: var(--shadow-lg);
+}
+
+.tbs-tag-chip-input__ime-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  min-height: 26px;
+}
+
+/* The highlight is a BACKGROUND as well as the `aria-selected` attribute, so the
+   keyboard's position is visible (never encoded in ARIA alone). */
+.tbs-tag-chip-input__ime-item.is-active,
+.tbs-tag-chip-input__ime-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.tbs-tag-chip-input__ime-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The KIND of row, dimmed and pushed right. It is what tells `AND` (an operator)
+   from a tag that happens to be named AND — the distinction the old flat list of
+   white pills could not make. */
+.tbs-tag-chip-input__ime-kind {
+  flex: 0 0 auto;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+/* The create row reads as an action, not as another candidate: it adds something
+   that does not exist yet, which is a different promise. */
+.tbs-tag-chip-input__ime-item--create {
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+/* A group NAME inside the tray, so the buttons are not an undifferentiated pile:
+   "which tag" and "which operator" are different questions. */
+.tbs-tag-chip-input__tray-title {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tbs-tag-chip-input__tray-empty,
+.tbs-tag-chip-input__tray-hint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+/* The gesture hints. Deliberately understated — they are a one-time lesson, not
+   content to read on every visit — but PRESENT, because multi-select, reordering
+   and the delete keys were otherwise discoverable only by guessing. */
+.tbs-tag-chip-input__hint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+/* The chip's TEXT colour is never set here.
+   It used to be a hard-coded `color: #fff`, which was correct only for the one
+   chip kind that also got a background from the renderer (a tag). An operator or
+   paren chip has NO background, so white-on-transparent-on-white made `AND` and
+   `OR` literally invisible — the "the operator position shows no text" bug.
+   The colour now arrives with the appearance (`TagExpressionInput.chipStyle`),
+   and `.tbs-tag-chip--operator` supplies a visible pair for the kinds that have
+   no stored appearance of their own. */
+.tbs-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Operators and parens: no stored colours to show, so they take the neutral
+   surface instead of a tag's palette. Visibly a DIFFERENT KIND of chip than a
+   tag — the outline and the absence of a colour is what says "this is grammar,
+   not a label". */
+.tbs-tag-chip--operator {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  outline: 1px solid var(--color-border-strong);
+  outline-offset: -1px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.tbs-tag-chip:focus-visible {
+  outline: 2px solid var(--tbs-focus, #2563eb);
+  outline-offset: 2px;
+}
+
+.tbs-tag-chip__label {
+  white-space: nowrap;
+}
+
+/* ─── The insertion point (2.3) ────────────────────────────────────────────── */
+
+/* One chip plus the caret gap that may precede it. `inline-flex` so the slot
+   collapses to the chip when no caret is inside it — the gap must not reserve
+   space on every chip, or an expression would read as if it had holes in it. */
+/* `position: relative` is what the popup is measured against: the popup is
+   rendered INSIDE the slot whose gap holds the caret, so "under the cursor" is
+   this element's bottom edge rather than the whole control's. The slot is
+   `inline-flex` so it collapses to the chip when no caret is inside it. */
+.tbs-tag-chip-input__slot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The caret itself: a thin rule at the insertion point. It is drawn as an
+   ELEMENT rather than as a pseudo-element so its position is a fact of the DOM,
+   which is the only form jsdom can assert (there is no layout engine to measure).
+
+   It BLINKS, because a caret that does not blink is indistinguishable from a
+   divider: the animation is the convention that says "this is where you are", not
+   decoration. Under `prefers-reduced-motion` the blink is dropped and the rule
+   stays SOLID rather than being hidden — the insertion point must remain visible
+   (the same rule the jump highlight follows). */
+.tbs-tag-chip-input__caret {
+  display: inline-block;
+  width: 2px;
+  align-self: stretch;
+  min-height: 18px;
+  border-radius: 1px;
+  background: var(--color-primary);
+  animation: tbs-caret-blink 1.06s steps(1, end) infinite;
+}
+
+@keyframes tbs-caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tbs-tag-chip-input__caret {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* ─── The gap before/between/after chips, as a click target ─────────────────── */
+
+/* A caret-in-a-text-field lesson applied to chips: the space between two tokens
+   is a PLACE, so it has to be clickable. Kept thin (the width of the caret plus
+   a couple of pixels of slack) so it reads as a boundary rather than as a
+   control, and given a hover line so the user discovers it is a place. */
+.tbs-tag-chip-input__slot-gap {
+  align-self: stretch;
+  width: 6px;
+  min-height: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: text;
+  /* The visual is a hairline the full height of the row, revealed on hover. */
+  background-image: linear-gradient(var(--color-border-strong), var(--color-border-strong));
+  background-size: 1px 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0;
+}
+
+.tbs-tag-chip-input__slot-gap:hover,
+.tbs-tag-chip-input__slot-gap:focus-visible {
+  opacity: 1;
+}
+
+/* The gap a drag would land in. It is the SAME element as the click target, and
+   the same visual language as the hover line — widened and coloured — so "the
+   insertion point" reads identically whether the user is pointing with a click
+   or a drag. The two end gaps use it too, which is what gives "the beginning"
+   and "the end" a visible drop location. */
+.tbs-tag-chip-input__slot-gap--drop {
+  opacity: 1;
+  width: 10px;
+  background-image: linear-gradient(var(--color-primary), var(--color-primary));
+  background-size: 3px 100%;
+}
+
+/* ─── Selection, drop target, marquee (the batch-editing gestures) ──────────── */
+
+.tbs-tag-chip--selected {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.tbs-tag-chip {
+  cursor: pointer;
+}
+
+/* The sweep rectangle. `position: absolute` against the control's own box, and
+   `pointer-events: none` so it never becomes the target of its own sweep. */
+.tbs-tag-chip-input__marquee {
+  position: absolute;
+  pointer-events: none;
+  border: 1px solid var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  border-radius: 2px;
+}
+
+/* The batch affordance.
+ *
+ * The ROW IS ALWAYS PRESENT (the component renders it unconditionally and
+ * conditionally renders its CONTENTS): a bar that appears and disappears moves
+ * every row below it on each selection, which is the layout jump the guidelines
+ * name. `min-height` reserves the line so the empty state costs nothing. */
+.tbs-tag-chip-input__selection {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-height: 26px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+/* A candidate tag is drawn as the CHIP it would become: the tag's own background
+   and text colour on a swatch, beside the name. A flat list of names made the
+   user guess what they were about to add. */
+.tbs-tag-chip-input__candidate--tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.tbs-tag-chip-input__candidate-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  /* The same hairline the Tags table uses, so a light pair is still legible on
+     a white tray without either colour the user chose being overridden. */
+  outline: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent);
+  outline-offset: -1px;
+}
+
+.tbs-tag-chip-input__selection-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.tbs-tag-chip-input__selection button {
+  padding: 2px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  min-height: 24px;
+}
+
+.tbs-tag-chip__remove {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+
+/* The text field FLOWS INLINE, at the caret's gap.
+ *
+ * It used to be `width: 100%`, which broke exactly the interaction it exists
+ * for: a full-width field cannot sit BETWEEN two chips, so it was pushed onto a
+ * line of its own and the control read as a search box under the label rather
+ * than as "the expression with a place to type". `width: auto` + a sensible
+ * minimum lets it follow the chips and wrap with them, which is what makes the
+ * popup able to appear at the caret.
+ *
+ * `min-width` rather than a fixed width because the field must be clickable
+ * (and visible) when it sits between two chips: a zero-width gap would leave
+ * nothing to aim at, and the placeholder would have nowhere to render. */
+.tbs-tag-chip-input__field {
+  flex: 1 1 90px;
+  min-width: 90px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  padding: 4px 2px;
+}
+
+.tbs-tag-chip-input__field::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+/* The candidate section's own search.
+ *
+ * It used to also set `font-size: 12px`, which made this one box smaller than
+ * every other search box in the app — an override with no reason behind it, since
+ * all of them now render through `SearchField` and take `--font-size-md`. It is a
+ * full-width box inside the section it narrows (the input is `flex: 1` already). */
+.tbs-tag-chip-input__candidate-search {
+  width: 100%;
+}
+
+/* ─── The popup's pager ─────────────────────────────────────────────────────── */
+
+.tbs-tag-chip-input__ime-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xxs) var(--space-xs);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.tbs-tag-chip-input__ime-page {
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  padding: 2px 6px;
+  min-height: 22px;
+}
+
+.tbs-tag-chip-input__ime-page:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The page is stated with the TOTAL ("2 / 5"), because a bare "2" does not
+   answer "how much is left" — and the keys are named, since a shortcut nobody is
+   told about is a shortcut nobody has. */
+.tbs-tag-chip-input__ime-page-label {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.tbs-tag-chip-input__ime-page-keys {
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono, monospace);
+}
+
+.tbs-tag-chip-input__candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tbs-tag-chip-input__candidate {
+  border: 1px solid var(--tbs-border, #d0d5dd);
+  background: var(--tbs-surface, #fff);
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  /* Comfortable pointer target; the OS metric stays intact because this is a
+     padding increase, not a height clamp. */
+  min-height: 24px;
+}
+
+.tbs-tag-chip-input__candidate:hover {
+  background: var(--color-bg-hover);
+}
+
+/* The grammar controls, separated from the tag candidates: they answer a
+   different question ("join two tags") than the buttons beside them ("pick a
+   tag"), and mixing them in one undifferentiated row is how a user picks AND
+   meaning to pick the tag named AND. */
+.tbs-tag-chip-input__operator {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-secondary);
+}
+
+/* "… +N more" — a disclosure, not a candidate. Distinguished so it does not read
+   as a tag whose name happens to start with an ellipsis. */
+.tbs-tag-chip-input__more {
+  color: var(--color-text-secondary);
+  border-style: dashed;
+}
+
+/* The create row is the ONE action in this row, so it carries the primary
+   treatment rather than competing at equal weight with the candidates. */
+.tbs-tag-chip-input__create {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+
+/* ─── Tag filter notices (T15) ──────────────────────────────────────────────── */
+/* C6 (incomplete) and C7 (deleted reference) are DIFFERENT states, so they are
+   different classes as well as different copy: the missing-reference notice is
+   emphasised because it names something the user must act on. */
+.tbs-settings__tag-notice {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #667085);
+}
+
+.tbs-settings__tag-notice--missing {
+  color: var(--color-text-danger, #b42318);
+}
+
+
+/* ─── Tags page (T16, restructured as a table) ───────────────────────────────── */
+
+/* The tag's own icon: the name drawn in its own text colour on its own
+   background. It IS the appearance — a tag has no separate glyph — so the table
+   shows the pair rather than describing it.
+
+   The outline is load-bearing rather than decoration: the form permits a
+   light-on-light pair (it is the user's judgement to make, and the export
+   default happens to be white text), and without it such a tag would be an
+   invisible shape on a white row. It is drawn OUTSIDE the chip so neither colour
+   the user chose is overridden to achieve the contrast. */
+.tbs-tag-chip--swatch {
+  outline: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent);
+  outline-offset: -1px;
+}
+
+/* ─── Tag appearance form (create + edit) ───────────────────────────────────── */
+
+/* The name field and the live preview sit side by side above the colour pair,
+   so the preview is adjacent to the two controls it depicts. */
+.tbs-tag-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  min-width: 0;
+}
+
+.tbs-tag-form__field > span {
+  font-weight: 500;
+}
+
+.tbs-tag-form__field input[type='text'] {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  min-height: 30px;
+}
+
+.tbs-tag-form__preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.tbs-tag-form__preview-label {
+  font-weight: 500;
+}
+
+/* The swatch row reuses the icon editor's geometry (`.tbs-icon-editor__colors`
+   and `__swatch`), so the two colour pickers are the same control. Only the
+   wrap behaviour is set here, because a tag form is narrower than the icon
+   dialog and the palette must wrap rather than overflow. */
+.tbs-tag-form__field .tbs-icon-editor__colors {
+  flex-wrap: wrap;
+}
+
+
+/* ─── Tag association panel (which items use this tag) ──────────────────────── */
+
+.tbs-tag-assoc {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm) 0;
+  min-width: 0;
+}
+
+/* The nested rule list is INSET, so it reads as belonging to the tag row above
+   rather than as a second top-level table that happens to follow it. */
+.tbs-tag-assoc .tbs-settings__table {
+  margin-left: var(--space-lg);
+  width: calc(100% - var(--space-lg));
+}
+
+
+/* ─── Tag import/export panels (T17) ────────────────────────────────────────── */
+.tbs-settings__mode-alternative {
+  margin-top: 4px;
+  background: none;
+  border: none;
+  color: var(--color-link, #2563eb);
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.tbs-settings__result-note {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--color-text-secondary, #667085);
+}
+
+
+

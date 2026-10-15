@@ -53,7 +53,7 @@ function rule(id: string, value: string, overrides: Partial<PageRule> = {}): Pag
   return {
     id,
     urlMatch: exact(value),
-    priority: 0,
+    priority: 0, tagIds: [],
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
@@ -68,6 +68,7 @@ function sync(slots: SlotDefinition[], rules: PageRule[]): SyncState {
     autoBindGlobal: false,
     slots,
     rules,
+    tags: [],
   };
 }
 
@@ -82,7 +83,7 @@ function portableSlot(id: number): PortableSlotDef {
 }
 
 function portableRule(id: string, value: string): PortableRule {
-  return { id, urlMatch: exact(value), priority: 0 };
+  return { id, urlMatch: exact(value), priority: 0, tags: [] };
 }
 
 function pkg(parts: {
@@ -139,7 +140,10 @@ describe('T8: computeDiff — mode governs only "file-missing, target-has"', () 
 
   it('reports which dimensions the package actually carried (A2/A3)', () => {
     const diff = computeDiff(FILE, CURRENT);
-    expect(diff.dimensions).toEqual({ slots: true, rules: false, settings: false, shortcuts: false });
+    // The fifth dimension (tags) is present in the presence model (D0), so the
+    // expected literal carries it too — a stale literal here would be asserting
+    // the OLD four-dimension contract.
+    expect(diff.dimensions).toEqual({ slots: true, rules: false, settings: false, shortcuts: false, tags: false });
   });
 
   it('expands title / icon field-level changes (A12)', () => {
@@ -208,15 +212,97 @@ describe('T8: computeDiff — mode governs only "file-missing, target-has"', () 
     expect((kept?.fields ?? []).every((f) => !f.changed)).toBe(true);
   });
 
-  it('names `priority` for a RULE row (the field that record really has)', () => {
-    // The facet set follows the RECORD KIND, not the branch: a rule's priority is
-    // reportable, so dropping it for rules would hide a change the import makes.
+  it('names `priority` AND `tags` for a RULE row (the fields that record really has)', () => {
+    // The facet set follows the RECORD KIND, not the branch: a rule's priority and
+    // its tags are both reportable, so dropping either for rules would hide a change
+    // the import makes. `tags` is a rule-only field for the same reason `priority`
+    // is — it is what makes the Fields detail describe the record COMPLETELY rather
+    // than merely looking complete.
     const current = sync([], [rule('rule-a', 'https://a.example/')]);
     const file = pkg({ rules: [portableRule('rule-a', 'https://a.example/')] });
     const diff = computeDiff(file, current);
     const row = diff.records.find((r) => r.kind === 'rule');
     expect((row?.fields ?? []).map((f) => f.field))
-      .toEqual(['title', 'icon', 'match-url', 'match-type', 'priority']);
+      .toEqual(['title', 'icon', 'match-url', 'match-type', 'priority', 'tags']);
+    // The tags facet carries BOTH sides as chip sets, which is what the row renders.
+    const tagsField = (row?.fields ?? []).find((f) => f.field === 'tags');
+    expect(tagsField?.before?.kind).toBe('tags');
+    expect(tagsField?.after?.kind).toBe('tags');
+  });
+
+  it('a rule\'s tags facet honours "Leave them out" (the preview follows the answer)', () => {
+    // The reported contradiction: the user answered "Leave them out" in the orphan
+    // dialog, and the rule row went on showing the file's tags — a preview of an
+    // outcome the write would NOT produce (the write drops every reference). The
+    // preview now reads the SAME decision function the service does.
+    const current = sync([], [rule('r1', 'https://a.example/')]);
+    const file = {
+      ...pkg({ rules: [{ ...portableRule('r1', 'https://a.example/'), tags: ['work'] }] }),
+      tags: [{ name: 'work', backgroundColor: '#111111', textColor: '#ffffff' }],
+    };
+    // Sanity: with the default intent the rule WOULD carry the file's tag.
+    const kept = computeDiff(file, current, defaultImportIntent());
+    const keptRow = kept.records.find((r) => r.kind === 'rule');
+    const keptTags = (keptRow?.fields ?? []).find((f) => f.field === 'tags');
+    expect(keptTags?.after?.kind === 'tags' && keptTags.after.tags.map((t) => t.name)).toEqual(['work']);
+
+    // With the answer, the same row previews an EMPTY set.
+    const stripped = computeDiff(file, current, {
+      ...defaultImportIntent(),
+      stripOrphanTagNames: true,
+    });
+    const strippedRow = stripped.records.find((r) => r.kind === 'rule');
+    const strippedTags = (strippedRow?.fields ?? []).find((f) => f.field === 'tags');
+    expect(strippedTags?.after?.kind === 'tags' && strippedTags.after.tags).toEqual([]);
+  });
+
+  it('a tag whose COLOURS differ is `replaced`, with the difference in its facets', () => {
+    // The reported defect: the file's tag had different colours and the panel said
+    // nothing about it — the row was `kept`, so the write had nothing to do and the
+    // appearance the user was importing silently did not arrive. A name-only
+    // comparison was the cause: "the machine already has a tag called work" was read
+    // as "the same tag", when its appearance is the thing being imported.
+    const current = sync([], []);
+    current.tags = [{ id: 't1', name: 'work', backgroundColor: '#111111', textColor: '#ffffff' }];
+    const file = {
+      ...pkg({ rules: [] }),
+      tags: [{ name: 'work', backgroundColor: '#ff0000', textColor: '#000000' }],
+    };
+    const diff = computeDiff(file, current);
+    const row = diff.tagNames?.find((r) => r.id === 'work');
+    // A CHANGE, so the status, the summary and the write all agree that something
+    // happens...
+    expect(row?.status).toBe('replaced');
+    // ...and the facets say WHAT: both appearances, each marked changed.
+    const bg = (row?.fields ?? []).find((f) => f.field === 'tag-background');
+    expect(bg?.changed).toBe(true);
+    expect(bg?.before).toEqual({ kind: 'color', value: '#111111' });
+    expect(bg?.after).toEqual({ kind: 'color', value: '#ff0000' });
+    const fg = (row?.fields ?? []).find((f) => f.field === 'tag-text');
+    expect(fg?.changed).toBe(true);
+  });
+
+  it('a tag that matches on BOTH name and colours is genuinely `kept`', () => {
+    // The other half: flagging a difference that is not there would be the mirror
+    // error — a "change" the user reviews and the write does not make.
+    const current = sync([], []);
+    current.tags = [{ id: 't1', name: 'work', backgroundColor: '#111111', textColor: '#ffffff' }];
+    const file = {
+      ...pkg({ rules: [] }),
+      tags: [{ name: 'work', backgroundColor: '#111111', textColor: '#ffffff' }],
+    };
+    const diff = computeDiff(file, current);
+    const row = diff.tagNames?.find((r) => r.id === 'work');
+    expect(row?.status).toBe('kept');
+    expect((row?.fields ?? []).every((f) => !f.changed)).toBe(true);
+  });
+
+  it('a SLOT row has no tags facet (the field does not exist on a slot)', () => {
+    // The mirror of the priority rule: inventing a field for a record that cannot
+    // have it misstates what the record is.
+    const diff = computeDiff(FILE, CURRENT);
+    const slotRow = diff.records.find((r) => r.kind === 'slot');
+    expect((slotRow?.fields ?? []).map((f) => f.field)).not.toContain('tags');
   });
 });
 

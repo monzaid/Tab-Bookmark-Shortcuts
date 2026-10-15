@@ -21,7 +21,7 @@ const TAB_URL = 'https://a.com/';
 function rule(overrides: Partial<PageRule> & { id: string }): PageRule {
   return {
     urlMatch: { type: 'exact', value: TAB_URL },
-    priority: 0,
+    priority: 0, tagIds: [],
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
@@ -186,8 +186,8 @@ describe('field-chain — priority ties (rule tier is a SINGLE winner)', () => {
   it('on equal priority the newer rule wins', () => {
     const state = makeState({
       rules: [
-        rule({ id: 'r-old', title: 'Old', priority: 5, createdAt: '2026-01-01T00:00:00.000Z' }),
-        rule({ id: 'r-new', title: 'New', priority: 5, createdAt: '2026-06-01T00:00:00.000Z' }),
+        rule({ id: 'r-old', title: 'Old', priority: 5, tagIds: [], createdAt: '2026-01-01T00:00:00.000Z' }),
+        rule({ id: 'r-new', title: 'New', priority: 5, tagIds: [], createdAt: '2026-06-01T00:00:00.000Z' }),
       ],
     });
 

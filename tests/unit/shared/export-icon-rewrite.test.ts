@@ -34,6 +34,7 @@ function stateWith(slots: SlotDefinition[], rules: PageRule[] = []): SyncState {
     autoBindGlobal: true,
     slots,
     rules,
+    tags: [],
   };
 }
 
@@ -66,7 +67,7 @@ describe('T5: export-side icon rewrite', () => {
     const rule: PageRule = {
       id: 'rule-42',
       urlMatch: { type: 'exact', value: 'https://r.example.com' },
-      priority: 0,
+      priority: 0, tagIds: [],
       favicon: { type: 'upload', value: 'data:image/png;base64,AAAA' },
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
