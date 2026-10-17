@@ -230,4 +230,41 @@ describe('shared component chain — every used class has a CSS definition', () 
     // a node that lives outside the wrapper's subtree.
     expect(css).not.toMatch(/\.tbs-source-hover__popover/);
   });
+
+  /**
+   * The swap control must be ONE row, and its candidates must FLOAT.
+   *
+   * Both are layout properties that jsdom cannot evaluate (it does not apply
+   * external stylesheets), so they are asserted here against the stylesheet text —
+   * the same approach as the popover guard above.
+   */
+  it('keeps the swap control on one row and floats its candidate list', () => {
+    // One row: no wrapping, so a narrow sidebar squeezes the FIELD rather than
+    // pushing the button onto a second line (which is what made it unreadable).
+    expect(css).toMatch(/\.tbs-slot-swap\s*\{[^}]*display:\s*flex/);
+    expect(css).toMatch(/\.tbs-slot-swap\s*\{[^}]*flex-wrap:\s*nowrap/);
+
+    // The row must NOT claim a width of its own: the menu is sized by its longest
+    // entry, and a floor here widened every slot menu. Guarded as an ABSENCE,
+    // because the regression is the reintroduction of that property.
+    const rowRule = /\.tbs-slot-swap\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(rowRule).not.toMatch(/min-width/);
+
+    // The field is narrow and shrinkable — it holds a one-or-two digit slot number,
+    // and `min-width: 0` is what lets it compress instead of pinning the row open.
+    expect(css).toMatch(/\.tbs-slot-swap__search\s*\{[^}]*min-width:\s*0/);
+
+    // Floating: out of flow, hanging from the MENU's bottom edge so it clears the
+    // menu's own entries rather than covering them.
+    expect(css).toMatch(/\.tbs-slot-swap__list\s*\{[^}]*position:\s*absolute/);
+    expect(css).toMatch(/\.tbs-slot-swap__list\s*\{[^}]*top:\s*100%/);
+
+    // NARROWER than the menu, so it cannot read as "the menu" itself. The menu has
+    // no explicit width (it hugs its content), and the panel is a percentage of it.
+    expect(css).toMatch(/\.tbs-slot-swap__list\s*\{[^}]*width:\s*60%/);
+    expect(css).toMatch(/\.tbs-slot-swap__list\s*\{[^}]*max-width:/);
+    // The menu is the containing block for it — it must not be `static`, or the
+    // panel would position against some ancestor further up the tree.
+    expect(css).toMatch(/\.tbs-slot-menu\s*\{[^}]*position:\s*absolute/);
+  });
 });

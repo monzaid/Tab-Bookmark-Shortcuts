@@ -6,8 +6,12 @@
  * for a slot that was still there, with no way to tell.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { SidebarApp } from '@ui/sidebar/App';
+
+/** Every undo bar on screen, in stack order (U1 makes bars stackable). */
+const undoBars = (): HTMLElement[] =>
+  Array.from(document.querySelectorAll<HTMLElement>('.tbs-undo-bar'));
 
 /**
  * T19 anchor migration: the Confirm primitive now enforces a ~120ms protection
@@ -128,9 +132,13 @@ describe('T26 (N3) — sidebar consumes the response `success` flag', () => {
     respondWith(BASE_STATE, { success: false, errorCode: 'CONFIG_CONFLICT', message: 'nope' });
 
     // Undo bar only renders after a save; drive the save through the save button.
+    // A10: an overwrite of an OCCUPIED slot returns the `captureId` of the undo
+    // snapshot it captured — the sidebar can only offer the bar once it has one
+    // (an empty-slot save has nothing to restore and returns none). The mock
+    // mirrors the real worker response; no assertion below is relaxed.
     mockSendMessage.mockImplementation((message: { action?: string }) => {
-      if (message?.action === 'SAVE_SLOT') return Promise.resolve({ success: true });
-      if (message?.action === 'UNDO_SAVE') return Promise.resolve({ success: false });
+      if (message.action === 'SAVE_SLOT') return Promise.resolve({ success: true, slot: { id: 1 }, captureId: 1 });
+      if (message.action === 'UNDO_SAVE') return Promise.resolve({ success: false });
       return Promise.resolve(BASE_STATE);
     });
 
@@ -144,10 +152,10 @@ describe('T26 (N3) — sidebar consumes the response `success` flag', () => {
 
     // An occupied slot produces the 5s undo bar (shared generalized UndoBar,
     // whose label is simply "Undo"; the slot id is in the status message).
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    // One overwrite ⇒ exactly one bar. Stated as a count (U1 lets bars stack), and
+    // scoped to that bar, so the click can never land on a different entry.
+    await waitFor(() => { expect(undoBars()).toHaveLength(1); });
+    fireEvent.click(within(undoBars()[0]).getByRole('button', { name: 'Undo' }));
 
     await waitFor(() => {
       const texts = screen.getAllByRole('alert').map((a) => a.textContent ?? '');

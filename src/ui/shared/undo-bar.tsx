@@ -1,12 +1,18 @@
 /**
- * UndoBar — the generalized undo surface (IMP-6 / DT9).
+ * UndoBar — the generalized undo surface (IMP-6 / DT9), now a STACK (U1/U2).
  *
  * A single implementation shared by the sidebar and the settings page, so there
  * is never a second undo UI (`Toast.action` stays unused by design — N11).
  *
- * DT9 requires the restore to be ATOMIC: one Undo replays every write in the
- * batch and then triggers a single redelivery, rather than restoring layer by
- * layer (which would expose half-restored state and fan out deliveries).
+ * DT9 requires each restore to be ATOMIC: one Undo replays every write in that
+ * action's batch and then triggers a single redelivery, rather than restoring
+ * layer by layer (which would expose half-restored state and fan out deliveries).
+ *
+ * U1: several bars stack SIMULTANEOUSLY, each with its own Undo button — so the
+ * button must name the entry it belongs to, and `onUndo` carries that identity
+ * (never "the newest one").
+ * U2: each bar counts down its OWN `expiresAt`; one expiring leaves the others
+ * untouched. (The previous single-timer version ignored `expiresAt` entirely.)
  */
 
 import { useCallback, useEffect, useRef } from 'react';
@@ -80,57 +86,151 @@ export interface UndoSnapshot {
   affectedTabIds: number[];
 }
 
-export interface UndoState {
+/** One bar's data: identity + copy + its OWN expiry (U2). */
+export interface UndoBarEntry {
+  id: string;
   message: string;
-  snapshot: UndoSnapshot;
   expiresAt: number;
+  /**
+   * Slots this undo would write.
+   *
+   * Undo is only sound in LIFO order: each entry's snapshot was captured from the
+   * state its predecessors left behind, so applying an OLDER one first makes the
+   * newer entry's snapshot stale. Concretely, with `s1↔s2` then `s2↔s3`:
+   * undoing `s1↔s2` first and then `s2↔s3` writes the pre-`s1↔s2` content of s2
+   * into s2 AGAIN, duplicating s1's original data.
+   *
+   * Two entries are therefore RELATED when they write a common slot, and a related
+   * entry that is NOT the newest must not be actionable (see `blockedIds`).
+   *
+   * `undefined` means "writes nothing meaningful to a slot" (tag/rule entries,
+   * which carry no slot identity) — such entries are never blocked, because they
+   * cannot go stale against a slot write.
+   */
+  slotIds?: number[];
 }
 
 export interface UndoBarProps {
-  state: UndoState;
-  /** Replay the WHOLE batch atomically, then redeliver once. */
-  onUndo: (snapshot: UndoSnapshot) => void;
-  onExpire?: () => void;
-  /** Return focus here when the bar disappears (CT3-g1). */
+  /** Stacked bars, oldest first (U1). Empty → renders nothing. */
+  entries: UndoBarEntry[];
+  /** Undo the entry with this `id` (U1: never "the newest"). */
+  onUndo: (id: string) => void;
+  /** This entry's countdown elapsed (U2: carries WHICH entry). */
+  onExpire: (id: string) => void;
+  /**
+   * Entries whose Undo must be DISABLED — an earlier entry that a newer, RELATED
+   * entry depends on. Explained to the user rather than silently ignored, because
+   * a greyed-out button with no reason reads as a bug.
+   */
+  blockedIds?: ReadonlySet<string>;
+  /** Return focus here when the bars disappear (CT3-g1). */
   returnFocusRef?: React.RefObject<HTMLElement | null>;
-  durationMs?: number;
 }
 
+/**
+ * Default undo lifetime, in milliseconds (CT3/R15) — the UI's own countdown.
+ *
+ * NOT equal to the worker's `PENDING_UNDO_TTL_MS`, and that inequality is
+ * LOAD-BEARING: the worker must retain a snapshot for LONGER than the bar is
+ * shown, because it stamps its deadline when it CAPTURES while the user only sees
+ * the bar once the response has travelled back. When the two were both 5s, that
+ * round trip was charged against the user's viewing time, so a slow first action
+ * (cold service worker) showed a bar with almost none of its life left — the
+ * reported "first swap shows no undo bar" defect.
+ *
+ * The two are separate definitions on purpose beyond the value: the worker must not
+ * import UI code (nor the reverse), and the UI's is a render countdown while the
+ * worker's is a lazy read-time validity check. Their ORDER is asserted by a test
+ * (`sidebar.test.tsx`) so a future edit cannot silently re-invert it.
+ */
 export const UNDO_DEFAULT_MS = 5000;
 
-export function UndoBar({ state, onUndo, onExpire, returnFocusRef, durationMs = UNDO_DEFAULT_MS }: UndoBarProps) {
-  const undoButtonRef = useRef<HTMLButtonElement>(null);
-  const shownAt = useRef<number>(Date.now());
+/** No entries blocked — a stable identity so the default does not re-create a Set. */
+const EMPTY_BLOCKED: ReadonlySet<string> = new Set<string>();
 
-  // CT3-g: the bar takes focus so a keyboard user can undo immediately.
-  useEffect(() => {
-    undoButtonRef.current?.focus();
-  }, [state]);
+export function UndoBar({ entries, onUndo, onExpire, blockedIds, returnFocusRef }: UndoBarProps) {
+  const firstButtonRef = useRef<HTMLButtonElement>(null);
+  const blocked = blockedIds ?? EMPTY_BLOCKED;
+  // Focus the NEWEST ACTIONABLE bar so a keyboard user can undo immediately
+  // (CT3-g). Focusing a disabled button would be a dead end — the browser cannot
+  // focus a `disabled` element, so `firstButtonRef` would silently stay unfocused.
+  // Track by id so a re-render (an entry expiring) does not re-grab focus.
+  const focusedForRef = useRef<string | null>(null);
+  const newestActionableId = [...entries].reverse().find((e) => !blocked.has(e.id))?.id ?? null;
 
-  // CT3-g1: hand focus back when the bar goes away.
   useEffect(() => {
-    const timer = setTimeout(() => {
-      onExpire?.();
+    if (newestActionableId === null || focusedForRef.current === newestActionableId) return;
+    focusedForRef.current = newestActionableId;
+    firstButtonRef.current?.focus();
+  }, [newestActionableId]);
+
+  // U2: one timer PER entry, each keyed on the entry's own `expiresAt`. An entry
+  // expiring only removes itself; the others keep their own deadlines.
+  const entryIds = entries.map((e) => e.id).join('\u0000');
+  useEffect(() => {
+    const timers = entries.map((entry) => {
+      const delay = Math.max(0, entry.expiresAt - Date.now());
+      return setTimeout(() => {
+        onExpire(entry.id);
+      }, delay);
+    });
+    return () => { timers.forEach((t) => { clearTimeout(t); }); };
+    // Re-arm on identity/expiry changes; `entries` identity changes each render,
+    // so key the effect on the stable `entryIds` projection instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entryIds, onExpire]);
+
+  // CT3-g1: hand focus back once the LAST bar disappears.
+  const wasNonEmpty = useRef(false);
+  useEffect(() => {
+    if (entries.length > 0) {
+      wasNonEmpty.current = true;
+      return;
+    }
+    if (wasNonEmpty.current) {
+      wasNonEmpty.current = false;
       returnFocusRef?.current?.focus();
-    }, durationMs);
-    return () => { clearTimeout(timer); };
-  }, [durationMs, onExpire, returnFocusRef, state]);
+    }
+  }, [entries.length, returnFocusRef]);
 
-  const handleUndo = useCallback(() => {
-    onUndo(state.snapshot);
+  const handleUndo = useCallback((id: string) => {
+    onUndo(id);
     returnFocusRef?.current?.focus();
-  }, [onUndo, returnFocusRef, state.snapshot]);
+  }, [onUndo, returnFocusRef]);
 
-  void shownAt;
+  if (entries.length === 0) return null;
 
+  // U1: one `.tbs-undo-bar` per entry, each its own `role="status"` region, so
+  // the existing bar styling (and its message) is reused as-is rather than
+  // introducing a new wrapper class with no stylesheet entry.
+  // CT3-g4: `role="alert"` + `aria-live="polite"` contradict each other; a status
+  // role announces politely without the assertive alert semantics.
   return (
-    // CT3-g4: `role="alert"` + `aria-live="polite"` contradict each other; a
-    // status role announces politely without the assertive alert semantics.
-    <div className="tbs-undo-bar" role="status" aria-live="polite">
-      <span className="tbs-undo-bar__message">{state.message}</span>
-      <Button ref={undoButtonRef} variant="secondary" size="sm" onClick={handleUndo}>
-        Undo
-      </Button>
-    </div>
+    <>
+      {entries.map((entry) => {
+        const isBlocked = blocked.has(entry.id);
+        return (
+          <div key={entry.id} className="tbs-undo-bar" role="status" aria-live="polite">
+            <span className="tbs-undo-bar__message">{entry.message}</span>
+            {isBlocked && (
+              // Say WHY, not just grey it out: the button still reads "Undo", and a
+              // disabled control with no explanation is indistinguishable from a bug.
+              <span className="tbs-undo-bar__blocked-hint">
+                Undo a later swap first
+              </span>
+            )}
+            <Button
+              ref={entry.id === newestActionableId ? firstButtonRef : undefined}
+              variant="secondary"
+              size="sm"
+              disabled={isBlocked}
+              onClick={() => { handleUndo(entry.id); }}
+            >
+              Undo
+            </Button>
+          </div>
+        );
+      })}
+    </>
   );
 }

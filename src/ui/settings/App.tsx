@@ -54,7 +54,8 @@ const JUMP_FIND_ATTEMPTS = 15;
 const JUMP_FIND_INTERVAL_MS = 40;
 import { canonicalIconSource, iconSourceForOwner, iconSourceToFieldSeed } from '@ui/shared/icon-source';
 import { UndoBar, UNDO_DEFAULT_MS } from '@ui/shared/undo-bar';
-import type { UndoState, UndoSnapshot } from '@ui/shared/undo-bar';
+import type { UndoSnapshot } from '@ui/shared/undo-bar';
+import { useUndoStack } from '@ui/shared/undo-stack';
 import { countTagReferences, TAG_NAME_MAX, isTagColorValid, isTagNameValid } from '@shared/tags';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
 import { getMessageClient } from '@ui/shared/message-client';
@@ -651,8 +652,24 @@ function TagsSection({ onRedirectToRule }: { onRedirectToRule: (ruleId: string) 
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ variant: 'success' | 'error'; message: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<TagDefinition | null>(null);
-  /** IMP-6/DT9: the atomic undo for the delete that just happened. */
-  const [undoState, setUndoState] = useState<UndoState | null>(null);
+  /**
+   * IMP-6/DT9 + U4 (T9): the atomic undo for tag writes, on the SHARED stack.
+   *
+   * This section pushes `client` entries only — the snapshot lives in the UI and
+   * the replay sends ONE message per write (the canonical `createUndoReplay`
+   * mapping), wrapped by `handleTagUndo` in this section's own side effects
+   * (busy flag, toast, reload). One stack per surface (U4); several writes now
+   * stack instead of overwriting each other (U1/U6).
+   */
+  const undoStack = useUndoStack({
+    onReplay: (entry) => {
+      // T9 pushes `client` entries only (the tag writes' snapshot lives in the
+      // UI). The replay LOOP is kept verbatim below (D9: "keep the existing
+      // RESTORE_TAG/SET_RULE_TAGS loop"), now reached via `consume(id)`.
+      if (entry.replay === 'client') return handleTagUndo(entry.snapshot);
+      return undefined;
+    },
+  });
   /**
    * Which tags' Edit forms are open UNDER their rows — a SET, so several can be
    * edited at once.
@@ -821,7 +838,8 @@ function TagsSection({ onRedirectToRule }: { onRedirectToRule: (ruleId: string) 
       // Undoable, like every other tag write. The message names the RULE, because
       // this action is scoped to one rule — "Tag removed" would leave the user
       // unsure which of several open association panels it referred to.
-      setUndoState({
+      undoStack.push({
+        replay: 'client',
         message: `Tag removed from "${rule.title ?? rule.urlMatch.value}"`,
         snapshot: { writes: [{ kind: 'rule-tags', ruleId, previousTagIds }], affectedTabIds: [] },
         expiresAt: Date.now() + UNDO_DEFAULT_MS,
@@ -897,7 +915,8 @@ function TagsSection({ onRedirectToRule }: { onRedirectToRule: (ruleId: string) 
       // Only NOW does the undo bar appear — after the confirm is gone and the
       // write has happened (C5/R3).
       if (snapshot) {
-        setUndoState({
+        undoStack.push({
+          replay: 'client',
           message: `Tag "${tag.name}" deleted`,
           snapshot: { writes: [{ kind: 'tag-delete', tag: snapshot.tag, refs: snapshot.refs }], affectedTabIds: [] },
           expiresAt: Date.now() + UNDO_DEFAULT_MS,
@@ -974,7 +993,10 @@ function TagsSection({ onRedirectToRule }: { onRedirectToRule: (ruleId: string) 
       // Only the tags that WERE deleted go into the undo: replaying one that is
       // still present would be a write with nothing to restore.
       if (writes.length > 0) {
-        setUndoState({
+        // U1/T9: one push for the whole batch — the collected `writes` are a
+        // single undoable action, so the bar count must not become N.
+        undoStack.push({
+          replay: 'client',
           message: `${String(writes.length)} ${writes.length === 1 ? 'tag' : 'tags'} deleted`,
           snapshot: { writes, affectedTabIds: [] },
           expiresAt: Date.now() + UNDO_DEFAULT_MS,
@@ -1274,19 +1296,27 @@ function TagsSection({ onRedirectToRule }: { onRedirectToRule: (ruleId: string) 
         onConfirm={() => { void handleBatchDelete(); }}
       />
 
-      {undoState && (
-        <UndoBar
-          state={undoState}
-          onUndo={(snapshot) => { void handleTagUndo(snapshot); }}
-          onExpire={() => { setUndoState(null); }}
-        />
-      )}
+      {/* U1/T9: the SHARED stack, rendered as several stacked bars — each with
+          its own Undo button (`onUndo` carries the entry id) and its own
+          countdown (`onExpire` carries the id). */}
+      <UndoBar
+        entries={undoStack.entries}
+        onUndo={(id) => { undoStack.consume(id); }}
+        onExpire={(id) => { undoStack.expire(id); }}
+      />
 
       {toast && <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />}
     </section>
   );
 
-  /** C5/P3: replay the delete's snapshot through ONE atomic `RESTORE_TAG`. */
+  /**
+   * C5/P3 + U6: replay ONE entry's snapshot through the EXISTING loop.
+   *
+   * The loop itself is unchanged (T9 keeps the existing replay loop verbatim,
+   * now driven by `consume(id)`): one `RESTORE_TAG` per `tag-delete` write, one
+   * `SET_RULE_TAGS` per `rule-tags` write. The surrounding side effects (busy,
+   * toast, reload) stay here; the stack owns only push/consume/expire.
+   */
   async function handleTagUndo(snapshot: UndoSnapshot): Promise<void> {
     setBusy(true);
     try {
@@ -1300,7 +1330,6 @@ function TagsSection({ onRedirectToRule }: { onRedirectToRule: (ruleId: string) 
           await sendMessage('SET_RULE_TAGS', { ruleId: write.ruleId, tagIds: write.previousTagIds });
         }
       }
-      setUndoState(null);
       setToast({ variant: 'success', message: 'Tag restored' });
       await load();
     } catch {
@@ -2852,8 +2881,18 @@ function DashboardSection() {
   const [showUrl, setShowUrl] = useState(false);
   /** D-20: destructive reset is confirmed. */
   const [confirmReset, setConfirmReset] = useState<{ kind: 'entry'; id: string } | { kind: 'all' } | { kind: 'selected' } | null>(null);
-  /** IMP-6/DT9: the generalized atomic undo for an immediate Clear. */
-  const [undoState, setUndoState] = useState<UndoState | null>(null);
+  /**
+   * IMP-6/DT9 + U4 (T10): the generalized atomic undo for an immediate Clear,
+   * on the SHARED stack. `client` entries only — the snapshot lives in the UI
+   * and the replay loop is kept verbatim (`handleUndo`), now driven by
+   * `consume(id)`. Several Clears now stack instead of overwriting (U1/U6).
+   */
+  const undoStack = useUndoStack({
+    onReplay: (entry) => {
+      if (entry.replay === 'client') return handleUndo(entry.snapshot);
+      return undefined;
+    },
+  });
   const [loadError, setLoadError] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
   /**
@@ -3241,8 +3280,10 @@ function DashboardSection() {
         });
       }
       setToast({ variant: 'success', message: field === 'title' ? 'Title cleared' : 'Icon cleared' });
-      // IMP-6 / DT9: offer the atomic undo for the removed value.
-      setUndoState({
+      // IMP-6 / DT9: offer the atomic undo for the removed value. U4/T10: pushed
+      // onto the SHARED stack, so two rows cleared in a row give two bars.
+      undoStack.push({
+        replay: 'client',
         message: field === 'title' ? `${entry.label} title cleared` : `${entry.label} icon cleared`,
         snapshot: {
           writes: (entry.kind === 'override' || entry.kind === 'rule-hit') && entry.tabId != null
@@ -3252,7 +3293,8 @@ function DashboardSection() {
               : [],
           affectedTabIds: entry.tabId != null ? [entry.tabId] : [],
         },
-        expiresAt: Date.now() + 5000,
+        // T2/T10: the hardcoded 5000 is replaced by the shared constant.
+        expiresAt: Date.now() + UNDO_DEFAULT_MS,
       });
       void load();
     } catch {
@@ -3362,7 +3404,13 @@ function DashboardSection() {
     }
   };
 
-  /** IMP-6 / DT9: replay the whole batch atomically, then redeliver once. */
+  /**
+   * IMP-6 / DT9 + U6: replay ONE entry's snapshot through the EXISTING loop.
+   *
+   * The loop itself is unchanged (T10 drives the existing loop by `consume(id)`),
+   * now reached via the shared stack. The surrounding side effects (busy,
+   * toast, reload) stay here.
+   */
   const handleUndo = async (snapshot: UndoSnapshot) => {
     setBusy(true);
     try {
@@ -3384,7 +3432,6 @@ function DashboardSection() {
           });
         }
       }
-      setUndoState(null);
       setToast({ variant: 'success', message: 'Restored' });
       void load();
     } catch {
@@ -3835,14 +3882,13 @@ function DashboardSection() {
         <div className="tbs-sr-only" role="status">{announcement.message}</div>
       )}
 
-      {/* IMP-6/DT9: the generalized undo bar for an immediate Clear. */}
-      {undoState && (
-        <UndoBar
-          state={undoState}
-          onUndo={(snapshot) => { void handleUndo(snapshot); }}
-          onExpire={() => { setUndoState(null); }}
-        />
-      )}
+      {/* IMP-6/DT9 + U1/T10: the generalized undo bars for immediate Clears — the
+          SHARED stack, one bar per entry, each with its own Undo and countdown. */}
+      <UndoBar
+        entries={undoStack.entries}
+        onUndo={(id) => { undoStack.consume(id); }}
+        onExpire={(id) => { undoStack.expire(id); }}
+      />
 
       {toast && (
         <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />

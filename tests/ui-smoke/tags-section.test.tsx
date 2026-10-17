@@ -79,6 +79,18 @@ const sent = (): SentMessage[] =>
 const sentWithAction = (action: string): SentMessage | undefined =>
   sent().find((m) => m.action === action);
 
+/**
+ * Every undo bar currently on screen, in stack order.
+ *
+ * U1 makes the bars stackable, so a bare `getByRole('button', {name:/^Undo$/i})`
+ * throws "multiple elements" as soon as a test produces two undoable actions —
+ * and, worse, a bare `getAllByRole` would let a test that means "exactly one
+ * action" pass while several are stacked. This helper keeps each call site able
+ * to state its intended COUNT, which is the property that actually matters.
+ */
+const undoBars = (): HTMLElement[] =>
+  Array.from(document.querySelectorAll<HTMLElement>('.tbs-undo-bar'));
+
 async function openTags(): Promise<void> {
   render(<SettingsApp />);
   await waitFor(() => { expect(screen.getByRole('navigation')).toBeInTheDocument(); });
@@ -147,8 +159,13 @@ describe('T16: C4/C5 — delete is destructive, states its impact, and is undoab
 
     await waitFor(() => { expect(deleteCalls).toHaveLength(1); });
     expect(deleteCalls[0].tagId).toBe('t1');
-    // The undo affordance appears only AFTER the write.
-    await waitFor(() => { expect(screen.getByRole('button', { name: /^Undo$/i })).toBeInTheDocument(); });
+    // The undo affordance appears only AFTER the write, and this ONE delete is
+    // exactly ONE undoable action. `undoBars()` + a length check is STRONGER than
+    // the old singular query: it still requires the bar, and it now also pins the
+    // count (U1 lets several bars stack, so "a `Undo` button exists" no longer
+    // implies "one action was recorded").
+    await waitFor(() => { expect(undoBars()).toHaveLength(1); });
+    expect(within(undoBars()[0]).getByRole('button', { name: /^Undo$/i })).toBeInTheDocument();
   });
 
   it('the delete confirm button is danger-variant and Enter does not trigger it', async () => {
@@ -217,10 +234,13 @@ describe('T16: the Tags table supports BULK delete (the rules table interaction)
     await new Promise((r) => setTimeout(r, 160));
     fireEvent.click(within(dialog).getByRole('button', { name: /^Delete$/i }));
 
-    await waitFor(() => { expect(screen.getByRole('button', { name: /^Undo$/i })).toBeInTheDocument(); });
+    // ONE batch ⇒ ONE bar (not N). The count is now asserted explicitly, which the
+    // old singular query could not express once several bars may stack (U1).
+    await waitFor(() => { expect(undoBars()).toHaveLength(1); });
+    const bar = undoBars()[0];
     // The bar states the batch size, so "what will undo" is answered before the click.
-    expect(screen.getByRole('button', { name: /^Undo$/i }).closest('div')?.textContent).toContain('2');
-    fireEvent.click(screen.getByRole('button', { name: /^Undo$/i }));
+    expect(bar.textContent).toContain('2');
+    fireEvent.click(within(bar).getByRole('button', { name: /^Undo$/i }));
 
     // TWO restore calls — one per deleted tag, i.e. the whole batch.
     await waitFor(() => {
@@ -249,8 +269,11 @@ describe('T16: the Tags table supports BULK delete (the rules table interaction)
 
     // The toast reports both numbers instead of a bare success.
     await waitFor(() => { expect(screen.getByText(/Deleted 1 of 2/)).toBeInTheDocument(); });
-    // Only ONE restore is offered: there is one successful deletion to undo.
-    fireEvent.click(screen.getByRole('button', { name: /^Undo$/i }));
+    // Only ONE bar is offered — there is one successful deletion to undo. Asserted
+    // as an exact count: "an Undo button exists" is weaker now that bars stack (U1),
+    // and a second bar here would mean the failed deletion was offered for undo.
+    await waitFor(() => { expect(undoBars()).toHaveLength(1); });
+    fireEvent.click(within(undoBars()[0]).getByRole('button', { name: /^Undo$/i }));
     await waitFor(() => {
       expect(sent().filter((m) => m.action === 'RESTORE_TAG')).toHaveLength(1);
     });
@@ -312,8 +335,11 @@ describe('T16: editing keeps references (C1)', () => {
     // The write is the FULL set minus that tag...
     await waitFor(() => { expect(sentWithAction('SET_RULE_TAGS')).toBeDefined(); });
     // ...and an undo appears, whose replay restores the PREVIOUS set (the exact
-    // inverse of the unlink).
-    fireEvent.click(await screen.findByRole('button', { name: /^Undo$/i }));
+    // inverse of the unlink). Scoped + count-checked rather than left as a bare
+    // singular query: it must be THIS unlink's bar, and there must be exactly one
+    // (U1 lets bars stack, so a singular query is both ambiguous and weaker).
+    await waitFor(() => { expect(undoBars()).toHaveLength(1); });
+    fireEvent.click(within(undoBars()[0]).getByRole('button', { name: /^Undo$/i }));
     await waitFor(() => {
       const restores = sent().filter((m) => m.action === 'SET_RULE_TAGS');
       expect(restores[restores.length - 1]?.payload).toEqual({ ruleId: 'r1', tagIds: ['t1'] });
@@ -665,5 +691,72 @@ describe('T16: the section is reachable from navigation (7th page)', () => {
     await waitFor(() => { expect(screen.getByRole('button', { name: 'Tags' })).toBeInTheDocument(); });
     fireEvent.click(screen.getByRole('button', { name: 'Tags' }));
     await waitFor(() => { expect(screen.getByTestId('tags-section')).toBeInTheDocument(); });
+  });
+});
+
+describe('T9 (U1/U4): every tag write shares ONE undo stack', () => {
+  /**
+   * The user-visible promise of the stack (U1): two undoable writes give TWO
+   * bars, and each bar's Undo replays ITS OWN writes — not the newest action.
+   * Before the shared stack, the second write overwrote the first (A7), so this
+   * could not be observed at all.
+   */
+  it('a single delete and an unlink give TWO bars; the first replays only its own write', async () => {
+    // Self-contained: an earlier bulk-delete case replaces `mockSendMessage` to
+    // make `orphan`'s DELETE_TAG FAIL and does not restore it (that suite's
+    // existing convention), so this test installs exactly the responses it needs
+    // rather than inheriting a mock whose behaviour it did not choose.
+    const base = mockSendMessage.getMockImplementation();
+    mockSendMessage.mockImplementation((msg: { action: string; payload?: Record<string, unknown> }) => {
+      if (msg.action === 'DELETE_TAG') {
+        deleteCalls.push({ tagId: String(msg.payload?.tagId) });
+        stateTags = stateTags.filter((t) => t.id !== msg.payload?.tagId);
+        return {
+          result: { success: true, affectedRuleCount: 1 },
+          snapshot: {
+            tag: { id: String(msg.payload?.tagId), name: 'unused-tag', backgroundColor: '#999', textColor: '#fff' },
+            refs: [{ ruleId: 'r1', tagIds: ['t1'] }],
+          },
+        };
+      }
+      return base ? (base(msg) as unknown) : { result: { success: true } };
+    });
+
+    await openTags();
+
+    // 1) Delete tag `orphan` (single delete → one `tag-delete` write).
+    fireEvent.click(
+      within(screen.getByTestId('tag-row-orphan')).getByRole('button', { name: /Delete/i }),
+    );
+    const dialog = await screen.findByRole('dialog', { name: /delete tag/i });
+    await new Promise((r) => setTimeout(r, 160)); // Confirm misclick guard (CT3-b4)
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Delete$/i }));
+    await waitFor(() => { expect(deleteCalls).toHaveLength(1); });
+
+    // 2) Unlink tag `t1` from rule r1 (→ one `rule-tags` write).
+    fireEvent.click(within(screen.getByTestId('tag-row-t1')).getByRole('button', { name: /Show items using/ }));
+    const panel = await screen.findByTestId('tag-associations-t1');
+    fireEvent.click(
+      within(within(panel).getByTestId('tag-assoc-row-t1-r1')).getByRole('button', { name: /Remove this tag from rule/ }),
+    );
+    await waitFor(() => { expect(sentWithAction('SET_RULE_TAGS')).toBeDefined(); });
+
+    // TWO bars — not one overwriting the other (this is the whole change).
+    const undoButtons = await screen.findAllByRole('button', { name: /^Undo$/i });
+    expect(undoButtons).toHaveLength(2);
+
+    // Click the FIRST bar (the delete) — it must replay `RESTORE_TAG` ONLY.
+    // The unlink's `SET_RULE_TAGS` count must not grow from this click.
+    const beforeClick = sent().filter((m) => m.action === 'SET_RULE_TAGS').length;
+    const restoresBefore = sent().filter((m) => m.action === 'RESTORE_TAG').length;
+    fireEvent.click(undoButtons[0]);
+
+    await waitFor(() => {
+      expect(sent().filter((m) => m.action === 'RESTORE_TAG').length).toBe(restoresBefore + 1);
+    });
+    expect(sent().filter((m) => m.action === 'SET_RULE_TAGS').length).toBe(beforeClick);
+
+    // The second bar survives the first being consumed.
+    expect(await screen.findAllByRole('button', { name: /^Undo$/i })).toHaveLength(1);
   });
 });

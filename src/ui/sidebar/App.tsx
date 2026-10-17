@@ -79,12 +79,6 @@ interface SidebarState {
   error: string | null;
 }
 
-interface UndoState {
-  slotId: number;
-  previousSlot: SlotDefinition | null;
-  expiresAt: number;
-}
-
 interface CommandInfo {
   name: string;
   shortcut: string | null;
@@ -108,6 +102,28 @@ const SLOT_COLORS = [
 
 function hasTabsApi(): boolean {
   return typeof chrome !== 'undefined' && !!chrome.tabs && !!chrome.tabs.query;
+}
+
+/**
+ * The slice of `DataTransfer` this file uses, with `setDragImage` OPTIONAL.
+ *
+ * The DOM type declares it always present, but the hand-written stub the UI tests
+ * drive (the same device `tag-chip-input.test.tsx` uses) has only `setData` /
+ * `getData` / `effectAllowed` / `dropEffect`. Declaring the method optional here is
+ * what makes D22's `setDragImage?.(...)` a true check rather than a lint-stripped
+ * formality — and what keeps the production call from throwing under that stub.
+ */
+interface DragTransfer {
+  setData: (format: string, data: string) => void;
+  getData: (format: string) => string;
+  effectAllowed: string;
+  dropEffect: string;
+  setDragImage?: (image: Element, x: number, y: number) => void;
+}
+
+/** Re-type the event's `dataTransfer`, which the test stub may under-provide. */
+function dragTransferOf(event: React.DragEvent): DragTransfer | undefined {
+  return (event as { dataTransfer?: DragTransfer }).dataTransfer;
 }
 
 // ─── Slot Row Component (Problem 7: more menu + double-click edit) ──────────
@@ -327,17 +343,364 @@ interface SlotRowProps {
   onUnbind: (slotId: number) => void;
   /** F4: `trigger` is the durable element to restore focus to on modal close. */
   onEditIcon: (slotId: number, trigger?: HTMLElement | null) => void;
-  onEditTitle: (slotId: number, title: string) => void;
   onAddToGlobal: (slotId: number) => void;
-  onUpdateUrl: (slotId: number, url: string, matchType: 'exact' | 'regex') => void;
+  /**
+   * NOTE: the row no longer writes title/URL edits itself.
+   *
+   * The commit goes through `onEditCommit`, and the LIST performs the write — it is
+   * the only party that knows which RECORD the open draft describes. A row-level
+   * `onEditTitle(slotNumber, …)` would re-address the write by position, which is the
+   * bug this design removes. The list calls its own writers instead.
+   */
   /**
    * Clear the SLOT layer only, leaving the tab override / rule / site tiers
    * intact (item 5.2: clearing is per-layer, not per-field-value).
    */
   onClearLayer?: (field: 'title' | 'icon') => void;
+  /**
+   * D10/D16: move these two slots' CONTENTS to each other. Fired by the drag
+   * path (D8) and by the `⋯` menu dialog (D23); the list owns the actual send.
+   */
+  onSwap: (sourceSlotId: number, targetSlotId: number) => void | Promise<void>;
+  swapPending?: { source: number | null; target: number | null } | null;
+  /** D21: the drag path reports its pending source/target as the pointer moves. */
+  onSwapHover?: (source: number | null, target: number | null) => void;
+  /**
+   * D17/D25-⑤b/D22: the armed gesture's boundary hint, ANCHORED to the focused
+   * row (never to the mouse — a keyboard user's pointer may be off the sidebar).
+   * Only the row the gesture is anchored on renders it.
+   */
+  swapHint?: SwapHint | null;
+  /** The slot the armed gesture is anchored on, so only that row shows the hint. */
+  swapHintAnchor?: number | null;
+  /**
+   * D24: the reference line needs every slot's label, and the row only knows its
+   * own. Handed down as a plain list so the dialog can name all ten.
+   */
+  slotLabels?: string[];
+  /**
+   * The in-progress inline edit for THIS slot, or `null`.
+   *
+   * LIFTED OUT OF THE ROW on purpose. A swap moves a slot's DATA between numbers,
+   * and the user's expectation is that an open editor follows that data — so the
+   * thing being edited has to be movable, which it cannot be while it lives in the
+   * row's own `useState` (a swap re-renders both rows from the same slot numbers,
+   * and each would keep editing whatever number it was already attached to).
+   *
+   * The row is therefore CONTROLLED for editing: it reads this and reports changes
+   * through the callbacks below. Everything else about the row stays local.
+   */
+  edit?: SlotEdit | null;
+  /**
+   * Is the icon-editor MODAL open for this slot? Owned by the list, so the row has
+   * to be told — see `isEditing` below for why this is the only edit that still
+   * refuses a swap.
+   */
+  iconEditorOpen?: boolean;
+  onEditStart: (slotId: number, kind: 'title' | 'url') => void;
+  onEditDraft: (draft: string) => void;
+  onEditMatchType: (matchType: 'exact' | 'regex') => void;
+  onEditCommit: () => void;
+  onEditCancel: () => void;
+  onEditReset: () => void;
+  /**
+   * A bump counter for `edit`: changing it re-triggers the row's "focus the field"
+   * effect, which is needed when the SAME edit is re-delivered to a DIFFERENT row
+   * (the migration after a swap) — the new owner must take focus even though the
+   * edit object it received already existed.
+   */
+  editToken?: number;
 }
 
-function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle, resolvedIcon, onSwitch, onNextMatch, onPrevMatch, onSave, onUnbind, onEditIcon, onEditTitle, onAddToGlobal, onUpdateUrl, titleChain, iconChain, onClearLayer }: SlotRowProps) {
+/**
+ * One in-progress inline edit, owned by the LIST rather than by a row.
+ *
+ * `slotId` is the whole point: it names which slot's DATA the draft belongs to, so
+ * a swap can move the draft by changing this number. The draft describes a RECORD,
+ * not a position — which is also why the commit path writes to `slotId`: the record
+ * is at that number only for as long as nobody moves it.
+ */
+export type SlotEdit =
+  | { slotId: number; kind: 'title'; draft: string; initial: string }
+  | { slotId: number; kind: 'url'; draft: string; initial: string; matchType: 'exact' | 'regex' };
+
+// ─── Swap target field (the `⋯` menu's inline picker) ────────────────────────
+
+/**
+ * How many candidate slots one page of the swap picker holds.
+ *
+ * FIVE, as specified for this control. The tag input's own paging constant is
+ * eight; the two are deliberately not shared, because they are separate
+ * judgements about separate surfaces rather than one number with two homes.
+ */
+const SWAP_PAGE_SIZE = 5;
+
+/**
+ * The `⋯` menu's swap target: a search field with a paged candidate list, replacing
+ * the modal that used to ask for a bare slot number.
+ *
+ * ─── Why this is not the tag input ───────────────────────────────────────────
+ *
+ * The interaction is modelled on `TagExpressionInput`'s type-ahead (search field,
+ * paged popup, `-`/`=` to page, ↑/↓ to walk, Enter to commit, combobox wiring), but
+ * the DELTA is deliberate and load-bearing: that control composes a chip EXPRESSION
+ * and commits chips, whereas this one resolves to exactly ONE slot and then acts.
+ * Two such different commit semantics should not share a component that would have
+ * to be configured back out of its guess.
+ *
+ * `=`/`+` page forward and `-`/`_` page back, matching the tag input — including
+ * accepting the shifted pair, because on most layouts `+` and `_` are what those
+ * keys produce.
+ */
+function SwapTargetField({
+  sourceSlotNumber,
+  slotLabels,
+  onSubmit,
+  submitRef,
+}: {
+  sourceSlotNumber: number;
+  slotLabels?: string[];
+  onSubmit: (target: number) => void;
+  /** Shared with the parent so a second submission cannot reach the wire. */
+  submitRef: React.MutableRefObject<boolean>;
+}): React.JSX.Element {
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(0);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  /**
+   * Whether the field holds focus — and therefore whether the candidates show.
+   *
+   * The list is an accessory to the FIELD, not a permanent part of the menu: an
+   * always-open list would cover the menu's own entries for a user who came for
+   * something else. Focus is the honest signal for "this control is in use".
+   */
+  const [focused, setFocused] = useState(false);
+
+  /**
+   * The field is NOT focused when the menu opens.
+   *
+   * It used to take focus via a mount effect, so that `⋯` → type was one click. But
+   * `⋯` is the menu for SEVEN actions, and the user has not said which one they
+   * want yet: a caret blinking in a swap field answers a question they have not
+   * asked, and reads as the menu having jumped to a decision. Focus arrives when
+   * they click the field or Tab to it, which is the same moment the candidates
+   * appear — so the disclosure and the intent stay in step.
+   */
+
+  /**
+   * The candidate slots.
+   *
+   * Every OTHER slot in 1..10 is a legal leg (D17): an empty one is a legal operand
+   * that degrades the swap to a move (D3), so filtering empties out would hide
+   * exactly the entries the user needs to see. Only the source is excluded, because
+   * swapping a slot with itself is a caller bug the worker rejects.
+   *
+   * A query matches the NUMBER or the recorded label, so "3" and "docs" both work.
+   */
+  const candidates = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const all = Array.from({ length: 10 }, (_, i) => i + 1)
+      .filter((n) => n !== sourceSlotNumber)
+      .map((n) => ({ number: n, label: slotLabels?.[n - 1] ?? 'Empty' }));
+    if (needle === '') return all;
+    return all.filter((c) => String(c.number).includes(needle) || c.label.toLowerCase().includes(needle));
+  }, [query, sourceSlotNumber, slotLabels]);
+
+  // ─── Paging ────────────────────────────────────────────────────────────────
+  const pageCount = Math.max(1, Math.ceil(candidates.length / SWAP_PAGE_SIZE));
+  // Clamped rather than corrected in an effect: a shrinking result set must not
+  // leave the user on a page that no longer exists, and clamping is what the tag
+  // input does for the same reason.
+  const safePage = Math.min(page, pageCount - 1);
+  const pageItems = candidates.slice(safePage * SWAP_PAGE_SIZE, (safePage + 1) * SWAP_PAGE_SIZE);
+  const active = activeIndex >= 0 && activeIndex < pageItems.length ? activeIndex : -1;
+
+  const fieldId = `swap-target-${String(sourceSlotNumber)}`;
+
+  /** Commit a slot. The FIRST guard is the one that survives a repeated key. */
+  const commit = (slot: number): void => {
+    if (submitRef.current) return;
+    submitRef.current = true;
+    onSubmit(slot);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    // Paging only while there is more than one page, so the keys stay available to
+    // the text when there is nothing to page.
+    if (pageCount > 1 && (e.key === '=' || e.key === '+')) {
+      e.preventDefault();
+      setPage((prev) => Math.min(prev + 1, pageCount - 1));
+      // The highlight is a position within a PAGE, so turning the page clears it —
+      // otherwise it would point at a row the user has not seen.
+      setActiveIndex(-1);
+      return;
+    }
+    if (pageCount > 1 && (e.key === '-' || e.key === '_')) {
+      e.preventDefault();
+      setPage((prev) => Math.max(prev - 1, 0));
+      setActiveIndex(-1);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      // Wrapping stays WITHIN the page: crossing a boundary on an arrow key would
+      // scroll the list out from under the user without them asking to turn it.
+      setActiveIndex((prev) => (prev + 1 >= pageItems.length ? 0 : prev + 1));
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveIndex((prev) => (prev - 1 < 0 ? pageItems.length - 1 : prev - 1));
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      // Escape abandons the PICK, not the menu: clearing the buffer is the least
+      // destructive reading, and the menu's own Escape (a second press) still closes
+      // the whole thing. Swallowing it here would make one key do two jobs at once.
+      setQuery('');
+      setActiveIndex(-1);
+      setPage(0);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      // The stopPropagation matters: this field sits inside a slot row whose own
+      // Enter handler ACTIVATES the slot, and the user asked to swap, not to switch.
+      e.stopPropagation();
+      // The highlighted row if there is one, otherwise the top candidate — so
+      // "type a number, hit Enter" does the obvious thing without arrowing first.
+      // Guarded on the LIST, not on the picked element: an empty page has nothing
+      // to take, and an empty result set is a real state (a search matching none).
+      if (pageItems.length === 0) return;
+      const item = active >= 0 ? pageItems[active] : pageItems[0];
+      commit(item.number);
+      return;
+    }
+  };
+
+  return (
+    // THREE siblings, not one wrapper — deliberately.
+    //
+    // The control row and its floating list are separate children of the MENU, so
+    // the list's containing block is the whole menu (which already carries
+    // `position: relative`). Anchored to the row instead, the panel would hang over
+    // the entries directly beneath it and hide them, which is exactly what it must
+    // not do. As a sibling it floats clear of the menu's box entirely.
+    <>
+    <div className="tbs-slot-swap" role="group" aria-label={`Swap slot ${String(sourceSlotNumber)} with another slot`}>
+      {/* TWO words, and the second is "data": the operation moves the slot's stored
+          record, not the slot itself, and "swap with" alone reads like exchanging the
+          BUTTONS. The field and button stay one word each so the row fits the menu. */}
+      <span className="tbs-slot-swap__title">Swap data</span>
+      {/* A raw input rather than `SearchField`, following the SAME precedent as
+          `TagExpressionInput`'s primary field: that component deliberately carries
+          no `onKeyDown` and no combobox wiring, because its one job is "a labelled
+          text box with a clear button". This one owns the keyboard (paging,
+          highlight, Enter) and is a real `combobox`, so it wears the shared search
+          style directly — which the stylesheet already supports for toolbars that
+          size the input themselves. */}
+      <input
+        type="text"
+        className="tbs-shared-search tbs-slot-swap__search"
+        data-testid={`swap-target-input-${String(sourceSlotNumber)}`}
+        // Short on purpose: a target is a slot NUMBER (at most two digits), so the
+        // field does not need room for a sentence — and the menu must keep its own
+        // width for its own entries. Names are still searchable once the list is up.
+        placeholder="Slot #"
+        value={query}
+        aria-label={`Search target slot for slot ${String(sourceSlotNumber)}`}
+        // The placeholder had to shrink to "Slot #" to keep the menu narrow, so the
+        // full intent lives here as well — a hint the user can always recover.
+        title="Swap this slot's data with another slot (number, or a name)"
+        // ─── Combobox wiring ──────────────────────────────────────────────────
+        // The highlight rides on `aria-activedescendant` rather than moving focus:
+        // focus has to stay in the field or the user could not keep typing, which
+        // is the whole point of the control.
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded
+        aria-controls={`${fieldId}-list`}
+        {...(active >= 0 ? { 'aria-activedescendant': `${fieldId}-opt-${String(active)}` } : {})}
+        onChange={(e) => {
+          setQuery(e.currentTarget.value);
+          // A fresh buffer is not a selection: leaving a highlight on the old one
+          // would commit a row the user never chose.
+          setActiveIndex(-1);
+          // ...and a fresh buffer is a fresh LIST, so it starts on page one.
+          setPage(0);
+        }}
+        onKeyDown={onKeyDown}
+        // Focus IS the disclosure: the candidates belong to the field, so they come
+        // and go with it. See the comment on `focused`.
+        onFocus={() => { setFocused(true); }}
+        onBlur={() => { setFocused(false); }}
+        // The menu closes on an outside click. `stopPropagation` keeps a click on
+        // the field itself from being read as "outside" and closing the very menu
+        // the user is typing into.
+        onMouseDown={(e) => { e.stopPropagation(); }}
+      />
+      <Button
+        size="sm"
+        variant="primary"
+        disabled={pageItems.length === 0}
+        // `onMouseDown`, NOT `onClick`: a click moves focus out of the field first,
+        // and that blur closes the list before the click lands — the classic
+        // combobox "the item vanished as I clicked it" bug. `preventDefault` keeps
+        // focus where it is, so the interaction does not depend on remounting.
+        // (Same fix, same reason, as `TagExpressionInput`'s candidate rows.)
+        onMouseDown={(e) => {
+          e.preventDefault();
+          if (pageItems.length === 0) return;
+          const item = active >= 0 ? pageItems[active] : pageItems[0];
+          commit(item.number);
+        }}
+      >
+        Swap
+      </Button>
+    </div>
+
+    {/* FLOATING, and a SIBLING of the row above — see the fragment's note. Rendered
+        only while the field has focus, so a user who came for `Clear Slot Data`
+        still sees their menu. `listbox`/`option` keeps the announcement, and focus
+        stays in the field, which the combobox wiring depends on. */}
+    {focused && (
+      <ul className="tbs-slot-swap__list" role="listbox" id={`${fieldId}-list`} aria-label="Target slots">
+        {pageItems.map((item, index) => (
+          <li key={item.number}>
+            <button
+              type="button"
+              id={`${fieldId}-opt-${String(index)}`}
+              role="option"
+              aria-selected={index === active}
+              className={`tbs-slot-swap__option${index === active ? ' tbs-slot-swap__option--active' : ''}`}
+              // `onMouseDown` + `preventDefault`: see the Swap button above.
+              onMouseDown={(e) => { e.preventDefault(); commit(item.number); }}
+            >
+              <span className="tbs-slot-swap__number">{item.number}</span>
+              <span className="tbs-slot-swap__label">{item.label}</span>
+            </button>
+          </li>
+        ))}
+        {pageItems.length === 0 && (
+          <li className="tbs-slot-swap__empty">No slot matches that search</li>
+        )}
+        {/* Paging is stated rather than implied: a user who cannot see that there is
+            more has no reason to reach for `-` / `=`. It is the list's LAST row — in
+            the floating panel, not in the menu — and it is not a control, hence
+            `aria-hidden`. */}
+        {pageCount > 1 && (
+          <li className="tbs-slot-swap__page" aria-hidden="true">
+            Page {safePage + 1} of {pageCount} · use - and =
+          </li>
+        )}
+      </ul>
+    )}
+    </>
+  );
+}
+
+function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle, resolvedIcon, onSwitch, onNextMatch, onPrevMatch, onSave, onUnbind, onEditIcon, onAddToGlobal, titleChain, iconChain, onClearLayer, onSwap, swapPending, onSwapHover, swapHint, swapHintAnchor, slotLabels, edit, editToken, iconEditorOpen, onEditStart, onEditDraft, onEditMatchType, onEditCommit, onEditCancel, onEditReset }: SlotRowProps) {
   /**
    * Review item 7: the record THIS row represents. When the displayed value comes
    * from this slot itself, the popover is suppressed — "Slot 8 · from slot 8"
@@ -349,16 +712,47 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
   const isEmpty = !slot;
   const colorVar = SLOT_COLORS[slotNumber - 1] ?? 'var(--slot-1)';
   const [menuOpen, setMenuOpen] = useState(false);
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState('');
-  const [titleInitial, setTitleInitial] = useState('');
-  const [editingUrl, setEditingUrl] = useState(false);
-  const [urlDraft, setUrlDraft] = useState('');
+  /**
+   * The editor is CONTROLLED — its state belongs to the list (see `SlotRowProps.edit`).
+   *
+   * These aliases keep the rest of the row readable: `editingTitle` still answers
+   * "is this the title editor", but it now means "and the open edit belongs to THIS
+   * slot's data". That is what makes a swap able to hand the editor to the other
+   * number simply by moving `edit.slotId`.
+   */
+  const myEdit = edit !== null && edit !== undefined && edit.slotId === slotNumber ? edit : null;
+  const editingTitle = myEdit?.kind === 'title';
+  const editingUrl = myEdit?.kind === 'url';
+  const titleDraft = myEdit?.kind === 'title' ? myEdit.draft : '';
+  const titleInitial = myEdit?.kind === 'title' ? myEdit.initial : '';
+  const urlDraft = myEdit?.kind === 'url' ? myEdit.draft : '';
   // Item 5.1: the value captured when the URL editor opened, so `↺` can restore it.
-  const [urlInitial, setUrlInitial] = useState('');
-  const [urlMatchType, setUrlMatchType] = useState<'exact' | 'regex'>('exact');
+  const urlInitial = myEdit?.kind === 'url' ? myEdit.initial : '';
+  const urlMatchType = myEdit?.kind === 'url' ? myEdit.matchType : 'exact';
   // P2: deletion is destructive, so it must pass through a confirmation first.
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  /**
+   * D23: the `⋯` menu's swap entry opens a MODAL input, not an inline edit. It is
+   * deliberately NOT part of the D15 transient swap state — the modal owns its own
+   * lifetime (`Escape` / cancel / submit), so D12's blur-and-timeout rules must not
+   * reach it. The `⋯` menu steals focus the moment it opens, so applying D12 here
+   * would cancel the swap before the user could type (C1 ruling).
+   */
+  /**
+   * Guards against submitting the SAME swap twice.
+   *
+   * A held `Enter` repeats `keydown`, and a double-click on `Swap` runs the
+   * button's handler twice; a state change cannot stop either, because it is only
+   * SCHEDULED — both calls have already run by then. Two concurrent `SWAP_SLOTS`
+   * requests then race: the FIRST applies (the data really does move) while the
+   * SECOND fails its optimistic version check and reports `CONFIG_CONFLICT` —
+   * i.e. the user is told "data changed elsewhere, try again" for a change that
+   * their own first request just made.
+   *
+   * The flag is set SYNCHRONOUSLY before the send. It is CLEARED when the menu
+   * closes, so re-opening gives a clean slate and a genuine retry stays possible.
+   */
+  const swapSubmitRef = useRef(false);
   /**
    * Review item 4: the slot title input commits on BLUR, and the `↺` / `⊘`
    * buttons used to blur it on their way in (`mousedown` moves focus before
@@ -384,15 +778,255 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
     }
   };
 
-  const handleClick = () => {
-    if (isBound && !editingTitle && !editingUrl) {
-      onSwitch(slotNumber);
+  /**
+   * The row's activation timer, for a click that may turn out to be a double-click.
+   *
+   * ─── Why activation cannot happen on `click` ─────────────────────────────────
+   *
+   * Reported: double-clicking a slot's icon / title / URL to EDIT it switched to
+   * the bound tab first, pulling the user away from the sidebar at the moment they
+   * asked to change something.
+   *
+   * The editable fields carry `onDoubleClick` with `e.stopPropagation()`, which
+   * looked like it should prevent exactly this — but a real double-click
+   * dispatches `click`, `click`, `dblclick` IN THAT ORDER, so the first `click`
+   * has already bubbled to this row and activated the slot by the time `dblclick`
+   * runs, and a `stopPropagation` on a LATER event of an EARLIER event's
+   * consequence is simply too late. Every double-click also sent the switch TWICE
+   * (once per `click`).
+   *
+   * So the decision cannot be made on `click`, where the answer is not yet known:
+   * a lone click must activate, but the first click of a pair must not. Activation
+   * is deferred by one double-click interval and cancelled if a second click
+   * arrives — which is the only ordering that lets both gestures coexist.
+   */
+  const activationTimer = useRef<number | null>(null);
+
+  /**
+   * How long to wait before treating a click as a lone click.
+   *
+   * Not a tuned constant: it is the platform's OWN double-click interval, read
+   * from `chrome.i18n` (`getDoubleClickTime`) so the row activates exactly as fast
+   * as the environment considers "not a double-click". The fallback is the
+   * documented Chromium default for that API, and it is only reached when the API
+   * is unavailable (a partial mock in a test, or a non-extension host) — the app is
+   * a Chrome extension, so the real value is present in every shipping context.
+   */
+  const doubleClickDelay = useRef<number>(
+    (globalThis as { chrome?: { i18n?: { getDoubleClickTime?: () => number } } })
+      .chrome?.i18n?.getDoubleClickTime?.() ?? 500,
+  );
+
+  const cancelPendingActivation = (): void => {
+    if (activationTimer.current !== null) {
+      window.clearTimeout(activationTimer.current);
+      activationTimer.current = null;
     }
+  };
+
+  // A row that unmounts (unbind, list refresh) must not fire its pending
+  // activation from a timer that outlived it.
+  useEffect(() => cancelPendingActivation, []);
+
+  const handleClick = (e: React.MouseEvent) => {
+    // A click inside the `⋯` menu is a MENU interaction, never a row activation.
+    //
+    // Reported defect: clicking the swap field focused it and then, a double-click
+    // interval later, the row switched to that slot's bound tab — the user was
+    // yanked out of the sidebar mid-keystroke. The menu's own items (`Clear Slot
+    // Data`, `Edit URL…`) stop propagation individually, but the swap field, its
+    // `Swap` button and its floating candidate list are ordinary elements that do
+    // not, so their clicks reached this handler.
+    //
+    // Checked HERE rather than by adding `stopPropagation` to each of those
+    // elements: one authority covers the whole menu, including anything added to it
+    // later, and it cannot be forgotten on a new control the way a per-element
+    // guard can.
+    //
+    // Measured: only the FIELD actually reaches this handler in practice. The Swap
+    // button and the candidate rows commit on `mousedown`, which closes the menu and
+    // unmounts them before their `click` fires — the click then lands on a detached
+    // node and never bubbles. That self-protection is an artefact of the ordering,
+    // not a design, so it is deliberately NOT relied on: reorder that commit to
+    // `click` and the row would start switching on every target choice.
+    //
+    // The `cancelPendingActivation` is not about THIS click — a click elsewhere on
+    // the row before it may already have scheduled an activation, and the user's
+    // attention has plainly moved to the menu, so that switch must not still land.
+    if (menuRef.current?.contains(e.target as Node) === true) {
+      cancelPendingActivation();
+      return;
+    }
+    if (!isBound || editingTitle || editingUrl) return;
+    // `detail` is the browser's own click counter for this position, which is more
+    // reliable here than counting our own: it tells the truth even in a test that
+    // dispatches only the second click of a pair.
+    if (e.detail > 1) {
+      cancelPendingActivation();
+      return;
+    }
+    cancelPendingActivation();
+    activationTimer.current = window.setTimeout(() => {
+      activationTimer.current = null;
+      onSwitch(slotNumber);
+    }, doubleClickDelay.current);
+  };
+
+  // ─── Swap: drag path (D8/D9/D13/D22) ───────────────────────────────────
+
+  /**
+   * Is this row in a DATA-LAYER edit — one that cannot move with a swap?
+   *
+   * NARROWED, and the narrowing is the point. This used to be "either inline editor
+   * is open", on the reasoning that an editor commits by slot NUMBER, so a swap would
+   * land its draft in a record that had moved.
+   *
+   * The inline editors no longer work that way: their state belongs to the LIST and
+   * is addressed by the RECORD it describes, so a swap hands the open editor to the
+   * slot the data went to (the user's expectation: the edit follows the data). They
+   * are therefore no longer a reason to refuse a swap.
+   *
+   * The icon editor still IS: it is a modal that captured its target slotId when it
+   * opened, so a swap underneath it would apply the icon to the wrong number. The
+   * guard must keep refusing THAT — a rule that cannot simply be deleted.
+   */
+  const isEditing = iconEditorOpen;
+  /** D15: the list's transient state, read for this row's two roles. */
+  const swapSource = swapPending?.source ?? null;
+  const swapTarget = swapPending?.target ?? null;
+
+  /**
+   * D8/D13/A9: the row root is the drag surface, and starting a drag defuses every
+   * other pending gesture on the row — the deferred activation timer (a click that
+   * turned into a drag must not also activate) and the `⋯` menu.
+   *
+   * A9's guard applies symmetrically: a row that is mid-edit may be the source of
+   * NO swap either. Its editor commits by slot NUMBER, so a swap it started would
+   * land its draft in a record that has moved — the same data-integrity reason the
+   * drop side refuses an editing target. Ending the pending state here (rather than
+   * merely not starting one) keeps the transient state from coexisting with
+   * `editingTitle` / `editingUrl` in an undefined way.
+   *
+   * D22: the payload names the slot in `text/plain` (the same channel the tag chip
+   * input uses). `setDragImage` is called through an OPTIONAL CHAIN because jsdom's
+   * `DataTransfer` stub has no such method.
+   */
+  const handleDragStart = (e: React.DragEvent) => {
+    cancelPendingActivation();
+    setMenuOpen(false);
+    // D13: a drag defuses the OTHER pending gesture too — an armed `Alt` cursor
+    // must not survive a drag the user has started instead, or a later `↑`/`↓`
+    // would move an operation they believe they put down. `report(null, ...)` is
+    // the hook's single "no source" ending, so this needs no second channel.
+    onSwapHover?.(null, null);
+    if (isEditing) return;
+    const dataTransfer = dragTransferOf(e);
+    if (!dataTransfer) return;
+    dataTransfer.setData('text/plain', JSON.stringify({ slotId: slotNumber }));
+    dataTransfer.effectAllowed = 'move';
+    // D22: the drag image carries the number, so "which slot am I holding" stays
+    // visible while the pointer is over another row.
+    dataTransfer.setDragImage?.(rowRef.current ?? (e.target as Element), 0, 0);
+    onSwapHover?.(slotNumber, null);
+  };
+
+  /**
+   * D13: the target row highlights only while it is a LEGAL drop. A row that is
+   * the source, or that is mid-edit, refuses the cursor — the edit-state refusal
+   * is a data-integrity rule, not a preference: the editor's commit writes back to
+   * its OWN number, so letting a swap land there would write the draft into a slot
+   * that now holds a different record.
+   */
+  const handleDragOver = (e: React.DragEvent) => {
+    const dataTransfer = dragTransferOf(e);
+    // D13: the forbidden cursor (`none`) is the feedback for a refused drop, so it
+    // is set on the way out even when nothing else happens.
+    if (slotNumber === swapSource || isEditing) {
+      e.preventDefault();
+      if (dataTransfer) dataTransfer.dropEffect = 'none';
+      return;
+    }
+    e.preventDefault();
+    if (dataTransfer) dataTransfer.dropEffect = 'move';
+    if (swapTarget !== slotNumber) onSwapHover?.(swapSource, slotNumber);
+  };
+
+  const handleDragLeave = () => {
+    if (swapTarget === slotNumber) onSwapHover?.(swapSource, null);
+  };
+
+  /** D13: drop only commits on a legal target; every refusal is silent. */
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    onSwapHover?.(null, null);
+    const raw = dragTransferOf(e)?.getData('text/plain') ?? '';
+    // R6: the payload is foreign input — a drag can originate in another page or
+    // application, so it must never be trusted to be our own JSON. A parse failure
+    // or a missing/non-numeric `slotId` means "not an internal drag", which is the
+    // same situation as `dragstart` never having run: fall back to the tracked
+    // source and let the guards below decide.
+    let source: number | null = swapSource;
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { slotId?: unknown };
+        if (typeof parsed.slotId === 'number' && Number.isInteger(parsed.slotId)) {
+          source = parsed.slotId;
+        }
+      } catch {
+        // Not our payload — keep the tracked source.
+      }
+    }
+    if (source === null || source === slotNumber || isEditing) return;
+    void onSwap(source, slotNumber);
+  };
+
+  const handleDragEnd = () => {
+    onSwapHover?.(null, null);
+  };
+
+  // ─── Swap: the `⋯` menu's inline picker (D23/D24, C1) ───────────────────
+
+  /**
+   * D17 (UI side): the target has already been constrained by construction — the
+   * picker offers every slot in 1..10 EXCEPT this one, and the label is that
+   * slot's own number. So there is no validation left to do here, and no error
+   * state to show: the only reachable values are legal. The worker still re-checks,
+   * because the UI is never the boundary.
+   *
+   * The menu closes with the pick, which is also what re-arms `swapSubmitRef` for
+   * the next visit (see the `menuOpen` effect).
+   */
+  const submitSwapTarget = (target: number): void => {
+    swapSubmitRef.current = true;
+    setMenuOpen(false);
+    void onSwap(slotNumber, target);
+  };
+
+  /**
+   * A field's own double-click: the click(s) that preceded it are discarded and
+   * the editor opens.
+   *
+   * `stopPropagation` is kept for the `dblclick` itself (so nothing above the row
+   * reacts to it), but the pause is what actually prevents the switch: the two
+   * `click`s have already run their handler by now, and cancelling their pending
+   * activation is the only thing that can still stop them.
+   */
+  const beginFieldEdit = (edit: () => void) => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    cancelPendingActivation();
+    edit();
   };
 
   // Close menu on outside click
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen) {
+      // Re-arm the swap submit guard for the next visit. The guard is armed when a
+      // swap is submitted and the menu closes with it, so clearing it here (rather
+      // than inside the submit handler) keeps the two in step: whoever closes the
+      // menu leaves a clean slate behind.
+      swapSubmitRef.current = false;
+      return;
+    }
     const handler = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
@@ -409,21 +1043,30 @@ function SlotRow({ slotNumber, slot, binding: _binding, shortcut, resolvedTitle,
  */
 const startTitleEdit = () => {
     if (!isBound) return;
-    const current = slot?.uiMarker.customTitle || slot?.titleSnapshot || '';
-    setTitleDraft(current);
-    // Remember the pre-edit value so an unchanged save is treated as "no change".
-    setTitleInitial(current);
     // Review item 4: clear any suppression left over from the previous session,
     // so a real commit is never swallowed.
     suppressTitleCommit.current = false;
-    setEditingTitle(true);
-    setTimeout(() => titleInputRef.current?.focus(), 0);
+    // The LIST builds the edit: only it can seed the draft from the record and know
+    // which slot's data the draft belongs to.
+    onEditStart(slotNumber, 'title');
   };
 
-  const handleTitleDoubleClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    startTitleEdit();
-  };
+  const handleTitleDoubleClick = beginFieldEdit(startTitleEdit);
+
+  /**
+   * Focus the field when THIS row becomes the editor's owner.
+   *
+   * `editToken` is in the dependency list because the interesting case is the SAME
+   * edit arriving at a DIFFERENT row (the migration after a swap): the edit object
+   * is unchanged, so only the token can tell this effect to run again.
+   */
+  useEffect(() => {
+    if (!editingTitle && !editingUrl) return;
+    const id = window.setTimeout(() => {
+      (editingTitle ? titleInputRef : urlInputRef).current?.focus();
+    }, 0);
+    return () => { window.clearTimeout(id); };
+  }, [editingTitle, editingUrl, editToken]);
 
   const handleTitleSave = () => {
     // Review item 4: a commit arriving from a button-induced blur must not undo
@@ -432,58 +1075,47 @@ const startTitleEdit = () => {
       suppressTitleCommit.current = false;
       return;
     }
-    setEditingTitle(false);
-    const next = titleDraft.trim();
-    // Empty or unchanged input = user did not modify the title → do not record.
-    if (!next || next === titleInitial) return;
-    onEditTitle(slotNumber, next);
+    // The commit carries no slot id: the LIST knows which record the open draft
+    // belongs to, which is exactly what lets a swap move it. Reading the position
+    // here would re-introduce the bug this change removes.
+    onEditCommit();
   };
 
   const handleTitleKeyDown = (e: React.KeyboardEvent) => {
     e.stopPropagation();
     if (e.key === 'Enter') handleTitleSave();
-    if (e.key === 'Escape') setEditingTitle(false);
+    if (e.key === 'Escape') onEditCancel();
   };
 
   /** Review item 4: `↺` restores the opened text and KEEPS the box open. */
   const handleResetTitleDraft = () => {
     suppressTitleCommit.current = true;
-    setTitleDraft(titleInitial);
+    onEditReset();
   };
 
   /** Review item 4: `⊘` clears the SLOT layer's title (same write as `Use chain`). */
   const handleClearTitleLayer = () => {
     suppressTitleCommit.current = true;
-    setEditingTitle(false);
+    onEditCancel();
     onClearLayer?.('title');
   };
 
   // Problem 8 / P8: double-click URL to edit — shared with the `⋯` menu entry.
   const startUrlEdit = () => {
     if (!isBound || !slot) return;
-    setUrlDraft(slot.urlMatch.value);
-    setUrlInitial(slot.urlMatch.value);
-    setUrlMatchType(slot.urlMatch.type);
-    setEditingUrl(true);
-    setTimeout(() => urlInputRef.current?.focus(), 0);
+    onEditStart(slotNumber, 'url');
   };
 
-  const handleUrlDoubleClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    startUrlEdit();
-  };
+  const handleUrlDoubleClick = beginFieldEdit(startUrlEdit);
 
   const handleUrlSave = () => {
-    setEditingUrl(false);
-    if (urlDraft.trim()) {
-      onUpdateUrl(slotNumber, urlDraft.trim(), urlMatchType);
-    }
+    onEditCommit();
   };
 
   const handleUrlKeyDown = (e: React.KeyboardEvent) => {
     e.stopPropagation();
     if (e.key === 'Enter') handleUrlSave();
-    if (e.key === 'Escape') setEditingUrl(false);
+    if (e.key === 'Escape') onEditCancel();
   };
 
   const displayTitle = resolvedTitle || slot?.uiMarker.customTitle || slot?.titleSnapshot || `Slot ${slotNumber}`;
@@ -500,7 +1132,7 @@ const startTitleEdit = () => {
       className={`tbs-slot-row__icon${isEmpty ? ' tbs-slot-row__icon--empty' : ''}`}
       style={isBound ? { background: `${colorVar}22` } : undefined}
       aria-hidden="true"
-      onDoubleClick={(e) => { e.stopPropagation(); if (isBound) onEditIcon(slotNumber); }}
+      onDoubleClick={beginFieldEdit(() => { if (isBound) onEditIcon(slotNumber); })}
       title={isBound ? 'Double-click to change icon' : undefined}
     >
       {displayIcon ? <img src={displayIcon} alt="" /> : isEmpty ? '·' : '🔖'}
@@ -512,6 +1144,12 @@ const startTitleEdit = () => {
       className={`tbs-slot-row__title${isEmpty ? ' tbs-slot-row__title--empty' : ''}`}
       onDoubleClick={handleTitleDoubleClick}
       title={isBound ? `${displayTitle} (double-click to rename)` : undefined}
+      // D9/A8: `draggable={false}` alone does NOT keep text selectable — it only
+      // says "this element is not itself a drag source", while a press-and-drag on
+      // it still starts the ANCESTOR row's drag. Cancelling `dragstart` here is
+      // what actually preserves selection. Both are needed.
+      draggable={false}
+      onDragStart={(e) => { e.preventDefault(); }}
     >
       {displayTitle}
     </span>
@@ -520,18 +1158,51 @@ const startTitleEdit = () => {
   return (
     <div
       ref={rowRef}
-      className={`tbs-slot-row${isBound ? ' tbs-slot-row--bound' : ''}`}
+      className={[
+        'tbs-slot-row',
+        isBound ? 'tbs-slot-row--bound' : '',
+        // D21: the source is LOWERED (it is being carried away); the pending
+        // target is OUTLINED. Neither touches `background`, which the row's own
+        // `:hover` already owns.
+        swapSource === slotNumber ? 'tbs-slot-row--swap-source' : '',
+        swapTarget === slotNumber ? 'tbs-slot-row--swap-target' : '',
+      ].filter(Boolean).join(' ')}
       role="listitem"
       tabIndex={0}
+      // D26-3: the row is the 3rd of 10, not just "a listitem" — the number is
+      // what this feature makes a first-class operand.
+      aria-posinset={slotNumber}
+      aria-setsize={10}
       onKeyDown={handleKeyDown}
       onClick={handleClick}
       aria-label={`Slot ${slotNumber}: ${displayTitle} (${statusText})`}
+      // D8: the whole row is the drag surface; the TEXT stops it at its own
+      // elements (D9), so selection keeps working where a user would expect it.
+      draggable
+      onDragStart={handleDragStart}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      onDragEnd={handleDragEnd}
     >
       {/* Left color bar */}
       <span className="tbs-slot-row__color-bar" style={{ background: colorVar }} aria-hidden="true" />
 
-      {/* Number */}
+      {/* Number — D20: this is the ONLY element allowed to say "grabbable". It is
+          `aria-hidden` on purpose: the number is already in the row's label, so
+          naming it here too would make a screen reader read it twice (D26-3). */}
       <span className="tbs-slot-row__number" aria-hidden="true">{slotNumber}</span>
+
+      {/* D17/D25-⑤b: the armed gesture ran into an end — say so with the SAME
+          symbol the user is pressing (`↑`/`↓`) plus `Top`/`Bottom`, or a held key
+          at the boundary reads as a dead key. D22: this is anchored to the row the
+          gesture is on, never to the pointer. D26-2: it is a purely visual cue —
+          pressing `↑`/`↓` repeatedly must NOT flood a live region. */}
+      {swapHint && swapHintAnchor === slotNumber && (
+        <span className="tbs-slot-row__swap-hint">
+          {swapHint.symbol} {swapHint.word}
+        </span>
+      )}
 
       {/* Icon — double-click to edit (Problem 7). Item 5.2: the display icon
           carries its own source badge, independently of the title's.
@@ -554,7 +1225,7 @@ const startTitleEdit = () => {
                 className="tbs-slot-row__title-input"
                 type="text"
                 value={titleDraft}
-                onChange={(e) => { setTitleDraft(e.target.value); }}
+                onChange={(e) => { onEditDraft(e.target.value); }}
                 onBlur={handleTitleSave}
                 onKeyDown={handleTitleKeyDown}
                 aria-label={`Rename slot ${slotNumber}`}
@@ -612,6 +1283,10 @@ const startTitleEdit = () => {
             className="tbs-slot-row__url"
             onDoubleClick={handleUrlDoubleClick}
             title={`${displayUrl} (double-click to edit)`}
+            // D9/A8: same pair as the title — the URL stays selectable (copying it
+            // is the common intent), so its own `dragstart` is cancelled.
+            draggable={false}
+            onDragStart={(e) => { e.preventDefault(); }}
           >
             {displayUrl}
           </span>
@@ -624,7 +1299,7 @@ const startTitleEdit = () => {
                 className="tbs-slot-row__url-input"
                 type="text"
                 value={urlDraft}
-                onChange={(e) => { setUrlDraft(e.target.value); }}
+                onChange={(e) => { onEditDraft(e.target.value); }}
                 onKeyDown={handleUrlKeyDown}
                 aria-label={`Edit URL for slot ${slotNumber}`}
               />
@@ -633,7 +1308,7 @@ const startTitleEdit = () => {
               <button
                 type="button"
                 className="tbs-inline-field__reset"
-                onClick={() => { setUrlDraft(urlInitial); }}
+                onClick={() => { onEditReset(); }}
                 disabled={urlDraft === urlInitial}
                 aria-label={`Reset URL for slot ${slotNumber}`}
                 title="Reset URL"
@@ -643,11 +1318,11 @@ const startTitleEdit = () => {
             </div>
             <div className="tbs-slot-row__url-match-type" role="radiogroup" aria-label="Match type">
               <label>
-                <input type="radio" name={`url-match-${slotNumber}`} checked={urlMatchType === 'exact'} onChange={() => { setUrlMatchType('exact'); }} />
+                <input type="radio" name={`url-match-${slotNumber}`} checked={urlMatchType === 'exact'} onChange={() => { onEditMatchType('exact'); }} />
                 Exact
               </label>
               <label>
-                <input type="radio" name={`url-match-${slotNumber}`} checked={urlMatchType === 'regex'} onChange={() => { setUrlMatchType('regex'); }} />
+                <input type="radio" name={`url-match-${slotNumber}`} checked={urlMatchType === 'regex'} onChange={() => { onEditMatchType('regex'); }} />
                 Regex
               </label>
             </div>
@@ -729,6 +1404,22 @@ const startTitleEdit = () => {
                   >
                     Edit URL…
                   </button>
+                  {/* D10: the keyboard-equivalent entry for the drag feature. It
+                      sits after the editing entries and before the destructive one,
+                      matching the menu's progressive-severity order.
+
+                      It is PRESENT AND USABLE IMMEDIATELY — one click on `⋯` and the
+                      field already has focus. An earlier revision revealed the field
+                      only after a further click on a "Swap with slot…" item, which
+                      made the common case cost two clicks and a moment of "did that
+                      do anything". Its candidate list floats (see `SwapTargetField`),
+                      so it does not disturb the entries below it. */}
+                  <SwapTargetField
+                    sourceSlotNumber={slotNumber}
+                    {...(slotLabels !== undefined ? { slotLabels } : {})}
+                    submitRef={swapSubmitRef}
+                    onSubmit={submitSwapTarget}
+                  />
                   <button
                     className="tbs-slot-menu__item tbs-slot-menu__item--danger"
                     role="menuitem"
@@ -758,6 +1449,7 @@ const startTitleEdit = () => {
                 onConfirm={() => { setDeleteConfirmOpen(false); onUnbind(slotNumber); }}
                 onCancel={() => { setDeleteConfirmOpen(false); }}
               />
+
             </div>
           </>
         )}
@@ -772,33 +1464,12 @@ const startTitleEdit = () => {
 // contradiction (CT3-g4) and could not be reused by the settings page. The
 // sidebar now renders the shared `UndoBar`, which owns `role="status"`, takes
 // focus on open, and returns it on dismissal.
-
-interface SidebarUndoAdapters {
-  undo: UndoState;
-  onUndo: () => void;
-  onExpire: () => void;
-}
-
-function SidebarUndoBar({ undo, onUndo, onExpire }: SidebarUndoAdapters) {
-  const sharedState = useMemo<SharedUndoState>(
-    () => ({
-      message: `Slot ${undo.slotId} overwritten`,
-      // The sidebar's slot-overwrite undo is a batch of exactly one write; the
-      // shared snapshot model keeps the atomic-replay contract identical.
-      snapshot: { writes: [{ kind: 'slot-marker', slotId: undo.slotId }], affectedTabIds: [] },
-      expiresAt: undo.expiresAt,
-    }),
-    [undo.slotId, undo.expiresAt],
-  );
-
-  return (
-    <SharedUndoBar
-      state={sharedState}
-      onUndo={() => { onUndo(); }}
-      onExpire={onExpire}
-    />
-  );
-}
+//
+// U4/U6 (T8): the sidebar is a HOST of the shared stack, not a private holder.
+// Its overwrite undo is a `replay:'background'` entry (the worker owns the
+// snapshot), so the entry carries the backend `captureId` (A10) alongside the
+// stack-local `id`. The private `UndoState` interface — same name, different
+// shape from the shared `UndoState` — is gone; only the shared model remains.
 
 // ─── Icon Editor Modal (uses reusable IconEditor component) ─────────────────
 
@@ -817,8 +1488,10 @@ import { sameOwner, sourceBadge, sourceDescription, TIER_NAME } from '@ui/shared
 import type { FieldWord } from '@ui/shared/source-description';
 import { normalizeRuleDraft, validateRuleDraft } from '@ui/shared/rule-form-submit';
 import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
-import { UndoBar as SharedUndoBar } from '@ui/shared/undo-bar';
-import type { UndoState as SharedUndoState } from '@ui/shared/undo-bar';
+import { UndoBar as SharedUndoBar, UNDO_DEFAULT_MS } from '@ui/shared/undo-bar';
+import { useUndoStack, createUndoReplay } from '@ui/shared/undo-stack';
+import { useSwapPending } from '@ui/shared/use-swap-pending';
+import type { SwapHint } from '@ui/shared/use-swap-pending';
 
 interface IconEditorModalProps {
   open: boolean;
@@ -1386,7 +2059,6 @@ export function SidebarApp() {
     loading: true,
     error: null,
   });
-  const [undo, setUndo] = useState<UndoState | null>(null);
   const [toast, setToast] = useState<{ variant: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
@@ -1464,6 +2136,39 @@ export function SidebarApp() {
       setState((prev) => ({ ...prev, loading: false, error: 'Failed to load state' }));
     }
   }, []);
+
+  // ─── Undo stack (U4/U6) ────────────────────────────────────────────────
+
+  /**
+   * The sidebar's entries are `background` ONLY: the worker owns the overwrite
+   * snapshot, so replay sends ONE `UNDO_SAVE { slotId, captureId }` (the
+   * canonical `createUndoReplay` mapping). The wrapper only ADDS this host's
+   * own side effects — it must not silently accept a rejected undo (T26/N3):
+   * a `success: false` response is turned into a throw so the caller's catch
+   * reports it instead of claiming the slot was restored.
+   */
+  const undoReplay = createUndoReplay(async (action, payload) => {
+    const result = (await sendMessage(action, payload)) as
+      | { success?: boolean; result?: { success?: boolean } }
+      | undefined;
+    const ok = result?.result?.success ?? result?.success ?? false;
+    if (!ok) throw new Error(`Undo replay rejected: ${action}`);
+    return result;
+  });
+
+  const undoStack = useUndoStack({
+    onReplay: async (entry) => {
+      try {
+        await undoReplay(entry);
+        if (entry.replay === 'background') {
+          setToast({ variant: 'info', message: `Undo: slot ${String(entry.slotId)} restored` });
+        }
+        void loadState();
+      } catch {
+        setToast({ variant: 'error', message: 'Undo failed' });
+      }
+    },
+  });
 
   // ─── Load commands ─────────────────────────────────────────────────────
 
@@ -1663,7 +2368,273 @@ export function SidebarApp() {
     }
   }, [state.currentTabUrl]);
 
+  // ─── Swap (D15 transient state + D16 send) ─────────────────────────────
+
+  /**
+   * D16/D25: send the swap and report the outcome.
+   *
+   * D25-④: a SUCCESSFUL swap gets NO toast — the swap changes the list itself, so
+   * the user sees the two rows exchange on the spot. The existing `Saved to slot 3`
+   * toast exists because a save changes the CURRENT TAB and is invisible in the
+   * list. A failure, by contrast, is not visible anywhere, so it must be announced.
+   *
+   * Z1/U6/A10: undo reuses the SHARED stack, as a `replay:'background'` entry that
+   * names the worker's `captureId` — the same channel `handleSave` uses. The worker
+   * dispatches on that snapshot's `kind: 'swap'`, so no `UNDO_SWAP` exists.
+   */
+  /**
+   * The swap-to-edit migration, reached through a ref.
+   *
+   * It is declared with the rest of the edit state, which sits AFTER this handler —
+   * so a direct call would be a use-before-declaration. Assigned every render by
+   * `migrateSlotEdit`'s own definition below.
+   */
+  const migrateSlotEditRef = useRef<(a: number, b: number) => void>(() => undefined);
+
+  const handleSwap = useCallback(async (sourceSlotId: number, targetSlotId: number) => {
+    // D17 (UI half): two EMPTY slots have nothing to exchange, so the UI does not
+    // initiate at all. The list already knows both sides, so this costs no round
+    // trip; the worker keeps its own `changed:false` short-circuit as the boundary
+    // (UI is not the boundary). "Empty" is the absent record — a slot id in 1..10
+    // with no definition (D3/A4) — never a missing/out-of-range number.
+    const hasRecord = (id: number): boolean =>
+      (state.sync?.slots ?? []).some((s) => s.id === id);
+    if (!hasRecord(sourceSlotId) && !hasRecord(targetSlotId)) return;
+    try {
+      const response = await sendMessage('SWAP_SLOTS', { sourceSlotId, targetSlotId       }) as
+        | {
+            success?: boolean;
+            changed?: boolean;
+            captureId?: number;
+            expiresAt?: number;
+            errorCode?: string;
+            message?: string;
+            result?: {
+              success?: boolean;
+              changed?: boolean;
+              captureId?: number;
+              expiresAt?: number;
+              errorCode?: string;
+              message?: string;
+            };
+          }
+        | undefined;
+      const result = response?.result ?? response;
+      if (!result?.success) {
+        // TIMEOUT (reported defect 2): the worker's response budget elapsed, but
+        // its comment is explicit that "a write that overruns is NOT cancelled" —
+        // so the swap may well have APPLIED. Claiming failure here is what made a
+        // successful swap report "Failed to swap slots x and y". Re-read the state
+        // so the list shows the truth, and say the outcome is UNKNOWN rather than
+        // asserting a failure we cannot see.
+        if (result?.errorCode === 'TIMEOUT') {
+          setToast({
+            variant: 'error',
+            message: 'The swap is taking longer than expected. The list has been refreshed — check whether it applied.',
+          });
+          void loadState();
+          return;
+        }
+        // D25-②: a version conflict gets its OWN copy, reusing the sentence the
+        // rule editor already shows (`settings/App.tsx`), so a user who has seen
+        // that one does not have to learn a second way of saying it. Every other
+        // failure keeps the generic line.
+        setToast({
+          variant: 'error',
+          message:
+            result?.errorCode === 'CONFIG_CONFLICT'
+              ? 'Slot data changed elsewhere. Refresh and try again.'
+              : `Failed to swap slots ${String(sourceSlotId)} and ${String(targetSlotId)}`,
+        });
+        return;
+      }
+      // A7/D17: empty↔empty succeeds with `changed:false` and captures NOTHING, so
+      // there is no `captureId` and nothing to restore — no bar is pushed. The
+      // `changed` guard is the UI half of that rule; the worker already short-
+      // circuited before `writeSync`, so the version did not move either.
+      const captureId = result.captureId;
+      if (result.changed === true && captureId !== undefined) {
+        undoStack.push({
+          replay: 'background',
+          // `UNDO_SAVE` addresses the capture by one slot; the SOURCE is the
+          // conventional one. `slotIds` carries the FULL footprint so the
+          // dependency rule sees both slots — without it a later `s2↔s3` swap would
+          // look unrelated to this `s1↔s2` one and could be undone out of order.
+          slotId: sourceSlotId,
+          slotIds: [sourceSlotId, targetSlotId],
+          captureId,
+          message: `Slots ${String(sourceSlotId)} and ${String(targetSlotId)} swapped`,
+          // Defect 1: give the bar a FULL 5s from when it APPEARS, capped by the
+          // worker's deadline. Using the raw worker `expiresAt` charged the request
+          // round trip against the user's viewing time, so a slow first swap showed
+          // a bar that expired almost immediately (or none at all). The worker's
+          // TTL is now longer than the bar, so the cap only bites in pathological
+          // cases — and it still prevents a bar outliving its restorable capture.
+          expiresAt: Math.min(
+            Date.now() + UNDO_DEFAULT_MS,
+            result.expiresAt ?? Number.POSITIVE_INFINITY,
+          ),
+        });
+      }
+      // The edit follows the DATA. Only when `changed` is true: an empty↔empty swap
+      // writes nothing, so nothing moved and the editor must stay where it is.
+      //
+      // Done when the WRITE is known to have landed (and before the reload), so the
+      // editor is never handed to a number whose data did not actually move — the
+      // one way this feature could make a draft land on the wrong record.
+      //
+      // Through a ref: the migration lives with the other edit state (declared after
+      // this handler), and threading it as a dependency would only move the ordering
+      // problem around. The ref is re-pointed every render.
+      if (result.changed === true) {
+        migrateSlotEditRef.current(sourceSlotId, targetSlotId);
+      }
+      void loadState();
+    } catch {
+      setToast({ variant: 'error', message: `Failed to swap slots ${String(sourceSlotId)} and ${String(targetSlotId)}` });
+    }
+  }, [state.sync, loadState, undoStack]);
+
+  /**
+   * D15/D11/D12: ONE transient state for "which slot is being moved where", owned
+   * at list level by the shared hook and read by each row. TWO inputs drive it —
+   * the drag path (`dragstart`/`dragover`/`drop`) and the `Alt` gesture (arm →
+   * `↑`/`↓` → release). The latter commits through the SAME `handleSwap`, so both
+   * paths share one send, one toast rule and one undo entry (D16/D25/A10).
+   *
+   * Kept apart from `editingTitle` / `menuOpen` by construction: D13's rule that a
+   * drag cancels the pending activation is enforced in the row, and a drag also
+   * ends any armed gesture for free — the row's `handleDragStart` calls
+   * `report(null, null)`, which is the same "no source" ending every cancellation
+   * uses. The `⋯` menu path is not part of this state at all (C1).
+   */
+  const { pending: swapPending, report: handleSwapHover, hint: swapHint } = useSwapPending(
+    (source, target) => { void handleSwap(source, target); },
+  );
+
+  /**
+   * Slots with a save already in flight.
+   *
+   * Same class of defect R7 fixed for the swap dialog, but worse here: `SAVE_SLOT`
+   * CAPTURES an undo snapshot, so two overlapping saves of one slot produce two
+   * captures, two undo bars, and a second overwrite of the first — the user's
+   * "save" is recorded as an overwrite of their own save.
+   *
+   * Keyed by slot so different slots may still be saved concurrently; only a
+   * genuine double-fire on the SAME slot is suppressed.
+   */
+  const saveInFlightRef = useRef<Set<number>>(new Set());
+
+  /** Slots with a delete already in flight (see `handleUnbind`). */
+  const deleteInFlightRef = useRef<Set<number>>(new Set());
+
+  // ─── Slot inline editing, owned by the LIST so it can MOVE ────────────────
+  //
+  // A swap exchanges two slots' data, and an open editor belongs to that DATA — so
+  // when the data moves, the editor moves with it. That is only expressible here:
+  // the row cannot hand its editor to another row.
+
+  const [slotEdit, setSlotEdit] = useState<SlotEdit | null>(null);
+  /** Bumped whenever the edit is handed to a different slot, to re-trigger focus. */
+  const [slotEditToken, setSlotEditToken] = useState(0);
+  /** Read by the commit path so it never closes over a stale edit. */
+  const slotEditRef = useRef<SlotEdit | null>(null);
+  slotEditRef.current = slotEdit;
+  /**
+   * The two write paths the commit needs, reached through a ref.
+   *
+   * They are declared further down (they depend on `state`), while the swap path that
+   * must call this commit is declared above them — so a direct reference would be a
+   * use-before-declaration. The ref is assigned on every render, so it is always the
+   * live handler.
+   */
+  const writeSlotEditRef = useRef<{
+    title: (slotId: number, title: string) => Promise<void> | void;
+    url: (slotId: number, url: string, matchType: 'exact' | 'regex') => Promise<void> | void;
+  }>({ title: () => undefined, url: () => undefined });
+
+  const handleSlotEditStart = useCallback((slotId: number, kind: 'title' | 'url') => {
+    const record = (state.sync?.slots ?? []).find((s) => s.id === slotId);
+    if (!record) return;
+    if (kind === 'title') {
+      const current = record.uiMarker.customTitle || record.titleSnapshot || '';
+      // `initial` is what `↺` restores and what makes an unchanged commit a no-op.
+      setSlotEdit({ slotId, kind: 'title', draft: current, initial: current });
+    } else {
+      setSlotEdit({ slotId, kind: 'url', draft: record.urlMatch.value, initial: record.urlMatch.value, matchType: record.urlMatch.type });
+    }
+    setSlotEditToken((n) => n + 1);
+  }, [state.sync]);
+
+  const handleSlotEditDraft = useCallback((draft: string) => {
+    setSlotEdit((prev) => (prev ? { ...prev, draft } : prev));
+  }, []);
+
+  const handleSlotEditReset = useCallback(() => {
+    setSlotEdit((prev) => (prev ? { ...prev, draft: prev.initial } : prev));
+  }, []);
+
+  const handleSlotEditMatchType = useCallback((matchType: 'exact' | 'regex') => {
+    setSlotEdit((prev) => (prev && prev.kind === 'url' ? { ...prev, matchType } : prev));
+  }, []);
+
+  const handleSlotEditCancel = useCallback(() => { setSlotEdit(null); }, []);
+
+  /**
+   * Commit the open draft to the slot it BELONGS to.
+   *
+   * `edit.slotId` rather than a position: the draft describes a record, and after a
+   * swap that record is at a different number. Reading the number here instead is
+   * exactly the bug this design removes.
+   */
+  const handleSlotEditCommit = useCallback(() => {
+    const edit = slotEditRef.current;
+    if (!edit) return;
+    setSlotEdit(null);
+    const next = edit.draft.trim();
+    // Empty or unchanged = the user changed nothing, so nothing is written.
+    if (!next || next === edit.initial) return;
+    // Dispatched through a ref so this callback does not depend on handlers that are
+    // declared LATER in the component (they close over `state`, which is declared
+    // after the swap path that also calls this). Ordering here is not cosmetic: the
+    // swap migration has to be in scope of `handleSwap`.
+    const write = writeSlotEditRef.current;
+    if (edit.kind === 'title') void write.title(edit.slotId, next);
+    else void write.url(edit.slotId, next, edit.matchType);
+  }, []);
+
+  /**
+   * Migration after a swap: the edit follows the data.
+   *
+   * Declared HERE, above the swap handler that calls it, so that call is in scope.
+   *
+   * The direction is the whole subtlety. `handleSwap(a, b)` puts b's record at a, so
+   * an edit that belonged to `a` now describes the record sitting at `b`. The DRAFT is
+   * untouched — it is the user's unsaved work and neither it nor its meaning changed;
+   * only the number in front of it did.
+   */
+  const migrateSlotEdit = useCallback((a: number, b: number) => {
+    setSlotEdit((prev) => {
+      if (!prev) return prev;
+      if (prev.slotId === a) return { ...prev, slotId: b };
+      if (prev.slotId === b) return { ...prev, slotId: a };
+      return prev;
+    });
+    setSlotEditToken((n) => n + 1);
+  }, []);
+  migrateSlotEditRef.current = migrateSlotEdit;
+
+  /**
+   * Migration after a swap: the edit follows the data.
+   *
+   * The direction is the whole subtlety. `handleSwap(a, b)` puts b's record at a,
+   * so an edit that belonged to `a` now describes the record sitting at `b`. The
+   * DRAFT is untouched — it is the user's unsaved work and neither it nor its meaning
+   * changed; only the number in front of it did.
+   */
   const handleSave = useCallback(async (slotId: number) => {
+    if (saveInFlightRef.current.has(slotId)) return;
+    saveInFlightRef.current.add(slotId);
     try {
       const sync = state.sync;
       const existingSlot = sync?.slots.find((s) => s.id === slotId);
@@ -1673,15 +2644,32 @@ export function SidebarApp() {
         urlMatch: { type: 'exact', value: state.currentTabUrl },
         titleSnapshot: state.currentTabTitle,
         faviconSnapshot: state.currentTabFavicon,
-      }) as { result?: { success: boolean }; success?: boolean };
+      }) as
+        | { result?: { success: boolean; captureId?: number; expiresAt?: number }; success?: boolean; captureId?: number; expiresAt?: number }
+        | undefined;
 
       const result = response?.result ?? response;
       if (result?.success) {
-        if (existingSlot) {
-          setUndo({
+        const captureId = response?.result?.captureId ?? response?.captureId;
+        const workerExpiresAt = response?.result?.expiresAt ?? response?.expiresAt;
+        // U6: the sidebar stacks like every other surface. The gate is
+        // unchanged — undo is offered ONLY when an OCCUPIED slot is overwritten
+        // (`existingSlot`), and A10 makes that coincide with the worker having
+        // captured a snapshot: an empty-slot save returns no `captureId`, so
+        // there is nothing to undo and no entry is pushed.
+        if (existingSlot && captureId !== undefined) {
+          undoStack.push({
+            replay: 'background',
+            // A single-slot overwrite: `slotIds` defaults to `[slotId]` in the stack.
             slotId,
-            previousSlot: existingSlot,
-            expiresAt: Date.now() + 5000,
+            captureId,
+            message: `Slot ${String(slotId)} overwritten`,
+            // Defect 1, same reasoning as the swap path: a full window from when
+            // the bar appears, capped by the worker's (now longer) deadline.
+            expiresAt: Math.min(
+              Date.now() + UNDO_DEFAULT_MS,
+              workerExpiresAt ?? Number.POSITIVE_INFINITY,
+            ),
           });
         }
         setToast({ variant: 'success', message: `Saved to slot ${slotId}` });
@@ -1691,10 +2679,19 @@ export function SidebarApp() {
       }
     } catch {
       setToast({ variant: 'error', message: `Failed to save slot ${slotId}` });
+    } finally {
+      // Released on EVERY path, so a failed save can be retried.
+      saveInFlightRef.current.delete(slotId);
     }
-  }, [state.sync, state.currentTabUrl, state.currentTabTitle, state.currentTabFavicon, loadState]);
+  }, [state.sync, state.currentTabUrl, state.currentTabTitle, state.currentTabFavicon, loadState, undoStack]);
 
   const handleUnbind = useCallback(async (slotId: number) => {
+    // Same in-flight guard as `handleSave`, and it matters MORE here: a delete is
+    // the one destructive action with no undo (DR3), and the confirmation dialog
+    // closes asynchronously — its `onConfirm` can fire twice before the dialog
+    // unmounts, sending two `UNBIND_SLOT`s for one confirmed click.
+    if (deleteInFlightRef.current.has(slotId)) return;
+    deleteInFlightRef.current.add(slotId);
     try {
       // T26 (N3): a rejected write must not be reported as success.
       const result = (await sendMessage('UNBIND_SLOT', { slotId })) as
@@ -1709,28 +2706,19 @@ export function SidebarApp() {
       }
     } catch {
       setToast({ variant: 'error', message: `Failed to delete slot ${String(slotId)}` });
+    } finally {
+      deleteInFlightRef.current.delete(slotId);
     }
   }, [loadState]);
 
-  const handleUndo = useCallback(async () => {
-    if (!undo?.previousSlot) return;
-    try {
-      // T26 (N3): same contract — only claim the undo succeeded if it did.
-      const result = (await sendMessage('UNDO_SAVE', { slotId: undo.slotId })) as
-        | { success?: boolean; result?: { success?: boolean } }
-        | undefined;
-      const ok = result?.result?.success ?? result?.success ?? false;
-      if (ok) {
-        setUndo(null);
-        setToast({ variant: 'info', message: `Undo: slot ${String(undo.slotId)} restored` });
-        void loadState();
-      } else {
-        setToast({ variant: 'error', message: 'Undo failed' });
-      }
-    } catch {
-      setToast({ variant: 'error', message: 'Undo failed' });
-    }
-  }, [undo, loadState]);
+  /**
+   * U1: undo the bar the user CLICKED, not the newest one. `consume(id)` removes
+   * that exact entry and replays it through `undoReplay` (the wrapper owns the
+   * toast/reload side effects).
+   */
+  const handleUndo = useCallback((id: string) => {
+    undoStack.consume(id);
+  }, [undoStack]);
 
   const handleLockToggle = useCallback(() => {
     setState((prev) => {
@@ -2235,6 +3223,11 @@ export function SidebarApp() {
     }
   }, [loadState]);
 
+  // Hand the two writers to the commit path (see `writeSlotEditRef`). Assigned on
+  // every render, so the ref always holds the live handler that closes over the
+  // current `state` — the commit itself must not close over an old one.
+  writeSlotEditRef.current = { title: handleSlotEditTitle, url: handleUpdateSlotUrl };
+
   // ─── Helper: get shortcut for a slot ───────────────────────────────────
 
   const getSlotShortcut = useCallback((slotNumber: number, type: 'save' | 'switch'): string | null => {
@@ -2298,6 +3291,17 @@ export function SidebarApp() {
   const slots = state.sync?.slots ?? [];
   const bindings = state.local?.bindings ?? [];
   const isLocked = state.lockedTabId !== null;
+
+  /**
+   * D24: the ten labels the swap dialog lists above its input. Occupied slots show
+   * their title; empty ones SAY they are empty, because "the target is empty" is
+   * exactly the case where a swap MOVES rather than exchanges (D3).
+   */
+  const slotLabels = Array.from({ length: 10 }, (_, i) => {
+    const record = slots.find((s) => s.id === i + 1);
+    if (!record) return 'Empty';
+    return record.uiMarker.customTitle || record.titleSnapshot || record.urlMatch.value || 'Empty';
+  });
 
   // The chain's `site` tier is not captured from the sidebar, so the site value
   // falls back to the reported tab title/favicon (`—` when neither is known).
@@ -2786,9 +3790,24 @@ export function SidebarApp() {
                 onSave={handleSave}
                 onUnbind={handleUnbind}
                 onEditIcon={handleSlotEditIcon}
-                onEditTitle={handleSlotEditTitle}
                 onAddToGlobal={handleSlotAddToGlobal}
-                onUpdateUrl={handleUpdateSlotUrl}
+                onSwap={handleSwap}
+                swapPending={swapPending}
+                onSwapHover={handleSwapHover}
+                swapHint={swapHint}
+                swapHintAnchor={swapPending?.source ?? null}
+                slotLabels={slotLabels}
+                // The inline editor is owned by the LIST, so a swap can hand it to
+                // the slot the data moved to (see `SlotRowProps.edit`).
+                edit={slotEdit}
+                editToken={slotEditToken}
+                iconEditorOpen={slotIconEditorId === slotNumber}
+                onEditStart={handleSlotEditStart}
+                onEditDraft={handleSlotEditDraft}
+                onEditMatchType={handleSlotEditMatchType}
+                onEditCommit={handleSlotEditCommit}
+                onEditCancel={handleSlotEditCancel}
+                onEditReset={handleSlotEditReset}
                 // Item 5.2: per-layer clear for the slot tier.
                 onClearLayer={(field) => { void handleSlotClearLayer(slotNumber, field); }}
                 {...(rowTitleChain ? { titleChain: rowTitleChain } : {})}
@@ -2800,10 +3819,15 @@ export function SidebarApp() {
         )}
       </section>
 
-      {/* Undo bar */}
-      {undo && (
-        <SidebarUndoBar undo={undo} onUndo={handleUndo} onExpire={() => { setUndo(null); }} />
-      )}
+      {/* U1/T8: the SHARED stack, rendered as several stacked bars — each with
+          its own Undo button (`onUndo` carries the entry id) and its own
+          countdown (`onExpire` carries the id, leaving the others untouched). */}
+      <SharedUndoBar
+        entries={undoStack.entries}
+        blockedIds={undoStack.blocked}
+        onUndo={(id) => { handleUndo(id); }}
+        onExpire={(id) => { undoStack.expire(id); }}
+      />
 
       {/* Toast */}
       {toast && (

@@ -887,6 +887,18 @@ body {
   min-width: 0;
 }
 
+/*
+ * Shown beside a DISABLED Undo when a newer, related action must be undone first.
+ * It explains the greyed-out button rather than leaving a dead control that reads
+ * as a bug. Deliberately quiet: it is guidance, not an error.
+ */
+.tbs-undo-bar__blocked-hint {
+  flex: 0 0 auto;
+  font-size: var(--font-size-xs, 11px);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
 /* ─── Field Editor head (tabs + the optional "use matched" action) ────────── */
 
 .tbs-field-editor__head {

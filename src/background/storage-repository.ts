@@ -39,31 +39,142 @@ const SYNC_KEY = 'syncState';
 const LOCAL_KEY = 'localState';
 /** Fallback key in local storage when chrome.storage.sync is unavailable */
 const SYNC_FALLBACK_KEY = 'syncStateFallback';
-/** Dedicated local key holding the single-slot undo snapshot (B2) */
+/**
+ * Dedicated local key holding the STACK of pending undo snapshots (B2/U5).
+ *
+ * The key's VALUE string is unchanged; only what lives INSIDE it changed: a
+ * single snapshot became an array of them (U5). One entry = one undoable action,
+ * so a swap carries BOTH slots' state (Z1) instead of needing a parallel key.
+ */
 const PENDING_UNDO_KEY = 'pendingUndo';
 
-/** How long an undo snapshot stays valid (mirrors the sidebar's 5-second undo bar). */
-export const PENDING_UNDO_TTL_MS = 5000;
+/**
+ * How long an undo snapshot stays valid in the worker.
+ *
+ * Deliberately LONGER than the UI's 5-second bar (`UNDO_DEFAULT_MS`), because the
+ * two clocks start at different moments: the worker stamps `expiresAt` when it
+ * CAPTURES, while the user only sees the bar once the response has travelled back.
+ * With both set to 5s the round trip was charged to the user's 5 seconds, so on a
+ * slow first action (cold service-worker start) the bar arrived with almost none
+ * of its life left and vanished before it could be read — reported defect 1,
+ * "the first swap shows no undo bar".
+ *
+ * The worker keeps its snapshot for longer than it shows the bar, which is
+ * harmless: the entry is reclaimed lazily and its only job is to keep the capture
+ * addressable for as long as any bar could still be on screen.
+ */
+export const PENDING_UNDO_TTL_MS = 20_000;
 
 /**
- * Single-slot undo snapshot, stored in its own `storage.local` key.
- * `expiresAt` is validated lazily on read so a sleeping service worker
- * cannot lose the expiry (the timer alone is not sufficient).
+ * One undoable action, stored in its own `storage.local` key (U5/Z1).
+ *
+ * `expiresAt` is validated lazily PER ENTRY on read, so a sleeping service worker
+ * cannot lose an expiry (the timer alone is not sufficient).
+ *
+ * Discriminated on `kind`: an ordinary overwrite restores ONE slot, while a slot
+ * swap must restore TWO (content + binding) — hence the `swap` variant (Z1).
+ * `id` is the stack-local identity the UI uses to say "undo the bar I clicked";
+ * `captureId` is the backend identity that proves capture ownership (T34). They
+ * are deliberately NOT the same thing.
  */
-export interface PendingUndoSnapshot {
-  slotId: number;
-  /**
-   * T34: identity of THIS capture.
-   *
-   * `slotId` alone is not enough to decide ownership: two overwrites of the same
-   * slot in quick succession produce two captures, and the first capture's
-   * cleanup timer used to match on `slotId` and delete the second, still-valid
-   * one. The timer now proves ownership by capture identity.
-   */
-  captureId: number;
-  slotSnapshot: SlotDefinition;
-  bindingSnapshot: SlotBinding | null;
-  expiresAt: number;
+export type PendingUndoSnapshot =
+  | {
+      kind: 'single';
+      id: string;
+      /**
+       * T34: identity of THIS capture.
+       *
+       * `slotId` alone is not enough to decide ownership: two overwrites of the same
+       * slot in quick succession produce two captures, and the first capture's
+       * cleanup timer used to match on `slotId` and delete the second, still-valid
+       * one. The timer now proves ownership by capture identity.
+       */
+      captureId: number;
+      slotId: number;
+      slotSnapshot: SlotDefinition | null;
+      bindingSnapshot: SlotBinding | null;
+      expiresAt: number;
+    }
+  | {
+      kind: 'swap';
+      id: string;
+      captureId: number;
+      sourceSlotId: number;
+      targetSlotId: number;
+      sourceSnapshot: SlotDefinition | null;
+      sourceBinding: SlotBinding | null;
+      targetSnapshot: SlotDefinition | null;
+      targetBinding: SlotBinding | null;
+      expiresAt: number;
+    };
+
+/**
+ * Tolerant read of one stack entry (U5).
+ *
+ * Legacy archives stored a SINGLE object (no `kind`, no `id`) under the same key;
+ * it is read back as a one-element `single` stack entry. Returns `null` for
+ * anything that cannot be attributed to a slot (so a corrupt entry is dropped
+ * rather than resurrected).
+ */
+function normalizePendingUndoSnapshot(raw: unknown): PendingUndoSnapshot | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const candidate = raw as Record<string, unknown>;
+  if (typeof candidate.expiresAt !== 'number') return null;
+
+  const captureId = typeof candidate.captureId === 'number' ? candidate.captureId : 0;
+  const kind = candidate.kind === 'swap' ? 'swap' : 'single';
+
+  if (kind === 'swap') {
+    if (typeof candidate.sourceSlotId !== 'number' || typeof candidate.targetSlotId !== 'number') return null;
+    return {
+      kind: 'swap',
+      id: typeof candidate.id === 'string' ? candidate.id : `swap-${String(captureId)}`,
+      captureId,
+      sourceSlotId: candidate.sourceSlotId,
+      targetSlotId: candidate.targetSlotId,
+      sourceSnapshot: (candidate.sourceSnapshot ?? null) as SlotDefinition | null,
+      sourceBinding: (candidate.sourceBinding ?? null) as SlotBinding | null,
+      targetSnapshot: (candidate.targetSnapshot ?? null) as SlotDefinition | null,
+      targetBinding: (candidate.targetBinding ?? null) as SlotBinding | null,
+      expiresAt: candidate.expiresAt,
+    };
+  }
+
+  if (typeof candidate.slotId !== 'number') return null;
+  // Same validation the single-slot read used: an entry with no usable slot
+  // snapshot is not restorable (UNDO_SAVE then degrades to deletion).
+  if (typeof candidate.slotSnapshot !== 'object' || candidate.slotSnapshot === null) return null;
+  return {
+    kind: 'single',
+    id: typeof candidate.id === 'string' ? candidate.id : `single-${String(captureId)}`,
+    captureId,
+    slotId: candidate.slotId,
+    slotSnapshot: candidate.slotSnapshot as SlotDefinition,
+    bindingSnapshot: (candidate.bindingSnapshot ?? null) as SlotBinding | null,
+    expiresAt: candidate.expiresAt,
+  };
+}
+
+/**
+ * Whether a raw stack entry should be removed by `clearPendingUndo` (U5/T4).
+ *
+ * `captureId` is the ONLY identity that applies to both variants (a `swap` entry
+ * carries no `slotId`) and is globally unique (the `slot-service` module
+ * counter), so it is the exact-ownership test. A legacy `slotId`-only call can
+ * only ever match `single` entries. No identity at all → clear the whole stack.
+ */
+function shouldClearPendingUndo(raw: unknown, slotId?: number, captureId?: number): boolean {
+  if (typeof raw !== 'object' || raw === null) return slotId === undefined && captureId === undefined;
+  const candidate = raw as Record<string, unknown>;
+  if (captureId !== undefined) return candidate.captureId === captureId;
+  if (slotId !== undefined) return candidate.kind !== 'swap' && candidate.slotId === slotId;
+  // R5: with NO identity at all this is the legacy "clear everything" behaviour,
+  // kept only as a last-resort drain. Every production caller passes at least one
+  // identity (`slot-service` passes both — see the four call sites), so this branch
+  // is unreachable from the app; it exists so a future caller that genuinely wants
+  // to drop the whole stack does not have to loop. Do NOT call `clearPendingUndo()`
+  // with no arguments casually: it empties the stack for every pending action.
+  return true;
 }
 
 // ─── Icon Offloading ─────────────────────────────────────────────────────────
@@ -118,6 +229,18 @@ export class StorageRepository {
   private localWriteQueue: Promise<void> = Promise.resolve();
   /** Serial write queue for sync storage — prevents concurrent version conflicts */
   private syncWriteQueue: Promise<unknown> = Promise.resolve({ success: true, configVersion: 0 });
+  /**
+   * Serial write queue for the pending-undo stack (F4 finding).
+   *
+   * `setPendingUndo` is a read-modify-write over a key that is deliberately kept
+   * OUTSIDE `LocalState` (see its doc comment), so it cannot ride
+   * `localWriteQueue` without also dragging in that state's invariants. Once the
+   * snapshot became an ARRAY (U5), two concurrent captures could interleave
+   * get → push → set and the later `set` would DISCARD the earlier entry — a
+   * silently lost undo bar. A single-slot layout could not lose anything, so
+   * this window was introduced by the stack change and is closed here.
+   */
+  private pendingUndoWriteQueue: Promise<void> = Promise.resolve();
   /** Whether chrome.storage.sync is available. If false, "sync" data is stored in local. */
   private syncAvailable = true;
   /**
@@ -1128,79 +1251,125 @@ export class StorageRepository {
   // ─── Pending Undo Snapshot (B2) ──────────────────────────────────────────
 
   /**
-   * Store the single-slot undo snapshot under its own local storage key.
+   * Append an undo snapshot to the stack under its own local storage key (U5).
    *
    * Kept OUT of `LocalState` on purpose: it is transient device-local data with
    * a 5s TTL, and isolating it avoids polluting the persisted runtime state
    * shape (and its export surface).
+   *
+   * Appends rather than overwrites: every undoable action earns its own stack
+   * entry (U1/U7 — unbounded, reclaimed one-by-one by per-entry expiry).
    */
   async setPendingUndo(snapshot: PendingUndoSnapshot): Promise<void> {
-    await this.adapter.storage.set('local', { [PENDING_UNDO_KEY]: snapshot });
+    // Read-modify-write; the write itself is a direct `storage.set` (never the
+    // local queue) so the stack stays isolated from `LocalState`.
+    //
+    // F4: serialized on its OWN queue. Without this, two concurrent captures
+    // interleave and the later write discards the earlier snapshot — a lost undo
+    // bar, a failure mode the single-slot layout could not have.
+    const run = this.pendingUndoWriteQueue.then(async () => {
+      let stack: PendingUndoSnapshot[] = [];
+      try {
+        const data = await this.adapter.storage.get('local', PENDING_UNDO_KEY);
+        stack = this.readPendingUndoStack(data[PENDING_UNDO_KEY]);
+      } catch {
+        stack = [];
+      }
+      stack.push(snapshot);
+      await this.adapter.storage.set('local', { [PENDING_UNDO_KEY]: stack });
+    });
+    // Keep the queue alive regardless of this operation's outcome (same
+    // resilience contract as `writeLocal`).
+    this.pendingUndoWriteQueue = run.catch(() => undefined);
+    return run;
   }
 
   /**
-   * Read the pending undo snapshot for `slotId`.
+   * Read the pending undo stack (U5).
    *
-   * Returns `null` when the snapshot is missing, belongs to another slot, or has
-   * expired. Expiry is evaluated lazily here so a service-worker restart that
-   * drops the cleanup timer still cannot resurrect a stale snapshot.
+   * With `captureId` → the ONE entry carrying that identity (or `null`). This is
+   * the form the APP uses: `restoreSlot` needs exactly the capture the bar named.
+   * Without it → every unexpired entry, newest last.
+   *
+   * R4: the no-argument form is NOT how the UI builds its bars — a surface pushes
+   * an entry as it performs the action, so it never needs to reconstruct the stack
+   * by reading it back. The array form exists so the stack can be OBSERVED as a
+   * whole (tests assert on it, and a future drain/repair path would need it); it
+   * has no production caller today. Do not mistake it for a UI contract.
+   *
+   * Expiry is evaluated lazily PER ENTRY so a service-worker restart that drops
+   * the cleanup timers still cannot resurrect a stale snapshot.
    */
-  async getPendingUndo(slotId: number): Promise<PendingUndoSnapshot | null> {
+  async getPendingUndo(): Promise<PendingUndoSnapshot[]>;
+  async getPendingUndo(captureId: number): Promise<PendingUndoSnapshot | null>;
+  async getPendingUndo(captureId?: number): Promise<PendingUndoSnapshot | PendingUndoSnapshot[] | null> {
     let raw: unknown;
     try {
       const data = await this.adapter.storage.get('local', PENDING_UNDO_KEY);
       raw = data[PENDING_UNDO_KEY];
     } catch {
-      return null;
+      return captureId === undefined ? [] : null;
     }
 
-    if (typeof raw !== 'object' || raw === null) return null;
-    const candidate = raw as Record<string, unknown>;
+    const now = Date.now();
+    const live = this.readPendingUndoStack(raw).filter((entry) => entry.expiresAt >= now);
 
-    if (candidate.slotId !== slotId) return null;
-    if (typeof candidate.expiresAt !== 'number' || candidate.expiresAt < Date.now()) return null;
-    if (typeof candidate.slotSnapshot !== 'object' || candidate.slotSnapshot === null) return null;
-
-    return {
-      slotId,
-      // T34: surface the capture identity so callers can clear precisely the
-      // snapshot they consumed. Legacy snapshots without one fall back to 0.
-      captureId: typeof candidate.captureId === 'number' ? candidate.captureId : 0,
-      slotSnapshot: candidate.slotSnapshot as SlotDefinition,
-      bindingSnapshot: (candidate.bindingSnapshot ?? null) as SlotBinding | null,
-      expiresAt: candidate.expiresAt,
-    };
+    if (captureId === undefined) return live;
+    return live.find((entry) => entry.captureId === captureId) ?? null;
   }
 
   /**
-   * Clear the pending undo snapshot (own key — never goes through the local queue).
+   * Remove entries from the pending undo stack (own key — never the local queue).
    *
-   * T25 (N2): when `slotId` is supplied the key is removed **only if** the stored
-   * snapshot still belongs to that slot. The cleanup timer used to remove the
-   * shared key unconditionally, so an older slot's timer could delete a newer
-   * slot's still-valid snapshot — silently destroying the user's undo.
+   * T25 (N2) / T4: the cleanup timer used to remove the WHOLE key. With a stack
+   * that would let any one entry's timer (or any one undo) destroy every other
+   * entry's still-valid undo. Matching is by `captureId` when supplied — the only
+   * identity shared by both entry variants and globally unique (T34) — then falls
+   * back to the legacy `slotId` match for `single` entries. The key is removed
+   * only once the stack is empty (no empty-array residue).
    *
    * The ownership check reads the raw value rather than going through
-   * `getPendingUndo`, because that helper filters out *expired* snapshots and an
-   * expired snapshot is exactly what the timer is meant to clean up.
+   * `getPendingUndo`, because that helper filters out *expired* entries and an
+   * expired entry is exactly what the timer is meant to clean up.
    */
   async clearPendingUndo(slotId?: number, captureId?: number): Promise<void> {
-    try {
-      if (slotId !== undefined) {
+    // F4: same read-modify-write race as `setPendingUndo` — shares its queue so a
+    // cleanup cannot interleave with a capture and resurrect a cleared entry (or
+    // drop a fresh one).
+    const run = this.pendingUndoWriteQueue.then(async () => {
+      try {
         const data = await this.adapter.storage.get('local', PENDING_UNDO_KEY);
-        const raw = data[PENDING_UNDO_KEY] as { slotId?: unknown; captureId?: unknown } | undefined;
-        // Never clobber a snapshot owned by a different slot.
-        if (!raw || raw.slotId !== slotId) return;
-        // T34: and never clobber a NEWER capture of the same slot. When a
-        // `captureId` is supplied (always, for timers and restores) ownership
-        // must match exactly. Matching on `slotId` alone let the first of two
-        // rapid overwrites destroy the second, still-valid undo snapshot.
-        if (captureId !== undefined && raw.captureId !== captureId) return;
+        const rawStack = this.readPendingUndoStack(data[PENDING_UNDO_KEY]);
+        const remaining = rawStack.filter(
+          (entry) => !shouldClearPendingUndo(entry, slotId, captureId),
+        );
+        if (remaining.length === rawStack.length) return; // nothing matched — leave the stack alone
+        if (remaining.length === 0) {
+          await this.adapter.storage.remove('local', PENDING_UNDO_KEY);
+          return;
+        }
+        await this.adapter.storage.set('local', { [PENDING_UNDO_KEY]: remaining });
+      } catch {
+        // Removal is best-effort; an expired entry is ignored on read anyway.
       }
-      await this.adapter.storage.remove('local', PENDING_UNDO_KEY);
-    } catch {
-      // Removal is best-effort; an expired snapshot is ignored on read anyway.
+    });
+    this.pendingUndoWriteQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * Tolerant stack reader (U5): a legacy single object reads back as a
+   * one-element stack; a malformed entry is dropped rather than resurrected.
+   */
+  private readPendingUndoStack(raw: unknown): PendingUndoSnapshot[] {
+    if (raw === undefined || raw === null) return [];
+    const list = Array.isArray(raw) ? raw : [raw];
+    const out: PendingUndoSnapshot[] = [];
+    for (const item of list) {
+      const normalized = normalizePendingUndoSnapshot(item);
+      if (normalized) out.push(normalized);
     }
+    return out;
   }
 
   // ─── Startup Cleanup ─────────────────────────────────────────────────────

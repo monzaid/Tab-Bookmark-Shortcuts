@@ -58,6 +58,17 @@ const defaultTimers: DeliveryTimers = {
   now: () => Date.now(),
 };
 
+/**
+ * How long one `FIELD_APPLY` may take before it is treated as unreachable.
+ *
+ * The content-script round trip is a local message and is normally immediate, so
+ * this only ever fires for a tab that cannot answer at all. It must be short
+ * enough that a wedge is not perceived as a hang, and it is deliberately NOT the
+ * worker's `RESPONSE_TIMEOUT_MS`: that budget belongs to the caller's patience,
+ * whereas this one bounds a background side effect.
+ */
+export const FIELD_APPLY_TIMEOUT_MS = 2000;
+
 interface TabDeliveryState {
   inFlight: boolean;
   pending: boolean;
@@ -86,6 +97,31 @@ export class FieldDeliveryService {
 
   isDegraded(tabId: number): boolean {
     return this.degraded.has(tabId);
+  }
+
+  /**
+   * Reject if `promise` has not settled within `ms`. The timer is cleared on
+   * settle, so a normal delivery leaves nothing pending.
+   *
+   * Uses the REAL timer, not the injected `DeliveryTimers`. That seam exists to
+   * drive the retry LADDER, and its tests assert the exact schedule they observe
+   * (`scheduled` equals `RETRY_DELAYS_MS`); routing this internal safety net
+   * through it would add entries those assertions rightly do not expect. Nothing
+   * here needs to be virtual: it is a watchdog on a local message, and the only
+   * consequence of firing is the existing degraded/fallback path.
+   */
+  private async withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let handle: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          handle = setTimeout(() => { reject(new Error('FIELD_APPLY timed out')); }, ms);
+        }),
+      ]);
+    } finally {
+      if (handle !== undefined) clearTimeout(handle);
+    }
   }
 
   private stateFor(tabId: number): TabDeliveryState {
@@ -248,14 +284,23 @@ export class FieldDeliveryService {
     const needsRestore = directives.title.kind === 'restore' || directives.favicon.kind === 'restore';
 
     try {
-      await this.adapter.tabs.sendMessage(tabId, {
-        type: 'FIELD_APPLY',
-        title: directives.title,
-        favicon: directives.favicon,
-      });
+      // BOUNDED. A tab that is navigating, frozen, or has no content script yet can
+      // accept the message and never answer. Without a deadline that promise never
+      // settles, so `state.inFlight` stays true and the tab's delivery state machine
+      // wedges: every later delivery for it is folded into `pending` and dropped.
+      // Timing out turns "silently stuck forever" into the existing `degraded` →
+      // stateless-fallback path, which is what that path is for.
+      await this.withDeadline(
+        this.adapter.tabs.sendMessage(tabId, {
+          type: 'FIELD_APPLY',
+          title: directives.title,
+          favicon: directives.favicon,
+        }),
+        FIELD_APPLY_TIMEOUT_MS,
+      );
       return 'ok';
     } catch {
-      // Content script unreachable → apply-only fallback.
+      // Content script unreachable (or too slow) → apply-only fallback.
     }
 
     const payload = {

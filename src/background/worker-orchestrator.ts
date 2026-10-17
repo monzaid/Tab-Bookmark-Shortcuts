@@ -61,6 +61,10 @@ const KNOWN_ACTIONS = [
   'PREV_MATCH_CURRENT',
   'UNBIND_SLOT',
   'UNDO_SAVE',
+  // Slot drag-swap (D16): registered here in the SAME change as the union
+  // member (G-D) so `SWAP_SLOTS` cannot be "compiled in the union but rejected
+  // at runtime". The swap's undo reuses `UNDO_SAVE` (Z1) — no `UNDO_SWAP`.
+  'SWAP_SLOTS',
   'CREATE_RULE',
   'UPDATE_RULE',
   'DELETE_RULE',
@@ -181,7 +185,31 @@ export class WorkerOrchestrator {
     this.tagService = new TagService(this.repo);
     // A2/A3: every rule write routes through the single delivery entry.
     this.ruleService.setDelivery((tabIds) => this.delivery.recomputeAndRedeliver(tabIds));
+    // D7/A5: a slot swap changes which tab each slot owns, so both sides must be
+    // re-delivered. The service reads the tabIds post-write and calls this entry.
+    this.slotService.setDelivery((tabIds) => this.delivery.recomputeAndRedeliver(tabIds));
   }
+
+  /**
+   * In-flight initialisation, shared by every concurrent caller.
+   *
+   * REPORTED DEFECT (cold start): the guard used to be a bare
+   * `if (this.initialized) return;` at the top, with `initialized = true` set only
+   * AFTER several awaits. Concurrent callers therefore ALL passed the check, and
+   * each one re-registered the event listeners — most visibly `onMessage`, so every
+   * inbound message was handled once PER CALL.
+   *
+   * With three overlapping messages the first swap of a session was sent three
+   * times: the first write succeeded (raising the version) while the others failed
+   * their optimistic check and answered `CONFIG_CONFLICT` — the user saw "Slot data
+   * changed elsewhere. Refresh and try again." for a change that never happened, and
+   * got no undo bar, because a failure response carries no `captureId`.
+   *
+   * Passing THIS promise (rather than re-running the body) makes the whole
+   * initialisation single-flight while keeping the cold-start guarantee that
+   * listeners are registered synchronously, before the first `await`.
+   */
+  private initPromise: Promise<void> | null = null;
 
   /**
    * Initialize: register event listeners FIRST (cold-start safety), then hydrate cache and run cleanup.
@@ -190,19 +218,24 @@ export class WorkerOrchestrator {
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
 
-    // Register event listeners BEFORE async work — ensures messages are captured during cold start
+    // Registered SYNCHRONOUSLY, before any await — and exactly once, because the
+    // single-flight guard above is claimed in the same tick.
     this.adapter.commands.onCommand(this.handleCommand.bind(this));
     this.adapter.tabs.onRemoved(this.handleTabRemoved.bind(this));
     this.adapter.tabs.onUpdated(this.handleTabUpdated.bind(this));
     this.adapter.runtime.onMessage(this.handleMessage.bind(this));
 
-    await this.repo.initialize();
-    await this.repo.startupCleanup();
-    await this.recoveryService.cleanupExpired();
+    this.initPromise = (async () => {
+      await this.repo.initialize();
+      await this.repo.startupCleanup();
+      await this.recoveryService.cleanupExpired();
 
-    this.initialized = true;
-    await this.diagnostics.record('SUCCESS', 'worker_init');
+      this.initialized = true;
+      await this.diagnostics.record('SUCCESS', 'worker_init');
+    })();
+    return this.initPromise;
   }
 
   /**
@@ -490,23 +523,45 @@ export class WorkerOrchestrator {
     }
 
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const respond = (response?: unknown): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
       sendResponse(response);
     };
 
     // T21: response budget. A write that overruns is NOT cancelled (side effects
     // must not be interrupted); the caller is simply told the answer is late so
     // the UI cannot hang forever.
-    const timer = setTimeout(() => {
-      respond({ success: false, errorCode: 'TIMEOUT', message: 'Worker response timed out' });
-    }, RESPONSE_TIMEOUT_MS);
+    //
+    // REPORTED DEFECT (1+2): the budget used to start HERE, before `ensureReady()`
+    // ran, so a COLD service-worker start — hydrate + migrations + startup cleanup
+    // — was charged against the first action's budget. The first swap of a session
+    // could therefore exceed the budget while its write COMPLETED normally, and
+    // the UI was told `TIMEOUT`: it showed "Failed to swap slots x and y" for a
+    // swap that had actually applied, and pushed no undo bar (no `captureId` in a
+    // failure response) — exactly the "worked but reported broken" pair.
+    //
+    // The budget is meant to bound the ACTION, not the worker's boot, so it is
+    // armed only once the worker is ready. `ensureReady()` is idempotent and
+    // cheap after the first call, so this does not weaken the guarantee that a
+    // hung action cannot leave the UI waiting forever.
+    const budget = (): void => {
+      timer = setTimeout(() => {
+        respond({ success: false, errorCode: 'TIMEOUT', message: 'Worker response timed out' });
+      }, RESPONSE_TIMEOUT_MS);
+    };
 
-    void this.routeMessage(message, sender).then(respond).catch(() => {
-      respond({ success: false, errorCode: 'INTERNAL_ERROR', message: 'Worker error' });
-    });
+    void this.ensureReady()
+      .then(() => {
+        budget();
+        return this.routeMessage(message, sender);
+      })
+      .then(respond)
+      .catch(() => {
+        respond({ success: false, errorCode: 'INTERNAL_ERROR', message: 'Worker error' });
+      });
     return true;
   }
 
@@ -581,7 +636,12 @@ export class WorkerOrchestrator {
       case 'UNDO_SAVE': {
         // B2: restore the pre-overwrite snapshot when one is available and
         // unexpired; otherwise degrade to deletion. Failures are propagated.
-        const result = await this.slotService.restoreSlot(request.payload.slotId);
+        // U1: `captureId` selects WHICH stacked action to undo. Z1: a slot swap
+        // reuses this same case; the service dispatches on the entry's `kind`.
+        const result = await this.slotService.restoreSlot(
+          request.payload.slotId,
+          request.payload.captureId,
+        );
         if (!result.success) {
           return {
             success: false,
@@ -590,6 +650,17 @@ export class WorkerOrchestrator {
           };
         }
         return { success: true };
+      }
+
+      case 'SWAP_SLOTS': {
+        // D16: the service re-reads both slots itself and applies the optimistic
+        // version from `RequestBase` (same fallback shape as UPDATE_SLOT_URL).
+        const version = request.configVersion ?? this.repo.getConfigVersion();
+        return this.slotService.swapSlots(
+          request.payload.sourceSlotId,
+          request.payload.targetSlotId,
+          version,
+        );
       }
 
       // ─── Rule operations ─────────────────────────────────────────────
@@ -856,7 +927,12 @@ export class WorkerOrchestrator {
       case 'GET_STATE': {
         const sync = await this.repo.getSyncState();
         const local = await this.repo.getLocalState();
-        return { success: true, sync, local };
+        // `configVersion` is ALSO top-level, not only inside `sync`. `MessageClient`
+        // tracks a version by reading the response's TOP level (`sendRaw`), so
+        // nesting it exclusively inside `sync` left every client tracking the
+        // initial 0 — its optimistic lock was therefore never meaningful, and any
+        // code path that forwarded the tracked value would send a stale one.
+        return { success: true, sync, local, configVersion: sync.configVersion };
       }
 
       case 'GET_DASHBOARD': {

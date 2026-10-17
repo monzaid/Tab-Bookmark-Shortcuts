@@ -38,6 +38,7 @@ function handleUiAction(request: UiRequest): string {
     case 'PREV_MATCH_SLOT': return 'prev-match-slot';
     case 'UNBIND_SLOT': return 'unbind';
     case 'UNDO_SAVE': return 'undo';
+    case 'SWAP_SLOTS': return 'swap-slots';
     case 'CREATE_RULE': return 'create-rule';
     case 'UPDATE_RULE': return 'update-rule';
     case 'DELETE_RULE': return 'delete-rule';

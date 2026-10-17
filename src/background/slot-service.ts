@@ -12,10 +12,11 @@
  */
 
 import type { BrowserAdapter } from '@adapters/contract';
-import type { StorageRepository, WriteResult } from './storage-repository';
+import type { StorageRepository, WriteResult, PendingUndoSnapshot } from './storage-repository';
 import { PENDING_UNDO_TTL_MS } from './storage-repository';
 import type {
   SlotDefinition,
+  SlotBinding,
   MatchRuleSettings,
   SyncState,
   TabCandidate,
@@ -42,11 +43,31 @@ function nextCaptureId(): number {
   return captureIdCounter;
 }
 
+/** D3/A4: slot numbers are fixed 1..10 and ARE the identity. */
+const SLOT_ID_MIN = 1;
+const SLOT_ID_MAX = 10;
+function isSlotNumber(value: number): boolean {
+  return Number.isInteger(value) && value >= SLOT_ID_MIN && value <= SLOT_ID_MAX;
+}
+
 export class SlotService {
+  /**
+   * A2/A5: the delivery entry, injected by the worker (same shape as
+   * `RuleService.setDelivery`). A forward swap changes which tab each slot owns
+   * and which strategy it therefore applies, so BOTH sides must be re-delivered
+   * (D7). Wired by `WorkerOrchestrator` (T13).
+   */
+  private deliver: (tabIds: number[]) => Promise<unknown> = () => Promise.resolve(undefined);
+
   constructor(
     private adapter: BrowserAdapter,
     private repo: StorageRepository,
   ) {}
+
+  /** A2: single delivery entry, injected by the worker. */
+  setDelivery(fn: (tabIds: number[]) => Promise<unknown>): void {
+    this.deliver = fn;
+  }
 
   // ─── Save Slot ─────────────────────────────────────────────────────────
 
@@ -58,7 +79,10 @@ export class SlotService {
     expectedVersion: number,
     uiMarker?: SlotDefinition['uiMarker'],
     strategy?: 'inherit' | MatchRuleSettings,
-  ): Promise<{ success: true; slot: SlotDefinition } | { success: false; errorCode: string; message: string }> {
+  ): Promise<
+    { success: true; slot: SlotDefinition; captureId?: number; expiresAt?: number }
+    | { success: false; errorCode: string; message: string }
+  > {
     // Get current active tab
     const tabs = await this.adapter.tabs.query({ active: true, currentWindow: true });
     if (tabs.length === 0) {
@@ -83,7 +107,11 @@ export class SlotService {
     // UNDO_SAVE can restore it. This is the single shared capture point for the
     // sidebar SAVE_SLOT path and the keyboard-command path; CONFLICT_OVERWRITE
     // funnels through `saveSlotFromData` below and is covered the same way.
-    await this.captureBeforeOverwrite(slotId);
+    // A10: the returned `captureId` is forwarded to the caller so a UI surface
+    // can address THIS capture; absent for an empty slot (nothing captured).
+    // R1: `expiresAt` rides along so the UI's countdown shares the worker's
+    // deadline instead of inventing its own (see `captureUndoSnapshot`).
+    const captured = await this.captureBeforeOverwrite(slotId);
 
     const result = await this.repo.saveSlot(slot, expectedVersion);
     if (!result.success) {
@@ -98,7 +126,9 @@ export class SlotService {
       boundAt: now,
     });
 
-    return { success: true, slot };
+    return captured === undefined
+      ? { success: true, slot }
+      : { success: true, slot, captureId: captured.captureId, expiresAt: captured.expiresAt };
   }
 
   // ─── Save Slot From Explicit Data (conflict overwrite) ─────────────────
@@ -152,13 +182,219 @@ export class SlotService {
    * conflict overwrite) shares one capture point. A capture failure must never
    * block the save — the worst case degrades UNDO_SAVE to its delete semantics.
    * No-ops when the slot is empty (nothing to restore).
+   *
+   * A10: returns the capture identity (or `undefined` for an empty slot / a
+   * failed capture) so `saveSlot` can hand it back WITHOUT exposing the
+   * snapshot itself.
    */
-  private async captureBeforeOverwrite(slotId: number): Promise<void> {
+  private async captureBeforeOverwrite(
+    slotId: number,
+  ): Promise<{ captureId: number; expiresAt: number } | undefined> {
     try {
-      await this.captureUndoSnapshot(slotId);
+      return await this.captureUndoSnapshot(slotId);
     } catch {
       // Non-fatal: the save proceeds without an undo snapshot.
+      return undefined;
     }
+  }
+
+  // ─── Swap Slots (D1/D2/D3, D7, D14, A4/A5/A6/A7/A10) ───────────────────
+
+  /**
+   * Swap the CONTENT of two slots (D1/D2), leaving each NUMBER's config in place.
+   *
+   * Content that follows the move: `urlMatch` / `uiMarker` / `titleSnapshot` /
+   * `faviconSnapshot` / the binding. Config that stays with the number:
+   * `strategy` / `autoBindOverride` (D2 — a KNOWN, documented trade-off: a moved
+   * record adopts the TARGET number's strategy; no other entry point can produce
+   * that state, and it is asserted as expected in the tests so it is not "fixed"
+   * later).
+   *
+   * An EMPTY slot (in 1..10, no record) is a LEGAL operand (D3/A4): occupied↔
+   * empty degrades to a move, and empty↔empty is a no-op. Out-of-range numbers
+   * (not an integer in 1..10) are `SLOT_NOT_FOUND` — the SAME code the slot path
+   * already uses, NOT a new `DomainErrorCode` (A4/D17).
+   *
+   * Returns a thin union rather than `WriteResult`, which cannot express
+   * "success with zero writes" (A1).
+   */
+  async swapSlots(
+    sourceSlotId: number,
+    targetSlotId: number,
+    expectedVersion: number,
+  ): Promise<
+    | { success: true; configVersion: number; changed: boolean; captureId?: number; expiresAt?: number }
+    | { success: false; errorCode: string; message: string }
+  > {
+    // A4: source === target is a caller bug; silent success would hide it.
+    if (sourceSlotId === targetSlotId) {
+      return { success: false, errorCode: 'INVALID_REQUEST', message: 'Cannot swap a slot with itself' };
+    }
+    // A4: out-of-range is SLOT_NOT_FOUND. In-range-but-missing is an empty slot.
+    if (!isSlotNumber(sourceSlotId) || !isSlotNumber(targetSlotId)) {
+      return { success: false, errorCode: 'SLOT_NOT_FOUND', message: 'Slot number out of range (1..10)' };
+    }
+
+    const sync = await this.repo.getSyncState();
+    const sourceSlot = sync.slots.find((s) => s.id === sourceSlotId);
+    const targetSlot = sync.slots.find((s) => s.id === targetSlotId);
+
+    // A7/D17: both empty → success with ZERO writes. `writeSync` bumps the
+    // version unconditionally, so it must be BYPASSED to honour "no version move".
+    if (!sourceSlot && !targetSlot) {
+      return { success: true, configVersion: this.repo.getConfigVersion(), changed: false };
+    }
+
+    // Step ① (D14): snapshot both slots' record + binding BEFORE touching either
+    // area. Doubles as the undo snapshot (Z1) and the step-④ compensation source.
+    const localBefore = await this.repo.getLocalState();
+    const sourceBindingBefore = localBefore.bindings.find((b) => b.slotId === sourceSlotId) ?? null;
+    const targetBindingBefore = localBefore.bindings.find((b) => b.slotId === targetSlotId) ?? null;
+
+    // Config is per-NUMBER: take it from whatever record currently occupies that
+    // number, else the defaults (an empty number carries no strategy).
+    const configAt = (existing: SlotDefinition | undefined): Pick<SlotDefinition, 'strategy' | 'autoBindOverride'> => ({
+      strategy: existing ? existing.strategy : 'inherit',
+      ...(existing?.autoBindOverride === undefined ? {} : { autoBindOverride: existing.autoBindOverride }),
+    });
+    // Content is the record MINUS its number-identity and its config (D2).
+    const contentOf = (existing: SlotDefinition | undefined): SlotDefinition | null =>
+      existing === undefined
+        ? null
+        : {
+            id: existing.id, // overwritten below; carried for typing only
+            urlMatch: { ...existing.urlMatch },
+            uiMarker: { ...existing.uiMarker },
+            titleSnapshot: existing.titleSnapshot,
+            faviconSnapshot: existing.faviconSnapshot,
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt,
+            strategy: existing.strategy,
+          };
+
+    const sourceContent = contentOf(targetSlot); // target content lands on source number
+    const targetContent = contentOf(sourceSlot); // source content lands on target number
+
+    const nextSource: SlotDefinition | null = sourceContent
+      ? { ...sourceContent, id: sourceSlotId, ...configAt(sourceSlot) }
+      : null;
+    const nextTarget: SlotDefinition | null = targetContent
+      ? { ...targetContent, id: targetSlotId, ...configAt(targetSlot) }
+      : null;
+
+    const applySlot = (slots: SlotDefinition[], id: number, next: SlotDefinition | null): void => {
+      const idx = slots.findIndex((s) => s.id === id);
+      if (next === null) {
+        if (idx >= 0) slots.splice(idx, 1);
+        return;
+      }
+      if (idx >= 0) slots[idx] = next;
+      else slots.push(next);
+    };
+
+    // Step ② (D14): write sync with the optimistic version. A failure aborts with
+    // local untouched — nothing to compensate.
+    const syncWrite = await this.repo.writeSync(expectedVersion, (state) => {
+      const slots = [...state.slots];
+      applySlot(slots, sourceSlotId, nextSource);
+      applySlot(slots, targetSlotId, nextTarget);
+      return { ...state, slots };
+    });
+    if (!syncWrite.success) {
+      return { success: false, errorCode: syncWrite.errorCode, message: syncWrite.message };
+    }
+
+    // Step ③ (A6/D14): ONE `writeLocal` performs every local change:
+    //   - swap the two bindings,
+    //   - purge the derived state tied to either number (D5),
+    //   - neutralise `lastSuccessSlotId` when it points at one of them.
+    // Three separate repo calls would open three write windows and violate D14.
+    const swapBinding = (bindings: SlotBinding[]): SlotBinding[] => {
+      const without = bindings.filter((b) => b.slotId !== sourceSlotId && b.slotId !== targetSlotId);
+      const moved: SlotBinding[] = [];
+      if (targetBindingBefore) moved.push({ ...targetBindingBefore, slotId: sourceSlotId });
+      if (sourceBindingBefore) moved.push({ ...sourceBindingBefore, slotId: targetSlotId });
+      return [...without, ...moved];
+    };
+
+    try {
+      await this.repo.writeLocal((state) => ({
+        ...state,
+        bindings: swapBinding(state.bindings),
+        cycleCursors: state.cycleCursors.filter((c) => c.slotId !== sourceSlotId && c.slotId !== targetSlotId),
+        recoverySessions: state.recoverySessions.filter((s) => s.slotId !== sourceSlotId && s.slotId !== targetSlotId),
+        recoverySnapshots: state.recoverySnapshots.filter((s) => s.slotId !== sourceSlotId && s.slotId !== targetSlotId),
+        lastSuccessSlotId:
+          state.lastSuccessSlotId === sourceSlotId || state.lastSuccessSlotId === targetSlotId
+            ? null
+            : state.lastSuccessSlotId,
+      }));
+    } catch {
+      // Step ④ (D14): the local write failed — put sync back. If this
+      // compensation ALSO fails the state is left inconsistent, the same
+      // boundary `clearAndWriteWithCompensation` documents (not over-claimed).
+      await this.repo.writeSync(this.repo.getConfigVersion(), (state) => {
+        const slots = [...state.slots];
+        applySlot(slots, sourceSlotId, sourceSlot ?? null);
+        applySlot(slots, targetSlotId, targetSlot ?? null);
+        return { ...state, slots };
+      });
+      try {
+        await this.repo.writeLocal((state) => ({ ...state, bindings: localBefore.bindings }));
+      } catch {
+        // Boundary (D14): both the write and its compensation failed.
+      }
+      return { success: false, errorCode: 'INTERNAL_ERROR', message: 'Swap failed and was rolled back' };
+    }
+
+    // Capture the swap for undo (Z1, reusing this shared stack + the A10 channel).
+    const captureId = nextCaptureId();
+    // R1: same single source of truth as `captureUndoSnapshot` — the UI must not
+    // invent its own deadline or it can outlive the worker's entry.
+    const swapExpiresAt = Date.now() + PENDING_UNDO_TTL_MS;
+    await this.repo.setPendingUndo({
+      kind: 'swap',
+      id: `swap-${String(captureId)}`,
+      captureId,
+      sourceSlotId,
+      targetSlotId,
+      sourceSnapshot: sourceSlot ? { ...sourceSlot, urlMatch: { ...sourceSlot.urlMatch }, uiMarker: { ...sourceSlot.uiMarker } } : null,
+      sourceBinding: sourceBindingBefore ? { ...sourceBindingBefore } : null,
+      targetSnapshot: targetSlot ? { ...targetSlot, urlMatch: { ...targetSlot.urlMatch }, uiMarker: { ...targetSlot.uiMarker } } : null,
+      targetBinding: targetBindingBefore ? { ...targetBindingBefore } : null,
+      expiresAt: Date.now() + PENDING_UNDO_TTL_MS,
+    });
+    setTimeout(() => {
+      void this.repo.clearPendingUndo(sourceSlotId, captureId);
+    }, PENDING_UNDO_TTL_MS + 100);
+
+    // D7/A5: re-READ both slots' bindings AFTER the write (the swap may have
+    // moved them), drop the empty side's `undefined`, and redeliver. Precedent:
+    // UPDATE_SLOT_URL redelivers to the slot's bound tab the same way.
+    //
+    // The re-read is AWAITED (it is local storage, and it decides who to notify),
+    // but the DELIVERY ITSELF IS NOT — it is a side effect of an already-committed
+    // write, not part of the answer.
+    //
+    // Reported defect: awaiting it here meant a bound tab that could not answer
+    // `FIELD_APPLY` (navigating, frozen, no content script yet) held the RESPONSE
+    // open until the worker's 10s budget expired. The swap had long since been
+    // written, so the user was told "taking longer than expected — check whether it
+    // applied" for a swap that had applied. Delivery is retried on its own ladder
+    // and reported as degraded per tab, so nothing is lost by not waiting: the
+    // caller cannot act on a per-tab delivery outcome, and the sidebar re-reads
+    // state after its toast anyway.
+    const localAfter = await this.repo.getLocalState();
+    const affectedTabIds = [sourceSlotId, targetSlotId]
+      .map((id) => localAfter.bindings.find((b) => b.slotId === id)?.tabId)
+      .filter((tabId): tabId is number => typeof tabId === 'number');
+    if (affectedTabIds.length > 0) {
+      // Fire-and-forget, with a catch so a delivery failure cannot become an
+      // unhandled rejection in the worker.
+      void this.deliver(affectedTabIds).catch(() => undefined);
+    }
+
+    return { success: true, configVersion: this.repo.getConfigVersion(), changed: true, captureId, expiresAt: swapExpiresAt };
   }
 
   // ─── Switch Slot ───────────────────────────────────────────────────────
@@ -592,11 +828,16 @@ export class SlotService {
    * Writes to a dedicated `storage.local` key with a 5s TTL. A cleanup timer is
    * armed as a best effort; correctness relies on the lazy `expiresAt` check in
    * `repo.getPendingUndo` because a service worker may be suspended.
+   *
+   * A10: returns the `captureId` of the entry it appended, or `undefined` when
+   * the slot was empty (early return — nothing captured, so nothing to undo).
    */
-  async captureUndoSnapshot(slotId: number): Promise<void> {
+  async captureUndoSnapshot(
+    slotId: number,
+  ): Promise<{ captureId: number; expiresAt: number } | undefined> {
     const sync = await this.repo.getSyncState();
     const existingSlot = sync.slots.find((s) => s.id === slotId);
-    if (!existingSlot) return;
+    if (!existingSlot) return undefined;
 
     const local = await this.repo.getLocalState();
     const existingBinding = local.bindings.find((b) => b.slotId === slotId) ?? null;
@@ -614,12 +855,26 @@ export class SlotService {
     // still-valid undo snapshot (and UNDO_SAVE then silently deleted the slot).
     const captureId = nextCaptureId();
 
+    // R1 (F4 review): the expiry is computed HERE, at capture time, and handed
+    // back to the caller. The UI previously derived its own `Date.now() + 5s`
+    // from the RESPONSE, which lands one round-trip later — leaving a window
+    // where the worker's entry is already expired but the bar is still shown.
+    // Clicking it there made `restoreSlot` take its "no snapshot → unbindSlot"
+    // path and SILENTLY DELETE the slot. One source of truth closes that window.
+    const expiresAt = Date.now() + PENDING_UNDO_TTL_MS;
+
+    // U5/Z1: append to the shared stack rather than replacing it — one entry per
+    // undoable action. `id` is the stack-local identity (distinct from
+    // `captureId`, which proves ownership); derived from the globally unique
+    // capture identity so it is stable and collision-free.
     await this.repo.setPendingUndo({
+      kind: 'single',
+      id: `single-${String(captureId)}`,
       slotId,
       captureId,
       slotSnapshot,
       bindingSnapshot: existingBinding ? { ...existingBinding } : null,
-      expiresAt: Date.now() + PENDING_UNDO_TTL_MS,
+      expiresAt,
     });
 
     // Best-effort cleanup — the lazy expiresAt check is the real guarantee.
@@ -629,26 +884,43 @@ export class SlotService {
     setTimeout(() => {
       void this.repo.clearPendingUndo(slotId, captureId);
     }, PENDING_UNDO_TTL_MS + 100);
+
+    // A10/R1: expose the generated identity AND the authoritative expiry so the
+    // caller can both address this capture and stop the bar at the instant the
+    // worker stops honouring it.
+    return { captureId, expiresAt };
   }
 
   /**
-   * Undo a previous overwrite of `slotId`.
+   * Undo the action identified by `captureId` (U1/U5/Z1).
    *
-   * - Snapshot present & unexpired → restore slot definition + binding.
-   * - Otherwise → degrade to the delete semantics (`unbindSlot`, B3-propagated).
+   * Taking the CAPTURE identity (not "the newest snapshot") is what makes each
+   * stacked undo bar act on ITS OWN action — clicking the second bar must undo
+   * the second action, never the latest one (U1).
    *
-   * The snapshot is always cleared so a given undo can only be consumed once.
+   * Dispatch is by the stored entry's `kind` (Z1):
+   * - `single` → the pre-existing overwrite semantics (restore, or degrade to
+   *   deletion when there is no snapshot — `unbindSlot`, B3-propagated).
+   * - `swap`   → restore BOTH slots (content + binding) in one write, mirroring
+   *   the same ordered-write + compensation sequence the forward swap uses.
+   *
+   * The entry is always cleared so a given undo can only be consumed once.
    */
-  async restoreSlot(slotId: number): Promise<WriteResult> {
-    const pending = await this.repo.getPendingUndo(slotId);
+  async restoreSlot(slotId: number, captureId: number): Promise<WriteResult> {
+    const pending = await this.repo.getPendingUndo(captureId);
 
     if (!pending) {
-      // No (valid) snapshot — degrade to deletion; propagate any write failure.
+      // No (valid) entry for this capture — degrade to deletion; propagate any
+      // write failure.
       return this.unbindSlot(slotId);
     }
 
+    if (pending.kind === 'swap') {
+      return this.restoreSwapSnapshot(pending);
+    }
+
     const version = this.repo.getConfigVersion();
-    const saved = await this.repo.saveSlot(pending.slotSnapshot, version);
+    const saved = await this.repo.saveSlot(pending.slotSnapshot as SlotDefinition, version);
     if (!saved.success) {
       return saved;
     }
@@ -656,13 +928,90 @@ export class SlotService {
     if (pending.bindingSnapshot) {
       await this.repo.setBinding(pending.bindingSnapshot);
     } else {
-      await this.repo.removeBinding(slotId);
+      await this.repo.removeBinding(pending.slotId);
     }
 
     // T25 (N2) + T34: conditional clear with BOTH identities — only consume the
     // exact capture we just restored, never a newer one.
-    await this.repo.clearPendingUndo(slotId, pending.captureId);
+    await this.repo.clearPendingUndo(pending.slotId, pending.captureId);
     return saved;
+  }
+
+  /**
+   * Restore both slots carried by a `swap` undo entry (Z1).
+   *
+   * One undo = one write (D4): both slot definitions go into a SINGLE `writeSync`
+   * and both bindings into a SINGLE `writeLocal`. Sync is written first, so a
+   * version conflict aborts before local is touched (nothing to compensate). A
+   * local failure is compensated by writing the pre-restore sync state back —
+   * the same ordered-write + compensation shape as the forward swap (D14).
+   */
+  private async restoreSwapSnapshot(
+    entry: Extract<PendingUndoSnapshot, { kind: 'swap' }>,
+  ): Promise<WriteResult> {
+    const version = this.repo.getConfigVersion();
+    const before = await this.repo.getSyncState();
+    const beforeSlots = new Map(before.slots.map((s) => [s.id, s] as const));
+    const beforeBindings = (await this.repo.getLocalState()).bindings;
+
+    const upsert = (slots: SlotDefinition[], id: number, next: SlotDefinition | null): void => {
+      const idx = slots.findIndex((s) => s.id === id);
+      if (next === null) {
+        if (idx >= 0) slots.splice(idx, 1);
+        return;
+      }
+      if (idx >= 0) slots[idx] = next;
+      else slots.push(next);
+    };
+
+    const restored = await this.repo.writeSync(version, (state) => {
+      const slots = [...state.slots];
+      upsert(slots, entry.sourceSlotId, entry.sourceSnapshot);
+      upsert(slots, entry.targetSlotId, entry.targetSnapshot);
+      return { ...state, slots };
+    });
+    if (!restored.success) {
+      return restored;
+    }
+
+    const applyBinding = (
+      bindings: SlotBinding[],
+      id: number,
+      next: SlotBinding | null,
+    ): SlotBinding[] => {
+      const without = bindings.filter((b) => b.slotId !== id);
+      return next ? [...without, next] : without;
+    };
+
+    try {
+      await this.repo.writeLocal((state) => ({
+        ...state,
+        bindings: applyBinding(
+          applyBinding(state.bindings, entry.sourceSlotId, entry.sourceBinding),
+          entry.targetSlotId,
+          entry.targetBinding,
+        ),
+      }));
+    } catch (e) {
+      // Step ④ (D14): a failed local write is compensated by putting sync back.
+      // If this compensation ALSO fails the state is inconsistent — the same
+      // boundary the existing `clearAndWriteWithCompensation` documents.
+      await this.repo.writeSync(this.repo.getConfigVersion(), (state) => ({
+        ...state,
+        slots: state.slots
+          .filter((s) => s.id !== entry.sourceSlotId && s.id !== entry.targetSlotId)
+          .concat(
+            [beforeSlots.get(entry.sourceSlotId), beforeSlots.get(entry.targetSlotId)].filter(
+              (s): s is SlotDefinition => s !== undefined,
+            ),
+          ),
+      }));
+      await this.repo.writeLocal((state) => ({ ...state, bindings: beforeBindings }));
+      throw e;
+    }
+
+    await this.repo.clearPendingUndo(entry.sourceSlotId, entry.captureId);
+    return restored;
   }
 
   // ─── Private Helpers ───────────────────────────────────────────────────

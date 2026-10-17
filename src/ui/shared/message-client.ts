@@ -230,8 +230,17 @@ export class MessageClient {
     return this.send('UNBIND_SLOT', { slotId });
   }
 
-  async undoSave(slotId: number): Promise<ClientResult> {
-    return this.send('UNDO_SAVE', { slotId });
+  async undoSave(slotId: number, captureId: number): Promise<ClientResult> {
+    return this.send('UNDO_SAVE', { slotId, captureId });
+  }
+
+  /**
+   * D16: swap two slots' contents. `includeVersion = true` sends the client's
+   * tracked `configVersion` as the optimistic lock, so a change made elsewhere
+   * is rejected with CONFIG_CONFLICT rather than silently overwritten.
+   */
+  async swapSlots(sourceSlotId: number, targetSlotId: number): Promise<ClientResult> {
+    return this.send('SWAP_SLOTS', { sourceSlotId, targetSlotId }, true);
   }
 
   // ─── Rule Operations ───────────────────────────────────────────────────

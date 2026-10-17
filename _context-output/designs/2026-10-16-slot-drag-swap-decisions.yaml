@@ -1,0 +1,490 @@
+# 侧边栏槽位拖拽交换 · 决策清单
+# 生成日期：2026-10-16
+# 来源：sw-brainstorming 四层遍历（目标 → 约束 → 架构 → 细节）+ Act 3 全树自检
+# 主文档：2026-10-16-slot-drag-swap-design.md
+
+meta:
+  topic: slot-drag-swap
+  date: "2026-10-16"
+  layers_traversed: [goal, constraint, architecture, detail]
+  decisions_total: 26
+  open_items: 0
+  implementation_verifications_required: 1
+  status: PENDING_USER_APPROVAL
+
+# ─── 目标层 ────────────────────────────────────────────────────────────────
+
+- id: D1
+  layer: goal
+  node: 交换的单位
+  decision: "记录 + 绑定 整体搬家：源槽与目标槽的全部数据（记录 + 它接管哪个标签页）对调"
+  alternatives:
+    - option: "只换记录、绑定不动"
+      rejected_reason: "会产生『有绑定但无记录』或『有记录但绑定指向别处』的畸形态，而项目里没有任何入口能造出它"
+    - option: "只换记录的部分字段"
+      rejected_reason: "语义不完整，且需为『哪些字段算内容』再开一轮决策，收益不明"
+  rationale: "槽位语义是『这个槽接管这个页面的记录』，记录与绑定是同一事实的两半"
+  implications: "是 D2 的直接前提"
+  status: RESOLVED
+  depends_on: []
+
+- id: D2
+  layer: goal
+  node: 交换的数据边界
+  decision: "只切换内容，不切换配置 —— 跟着走：urlMatch/uiMarker/titleSnapshot/faviconSnapshot/绑定；留原编号：strategy/autoBindOverride"
+  alternatives:
+    - option: "整条 SlotDefinition 原样搬（含 strategy）"
+      rejected_reason: "与『只加载内容』的表述不符；策略更像『这个编号的偏好』"
+    - option: "搬内容但刷新时间戳"
+      rejected_reason: "createdAt 描述的是这条记录本身，随记录走才成立；刷新会让『创建时间』变成假话"
+  rationale: "用户的原始表述是『切换内容，不切换配置』"
+  implications: "⚠️ 已知取舍：可能出现『槽 N 的记录 + 槽 N 原本的策略』混合态，没有其他入口能产生，是本次决策的直接后果，**不是 bug**，防止日后被『修正』回去"
+  status: RESOLVED
+  depends_on: [D1]
+
+- id: D3
+  layer: goal
+  node: 空槽的语义
+  decision: "空是合法内容，交换即退化为移动。有↔有=对调，有↔空=移动（源变空），空↔空=无操作"
+  alternatives:
+    - option: "禁止落到空槽"
+      rejected_reason: "空槽恰是用户最想整理的地方，拒绝无从解释；且需另设手势徒增分支"
+    - option: "落到空槽 = 复制"
+      rejected_reason: "会让两份记录同时绑定同一标签页，而『一个标签页只被一个槽接管』是既有不变量"
+  rationale: "一条规则覆盖全部组合，算法退化为单一对调原语，无需分支"
+  implications: "算法形态由本决定定型"
+  status: RESOLVED
+  depends_on: [D2]
+
+- id: D4
+  layer: goal
+  node: 原子性
+  decision: "一次消息 = 一次写入 = 两槽同时生效；消息携带两个编号"
+  alternatives:
+    - option: "两次单槽写入"
+      rejected_reason: "第二次失败会留下『两份内容落在同一位置』，正是本决定要排除的中间态"
+    - option: "先备份、允许中间态、失败自动回滚"
+      rejected_reason: "在用户看不见处做补偿，回滚自身失败会留下更难解释的状态"
+  rationale: "与项目既有约定一致（saveSlot/deleteTag 均为一次消息一次写入）"
+  implications: "此标准**同样约束撤销**（见 D18）"
+  status: RESOLVED
+  depends_on: [D2, D3]
+
+- id: D5
+  layer: goal
+  node: 派生态的处理
+  decision: "清空被交换两槽的派生态（cycleCursors、recoverySessions/recoverySnapshots）；lastSuccessSlotId 若指向这两槽则置空"
+  alternatives:
+    - option: "派生态跟着内容走"
+      rejected_reason: "cycleCursors 存的是『上次循环到第几个候选标签页』，指向旧内容当时的标签页；跟着走等于让错误游标指导新内容"
+    - option: "派生态留在原编号"
+      rejected_reason: "同上，归属已与新内容无关"
+  rationale: "三者均为瞬态（recoverySessions 有 5 分钟 TTL），清空永不产生错误行为，沿用可能产生错误的切换目标"
+  implications: "清空在同一次写入内顺带完成"
+  status: RESOLVED
+  depends_on: [D2]
+
+- id: D6
+  layer: goal
+  node: 可撤销性
+  decision: "需要，且用一条专有的双槽撤销 —— SWAP_SLOTS 执行前把两槽内容（含绑定）一起快照；撤销时一次写入同时还原"
+  alternatives:
+    - option: "复用现有 UNDO_SAVE 调两次"
+      rejected_reason: "现有 pendingUndo 按 slotId 单键存储，装不下一个对子；调两次必然分两次写入，违反 D4"
+    - option: "不提供撤销"
+      rejected_reason: "交换覆盖两个槽，属于项目一贯为槽位覆盖提供撤销的那类操作；『拖错一下』不可恢复不可接受"
+  rationale: "与 saveSlot 每次 captureBeforeOverwrite 的既有做法一致"
+  implications: "侧边栏只有一个撤销提示位，因此必须是**一条**撤销而非两条"
+  status: RESOLVED
+  depends_on: [D4]
+
+- id: D7
+  layer: goal
+  node: 交换后的重新投递
+  decision: "立即重新投递到受影响的两个标签页"
+  alternatives:
+    - option: "只写存储不投递"
+      rejected_reason: "交换后每个标签页的主人换人了（原归槽 3 管的标签页现由槽 7 接管，并套用槽 7 的策略），不重投会让浏览器所见与存储不一致"
+    - option: "只投递『接收内容』的一侧"
+      rejected_reason: "源槽变空同样改变其标签页的归属，两侧都受影响"
+  rationale: "既有先例：UPDATE_SLOT_URL 已这样做（worker-orchestrator.ts:783-785）"
+  implications: "是 D1 的必然推论"
+  status: RESOLVED
+  depends_on: [D1]
+
+# ─── 约束层 ────────────────────────────────────────────────────────────────
+
+- id: D8
+  layer: constraint
+  node: 拖拽起点
+  decision: "整行空白处可抓，避开交互子元素（按钮/输入框）"
+  alternatives:
+    - option: "专用手柄（编号）"
+      rejected_reason: "需要新增 affordance"
+    - option: "整行含全部子元素"
+      rejected_reason: "与 D9 冲突"
+  rationale: "用户选择；无需新 affordance"
+  implications: "用户已确认代价：可抓区域实际只剩编号与内边距，用户看不出哪里能抓 —— 由 D20 的光标补偿部分缓解"
+  status: RESOLVED
+  depends_on: []
+
+- id: D9
+  layer: constraint
+  node: 文本选中保留（红线）
+  decision: "标题/URL 文本元素上显式 draggable={false} 并拦截 dragstart 冒泡，使文本区仍可选；拖拽只能从编号与内边距发起"
+  alternatives:
+    - option: "接受选中损失"
+      rejected_reason: "要复制 URL 就得双击进编辑，而编辑态是有副作用的操作"
+    - option: "放弃整行拖拽回到专用手柄"
+      rejected_reason: "与 D8 的选择冲突"
+  rationale: "HTML5 draggable 一旦施加，其内按压拖动会发起拖拽而非选中文字（浏览器既有行为）"
+  implications: "不缩小可抓范围（D8 已排除这些区域），只补上『被排除区域保留原能力』"
+  status: RESOLVED
+  depends_on: [D8]
+
+- id: D10
+  layer: constraint
+  node: 键盘等价入口（红线）
+  decision: "双入口：① ⋯ 菜单新增 Swap with slot…（主入口）；② Alt+↑/↓ 手势（快路径）"
+  alternatives:
+    - option: "宣布为可接受缺口"
+      rejected_reason: "既有能力（编辑/清空/重存）无法产生『两份内容对调』（会覆盖而非搬走），键盘用户实际达不到该功能，是真能力缺口"
+  rationale: "⋯ 菜单本身就是键盘可达的（IconButton + role=menu + menuitem），且已承载 5 个同类『整行操作』，非新造通道"
+  implications: "需要『选择目标编号』的交互，形态见 D23"
+  status: RESOLVED
+  depends_on: []
+
+- id: D11
+  layer: constraint
+  node: 键盘手势的按键与模型
+  decision: "Alt+↑/↓ 移动交换光标，松开 Alt 时提交；焦点须在槽行上（不在编辑态输入框内）；边界环绕（槽 1 按 ↑ → 末尾槽，槽 10 按 ↓ → 开头槽）"
+  alternatives:
+    - option: "按一次立即交换"
+      rejected_reason: "连按只能做相邻交换（1↔2 再 2↔3），无法表达『槽 1 ↔ 槽 7』；移动光标再一次提交才能做任意跨距交换"
+    - option: "Ctrl/Cmd 系组合键"
+      rejected_reason: "更常被页面级/扩展级快捷键占用（本扩展已有 21 条 save/switch-slot 命令可自行绑定）"
+    - option: "无环绕（到边界即停）"
+      rejected_reason: "首尾槽在 ↑ 方向无法作为目标，不可达"
+  rationale: "侧边栏是扩展页面内容区而非浏览器 chrome，Alt 不触发菜单栏；↑/↓ 在浏览器中无默认行为；扩展已注册命令默认未绑定按键"
+  implications: "引入瞬态『武装态』（D12），归属见 D15"
+  status: RESOLVED
+  depends_on: [D10]
+
+- id: D12
+  layer: constraint
+  node: 武装态的生命周期
+  decision: "Alt 的 keyup 提交之外，任何『用户已不在这个操作里』的信号都取消：Escape 取消、行或窗口失焦即取消、超时兜底约 3 秒"
+  alternatives:
+    - option: "失焦时提交（认为用户已决定）"
+      rejected_reason: "用户按下 Alt+↓ 后 Alt+Tab 去看别的窗口往往只是想确认；此时替他提交一次覆盖两个槽的交换，等于替他做了决定"
+  rationale: "Escape 是既有约定（槽行标题/URL 编辑态均 Escape 退出）；超时兜底的存在理由是 keyup 可能收不到（Alt+Tab 切走、系统级弹窗）"
+  implications: "⚠️ 适用范围（Act 3 自检补明确）：**只约束 Alt 手势的武装态**。菜单路径是模态提交，不受失焦/超时约束 —— 否则 ⋯ 菜单一打开（焦点离开槽行）就被自己取消。"
+  status: RESOLVED
+  depends_on: [D11]
+
+- id: D13
+  layer: constraint
+  node: 非法落点与手势冲突（红线）
+  decision: "一律拒绝并各给信号：拖到自身 → dropEffect='none'；拖到编辑态槽行 → 拒绝；拖出列表 → 静默取消；dragstart → 取消待提交的激活计时器与已武装的 Alt 态"
+  alternatives:
+    - option: "编辑态行自动让路（取消编辑）"
+      rejected_reason: "自动提交会写用户没要求的东西；丢弃草稿会吞掉已输入内容"
+    - option: "不设守卫"
+      rejected_reason: "直接产生串写"
+  rationale: "编辑态提交走 onEditTitle(slotNumber, draft)，写回的是该编号。若交换先发生，草稿会写进已换内容的槽 —— 拒绝是唯一不产生串写的选择"
+  implications: "红线：数据完整性，非体验问题"
+  status: RESOLVED
+  depends_on: [D11]
+
+# ─── 架构层 ────────────────────────────────────────────────────────────────
+
+- id: D14
+  layer: architecture
+  node: 跨存储原子性的落地级别
+  decision: "顺序写入 + 失败补偿：① 快照两槽 record+binding+派生态 → ② 写 sync（带 expectedVersion，失败即中止）→ ③ 写 local（绑定+清派生态）→ ④ ③ 失败则用快照回写两区 → ⑤ 只返回一个结果"
+  alternatives:
+    - option: "只保证 sync 原子"
+      rejected_reason: "会产生『内容换了、绑定没换』的静默错误状态，正是 D1 的反面"
+    - option: "不追求跨区原子"
+      rejected_reason: "同上"
+  rationale: "不是新造 —— clearAndWriteWithCompensation 已是同款模式并有 T22 测试钉住"
+  implications: "❗如实记录的边界：若第 ④ 步自身也失败，仍会残留不一致。与既有实现完全相同的边界，不夸大保证"
+  status: RESOLVED
+  depends_on: [D4]
+
+- id: D15
+  layer: architecture
+  node: 瞬态『待定交换』状态的形状与归属
+  decision: "统一为单一状态 {source, target} | null，由列表级 hook 持有（落在 src/ui/shared/use-*.ts）；拖拽与 Alt 手势只是它的两种输入方式；行通过 props 得知自己是否为 source/target"
+  alternatives:
+    - option: "两套独立状态"
+      rejected_reason: "会产生『武装中拖拽/拖拽中武装』等无意义组合，需逐一设防"
+    - option: "React Context"
+      rejected_reason: "本仓库无此机制，而 SlotRow 已在接收 20+ props，加 2-3 个是一致的"
+  rationale: "拖拽与手势语义完全同构；统一后 D13 的『dragstart 取消武装态』自动成立，无需特例代码"
+  implications: "范围澄清：该状态描述拖拽与 Alt 手势，**不包含菜单路径**（模态提交，见 D23）"
+  status: RESOLVED
+  depends_on: [D11, D13]
+
+- id: D16
+  layer: architecture
+  node: 消息协议
+  decision: "消息名 SWAP_SLOTS；载荷 {sourceSlotId, targetSlotId} + expectedVersion；服务层自己读两槽状态再对调；版本不符 → 整体拒绝 CONFIG_CONFLICT；与 UiAction union 同批注册进 KNOWN_ACTIONS"
+  alternatives:
+    - option: "载荷携带两份完整内容"
+      rejected_reason: "UI 传来的副本可能已过期，会写回陈旧内容覆盖用户别处的修改"
+    - option: "不带版本"
+      rejected_reason: "『两槽同时生效』建立在可能已过期的读上，且失败无信号"
+  rationale: "命名与既有 SET_SLOT_*/UPDATE_SLOT_* 同族，明确是复数操作；KNOW_ACTIONS 是手写白名单不自动同步，有门禁测试"
+  implications: "撤销消息为 UNDO_SWAP"
+  status: RESOLVED
+  depends_on: [D14]
+
+- id: D17
+  layer: architecture
+  node: 校验分层与幂等
+  decision: "UI 先行拦截 + 服务层兜底校验"
+  alternatives: []
+  rationale: "消息可被快捷键/未来入口直接调用，UI 不是边界（TagService 注释原话）"
+  implications: |
+    UI 层：拖到自身/同一槽不发起（D13）；空↔空不发起。
+    手势中 source === target 分两种情形（Act 3 自检补明确）：
+      - 原地未动（没按过方向键）→ 静默取消；
+      - 环绕到边界仍按 → 不提交 + 符号+文案提示（↑/↓ + Top/Bottom）。
+    服务层：source === target → INVALID_REQUEST；
+             编号**越界**（非 1..10 整数）→ SLOT_NOT_FOUND（复用既有错误码）；
+             1..10 内**缺记录** → **空槽 = 合法内容**，走对调（**不是错误**）；
+             两槽皆空 → 成功但零写入（幂等：不报错、不动版本）。
+    ⚠️ 措辞精化（计划前置裁决 A4 时修正）：本项原写作『编号越界 / 槽不存在 → SLOT_NOT_FOUND』，
+       是本决策的措辞失误，会推翻 D3 —— 本项目『空槽』在数据上就等于 sync.slots 里没有该 id 的记录
+       （sidebar/App.tsx:2801-2803；types.ts:753-761 的 slots 是稀疏数组）。
+       若把缺记录判为错误，则『有↔空』永远报错。故**『槽不存在』仅指编号越界**。
+       不采用 SLOT_EMPTY：既有 switchSlot 用它表示错误态（想切换但槽是空的），而本功能里空槽是合法操作数。
+  status: RESOLVED
+  depends_on: [D16]
+
+- id: D18
+  layer: architecture
+  node: 双槽撤销的记录与还原
+  status: SUPERSEDED
+  superseded_by: "2026-10-16-undo-stack-revision-design.md（范围修订）"
+  superseded_note: |
+    ⚠️ **本决策已作废（2026-10-16，范围修订）**。用户随后决定**全项目撤销改为可堆积**
+    （见修订文档 U1–U7、裁决 Z1），因此本条原定的形态**不再成立**：
+      - `pendingSwapUndo` 独立键 **未引入**
+      - `UNDO_SWAP` 消息 **未引入**（契约计数 **+1 ⇒ 53**，不是 54）
+      - 交换的撤销改走**共享撤销栈**的 `replay:'background'` 分支，复用 `UNDO_SAVE { slotId, captureId }`
+      - 后台快照改为**判别式** `kind: 'single' | 'swap'`，由 `kind:'swap'` 承载两槽内容与绑定（裁决 Z1）
+      - `pendingUndo` 本身**被改造成数组**（这正是本条当初否决的方向）—— 但以 U5 的方式做：
+        `clearPendingUndo` 由"无条件删整个键"改为按身份过滤后写回，并补 `pendingUndoWriteQueue` 串行化
+    下文保留为**原决策记录**：其"为什么不能轻率复用 `pendingUndo`"的论证**仍然有效**
+    （T34 归属证明、双身份清理定时器确实都要一并处理），只是结论从"另开一个键"
+    变为"改造 `pendingUndo` 本身，并把那些牵连逐项解决"。
+  decision: "【已作废】并列一条独立的双槽撤销：新增独立 local 键 pendingSwapUndo，结构 {sourceSlotId, targetSlotId, sourceSnapshot, targetSnapshot, captureId, expiresAt}；新增消息 UNDO_SWAP，一次写入还原两槽"
+  alternatives:
+    - option: "扩展 pendingUndo 成数组"
+      rejected_reason: "【原否决理由，后被 U5 以受控方式采纳】会动到一条已被测试钉死的既有路径（SAVE_SLOT 撤销），其 captureId 归属证明（T34）、5s TTL lazy 校验、按 (slotId,captureId) 双身份的清理定时器都会被牵连；且交换与单槽撤销的生命周期并不相同"
+    - option: "UI 连发两次 UNDO_SAVE"
+      rejected_reason: "必然是两次独立写入，撤销本身就会产生中间态，违反 D4"
+    - option: "撤销 D6"
+      rejected_reason: "D6 已否决"
+  rationale: "pendingUndo 本身就是放在 LocalState 之外的独立 local 键（注释：transient device-local data with a 5s TTL，隔离可避免污染持久化状态形状），再加并列键是同款决策"
+  implications: "【已作废】两条撤销通道各自独立，不互相抢占"
+  depends_on: [D6, D14]
+
+- id: D19
+  layer: architecture
+  node: 测试策略
+  decision: "三层分工：纯逻辑单测（服务层，含两区补偿回滚）+ UI 行为测（jsdom，复用既有手写 DataTransfer 装置）+ 人工验证清单（不自动化）；并显式写出 jsdom 盲区"
+  alternatives:
+    - option: "全用 jsdom 断言"
+      rejected_reason: "会产生假保证（jsdom 没有浏览器菜单栏、不会因 Alt 移焦点、keyup 无需抑制即可送达）"
+    - option: "只做服务层单测"
+      rejected_reason: "UI 行为无回归保护"
+  rationale: "项目已有同款诚实做法（sidebar-title-commit.test.tsx 注释：jsdom 不移动焦点，只能断言机制而非竞态本身）"
+  implications: |
+    ⚠️ 核心诚实性要求：Alt 菜单抑制测试在 jsdom 里必然『通过』却什么都没证明，写成自动化断言是假保证。
+    实现期必须实测 1 项：Windows Chrome 下对 Alt 的 keydown 调 preventDefault() 能否既抑制菜单栏、又保留 keyup 交付。
+  status: RESOLVED
+  depends_on: [D14, D18]
+
+# ─── 细节层 ────────────────────────────────────────────────────────────────
+
+- id: D20
+  layer: detail
+  node: 拖拽的可发现性补偿（光标）
+  decision: "整行保持 cursor:pointer；cursor:grab 只加在编号 __number 上"
+  alternatives:
+    - option: "整行 cursor:grab"
+      rejected_reason: "会让更高频的『点击激活』失去光标暗示，用高频能力换低频能力不划算"
+    - option: "悬停时才浮现编号手柄"
+      rejected_reason: "把入口藏到需要 hover 才发现，只有已经知道的人才能找到，可发现性问题原封不动"
+  rationale: "pointer（可点）与 grab（可抓）作用于不同元素可共存；编号当前零交互且 aria-hidden，是唯一不占用任何既有能力的位置"
+  implications: "可抓区域实际只剩编号与内边距这一代价由本项部分缓解"
+  status: RESOLVED
+  depends_on: [D8, D9]
+
+- id: D21
+  layer: detail
+  node: 待定交换态的三类视觉
+  decision: "源槽用 opacity 降低；目标槽用 outline 强调（不动 background）；边界提示为行下方短促提示"
+  alternatives:
+    - option: "一律用背景色"
+      rejected_reason: "会与 :hover 抢同一通道，用户无法分辨『鼠标在哪』与『目标是哪』"
+    - option: "只用文字状态（行内插入 → target）"
+      rejected_reason: "会在拖拽过程中改变行高，导致后续行落点位置在拖拽中途漂移"
+  rationale: "outline 不参与布局、不与 :hover 的背景冲突，是唯一能同时既显示悬停又显示目标的选择；项目已有 outline 用法（tbs-tag-selector__option:has(input:focus-visible)）"
+  implications: "三类视觉分工明确，互不抢通道"
+  status: RESOLVED
+  depends_on: [D15]
+
+- id: D22
+  layer: detail
+  node: 两种输入方式的反馈位置
+  decision: "拖拽：目标行 outline + dragstart 时用 dataTransfer.setDragImage() 让拖影带上槽位编号；键盘手势：边界提示锚定焦点行，不跟随鼠标"
+  alternatives:
+    - option: "边界提示跟随鼠标"
+      rejected_reason: "键盘操作时鼠标可能不在侧边栏（甚至在其他显示器），提示会指向与注意力无关处，比不提示更困惑"
+    - option: "用 dragover 的 clientX/clientY 持续挪浮层伪装跟随"
+      rejected_reason: "刷新率由浏览器决定可能跳动，且原生拖拽本就在绘制拖影"
+  rationale: "反馈总应出现在用户的注意力所在；setDragImage() 是标准且零脆弱的实现，满足用户『跟随鼠标』的意图"
+  implications: "无需 dragover 挪浮层的偏方"
+  status: RESOLVED
+  depends_on: [D21]
+
+- id: D23
+  layer: detail
+  node: ⋯ 菜单选目标编号的形态
+  decision: "Swap with slot… 打开输入框，用户键入目标编号 1..10；即执行不二次确认；校验并入 D17（1..10 整数；越界/非法就地阻止；等于源槽就地阻止并提示）"
+  alternatives:
+    - option: "对话框列出 1..10 的槽位按钮"
+      rejected_reason: "更符合 recognition，但用户选择了输入框"
+    - option: "嵌套子菜单"
+      rejected_reason: "项目无子菜单先例，需新造 aria-haspopup/嵌套 menu 角色"
+    - option: "菜单项直接武装该行"
+      rejected_reason: "焦点还在菜单里却被要求离开菜单，步数更多，且超时/失焦取消后要重来"
+  rationale: "项目既有设定本就假设用户知道编号（快捷键 save-slot-3/switch-slot-3、行左编号、菜单文案 Slot N），recall 负担不是本次新引入"
+  implications: "D24 的对照行是本选择的补偿；交换可撤销故无需二次确认"
+  status: RESOLVED
+  depends_on: [D10, D17]
+
+- id: D24
+  layer: detail
+  node: 输入框上方的编号对照
+  decision: "输入框上方提供一行可扫读对照，形如 '1 GitHub · 2 Empty · 3 News…'"
+  alternatives:
+    - option: "纯输入框"
+      rejected_reason: "在面向 10 个对象的选择里只能靠记忆"
+    - option: "只给占位符 1-10"
+      rejected_reason: "只回答『范围』，没回答『哪个是哪个』"
+  rationale: "零成本补回 recall 缺口；且空槽被交换时行为不同（D3：有↔空=移动），所以『目标是不是空的』是会影响结果的真实信息"
+  implications: "不改变『打字提交』的交互"
+  status: RESOLVED
+  depends_on: [D23]
+
+- id: D25
+  layer: detail
+  node: 全部用户可见文案
+  decision: |
+    ① 菜单项：Swap with slot…
+    ② 冲突：Slot data changed elsewhere. Refresh and try again.
+    ③ 撤销条：Slots 3 and 7 swapped
+    ④ 成功 toast：不发
+    ⑤ 失败 toast：Failed to swap slots 3 and 7
+    ⑤b 边界提示：↑/↓ + Top/Bottom
+  alternatives:
+    - option: "成功发 toast"
+      rejected_reason: "交换改的正是列表本身，用户立刻看到两行内容对调；既有 Saved to slot 3 之所以发，是因为它改的是当前标签页、列表里看不出来"
+    - option: "边界提示用 ▲▼ 或整句"
+      rejected_reason: "▲▼ 与按键不同形；整句太长而这是连按时的即时反馈"
+  rationale: "采集既有语域：toast 完整句、错误 Failed to…/Could not…、菜单项祈使短语+…；冲突文案直接复用 settings/App.tsx:1839 的既有句式"
+  implications: "拼写为英式+美式混合体（colour 与 authorized 并存），不强行统一"
+  status: RESOLVED
+  depends_on: [D12, D17, D18]
+
+- id: D26
+  layer: detail
+  node: 无障碍
+  decision: |
+    三件事：① 等价性（菜单路径 = 完整功能，拖拽对读屏用户不是必需）；
+    ② 瞬态态不播报（代之以提交后的结果宣告与失败 toast）；
+    ③ 给 listitem 补 aria-posinset / aria-setsize。
+  alternatives:
+    - option: "只做等价性"
+      rejected_reason: "用户提交后听不到结果（D25-④ 成功不发 toast），会不确定是否生效"
+    - option: "让待定态也播报"
+      rejected_reason: "反模式：连按会引发连续播报把用户淹没，且焦点行本身已承载『我在哪』的信息"
+  rationale: "与既有做法一致：项目对随交互高频变化的视觉态一律不 aria-live（拖拽 --drop 高亮、tag-selector 选中态），而结果才宣告（UndoBar 的 role=status、Toast 的 role=alert）"
+  implications: |
+    ⚠️ 自检修正：本项原先还写『去掉 __number 的 aria-hidden 让编号进入可访问名』—— 这是错的。
+    行的 aria-label 已是 `Slot ${slotNumber}: ${displayTitle} (${statusText})`（sidebar/App.tsx:597），
+    编号本就在可访问名里；再去掉 aria-hidden 会让读屏念两遍。故 __number 保持 aria-hidden，
+    只补 aria-posinset / aria-setsize。
+  status: RESOLVED
+  depends_on: [D15, D18, D25]
+
+# ─── 自检发现并裁决的矛盾 ───────────────────────────────────────────────────
+
+- id: C1
+  layer: cross-check
+  node: D12 × D23 的矛盾
+  conflict: "⋯ 菜单一打开槽行就失去焦点（焦点移入菜单项），点击菜单项后焦点再入对话框。若 D12 的『失焦即取消』适用于所有待定交换，菜单路径在最开始就被自己取消，永远无法完成"
+  root_cause: "D15 把拖拽与 Alt 手势统一为一个状态，而菜单路径并不属于那个瞬态态 —— 它是显式提交界面"
+  ruling: "A. 把 D12 明确限定于 Alt 手势的武装态；菜单路径是模态提交，不受失焦/超时约束（它有自己的 Escape/取消/提交）"
+  rationale: "项目所有模态（图标编辑器、规则创建、Confirm）都是不受超时约束的显式提交；模态路径不存在『用户离开后替他提交』的风险，而那正是 D12 的立法目的"
+  status: RESOLVED
+  affects: [D12, D15, D23]
+
+- id: C2
+  layer: cross-check
+  node: D17 边界提示在『原地未动』时的矛盾
+  conflict: "Alt 光标起始就停在源槽上。用户按下 Alt 后没按方向键就松开，source === target 按 D17 需给提示，但 ↑/↓ + Top/Bottom 在这里是错的（用户既没到顶也没到底）"
+  root_cause: "Top/Bottom 的语义是『你已经到头了』，与『原地未动』是两件事，共用一个提示会让那条提示变得不可信"
+  ruling: "A. 原地未动 → 静默取消（用户什么都没要求）；Top/Bottom 只用于真的环绕到边界"
+  rationale: "无操作即无反馈，与项目的空操作惯例一致；新增第三种文案会为一个用户没打算做的动作增加文案"
+  status: RESOLVED
+  affects: [D17, D25]
+
+# ─── 实现期必须实测（非设计决策，是待验证事实） ─────────────────────────────
+
+- id: Z1
+  layer: cross-check
+  node: 交换的撤销快照装不下两个槽（规划期发现的真空）
+  conflict: "槽位交换的撤销必须还原两个槽（内容 + 绑定），而 PendingUndoSnapshot 只有一组 slotSnapshot/bindingSnapshot —— 装不下"
+  root_cause: "原 D18 选的是『并列独立的 pendingSwapUndo 键』，虽能承载两槽，但用户随后决定全项目撤销改为可堆积（推翻 D18），交换的撤销改走共享栈 —— 而共享栈的快照结构仍是单槽的"
+  ruling: "A. 快照改为判别式：kind:'single' 保留既有字段；kind:'swap' 携带 {sourceSlotId, targetSlotId, sourceSnapshot, sourceBinding, targetSnapshot, targetBinding}。一条条目 = 一次撤销。UNDO_SAVE 据 captureId 取出后按 kind 分派；**不新增 UNDO_SWAP**（契约计数 +1 ⇒ 53）"
+  rationale: "一条条目 = 一次撤销，语义最直白；避免与 UNDO_SAVE 平行的第二条通道"
+  rejected:
+    - "B. 一次交换入栈两条条目 + pairId 关联 —— 破坏『一条 = 一次撤销』的直觉，UI 堆叠会显示两条实为同一件事"
+    - "C. 保留独立 UNDO_SWAP —— 与本次『统一共享栈』相抵"
+  status: RESOLVED
+  affects: [D18, D6, D16]
+
+- id: A4
+  layer: cross-check
+  node: D17 的『槽不存在』措辞会推翻 D3
+  conflict: "D17 原文『编号越界 / 槽不存在 → SLOT_NOT_FOUND』。但本项目的『空槽』在数据上就等于 sync.slots 里没有该 id 的记录（UI 是 Array.from({length:10}) + slots.find，slots 是稀疏数组）。若把缺记录判为错误，则『有↔空』永远失败 —— 而空槽恰是本功能最初点名的核心场景"
+  root_cause: "架构层写 D17 时的措辞失误，不是用户的选择有矛盾（D3 在目标层、层级更高）"
+  ruling: "A. 『槽不存在』仅指编号越界（非 1..10 整数）→ SLOT_NOT_FOUND；1..10 内缺记录 = 空槽 = 合法内容，走对调。D3 保持有效"
+  rationale: "不用 SLOT_EMPTY：既有 switchSlot 用它表示错误态（想切换但槽是空的），而本功能里空槽是合法操作数，复用会让错误码自相矛盾"
+  status: RESOLVED
+  affects: [D17, D3]
+
+- id: A7
+  layer: cross-check
+  node: 撤销条被覆盖（一个撤销位的缺口）
+  conflict: "侧边栏与设置页各只有一个撤销位。连续两次交换（A↔B 再 C↔D），第二次的撤销条会覆盖第一次 → 第一次在 UI 上不再可撤销"
+  ruling: "C. 扩为可堆积多条撤销 → 演化为修订文档的 U1–U7"
+  rationale: "用户明确要求全项目撤销支持堆积；`pendingUndo` 不在 LocalState 内、不参与导出，因此改成数组不触碰导出模型"
+  status: RESOLVED
+  affects: [D6, D18]
+
+- id: V1
+  layer: verification
+  node: Alt 菜单抑制与 keyup 交付是否可兼得
+  question: "Windows Chrome 下，单独按/松 Alt 会把焦点移到浏览器菜单栏。页面对 Alt 的 keydown 调 preventDefault() 通常可抑制菜单 —— 但本设计依赖 Alt 的 keyup 来提交，『抑制菜单』与『仍能收到 keyup』是否互相干扰？"
+  why_not_assumable: "jsdom 没有浏览器菜单栏、不会因 Alt 移动焦点、keyup 无需抑制即可送达，所以该问题在测试环境里必然『通过』却什么都没证明"
+  action: "实现阶段先用最小页面实测再落代码，不得假设"
+  fallback: "若 preventDefault() 连带吞掉 keyup，改用显式 Alt+Enter 提交（由实测结论决定）"
+  status: PENDING_VERIFICATION
+  blocks: [D11, D12]

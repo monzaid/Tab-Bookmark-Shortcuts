@@ -13,7 +13,7 @@
  * immediately with no confirmation, so ①②④ fail.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { SidebarApp } from '@ui/sidebar/App';
 
 /**
@@ -163,6 +163,85 @@ describe('U5 (P2 + P6 + P8) — slot menu delete + explicit edits', () => {
       expect(unbindCalls()).toHaveLength(1);
     });
     expect(unbindCalls()[0]?.[0]).toEqual(expect.objectContaining({ action: 'UNBIND_SLOT', payload: { slotId: 1 } }));
+  });
+
+  /**
+   * Same defect class as the swap dialog's double-submit (R7), but the stakes are
+   * higher: a delete is the one destructive action with NO undo (DR3), and the
+   * confirm dialog closes asynchronously — so its `onConfirm` can run twice for a
+   * single confirmed click. Two `UNBIND_SLOT`s then race and the second reports a
+   * failure for a slot the first already removed.
+   */
+  it('sends UNBIND_SLOT exactly once for a double-confirmed click', async () => {
+    render(<SidebarApp />);
+    await openSlotMenu();
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Slot Data' }));
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+    });
+
+    await flushConfirmGuard();
+    const confirm = screen.getByRole('button', { name: 'Clear' });
+    // Both clicks land in ONE batch, before React can unmount the dialog.
+    act(() => {
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+    });
+
+    await waitFor(() => {
+      expect(unbindCalls().length).toBeGreaterThan(0);
+    });
+    expect(unbindCalls()).toHaveLength(1);
+  });
+
+  /**
+   * The companion guard: a delete that FAILS must remain retryable, so the
+   * in-flight marker has to be released on the error path too.
+   */
+  it('a failed delete can be retried (the in-flight guard is not sticky)', async () => {
+    const seen = { action: '', n: 0 };
+    // Route UNBIND_SLOT to a failure first, then to success.
+    const original = mockSendMessage.getMockImplementation() as
+      | ((message: SentMessage) => Promise<unknown>)
+      | undefined;
+    mockSendMessage.mockImplementation((message: SentMessage) => {
+      if (message.action === 'UNBIND_SLOT') {
+        seen.n += 1;
+        seen.action = 'UNBIND_SLOT';
+        return Promise.resolve(seen.n === 1 ? { success: false, message: 'nope' } : { success: true });
+      }
+      return original ? original(message) : Promise.resolve(BASE_STATE);
+    });
+
+    render(<SidebarApp />);
+    await openSlotMenu();
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Slot Data' }));
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+    });
+    await flushConfirmGuard();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+
+    await waitFor(() => { expect(unbindCalls()).toHaveLength(1); });
+
+    // Re-open and confirm again — the guard must not block a genuine retry.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'More options for slot 1' })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'More options for slot 1' }));
+    await waitFor(() => {
+      expect(screen.getByRole('menuitem', { name: 'Clear Slot Data' })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Slot Data' }));
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+    });
+    await flushConfirmGuard();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+
+    await waitFor(() => { expect(seen.n).toBe(2); });
   });
 
   it('should report the delete in the unified wording', async () => {

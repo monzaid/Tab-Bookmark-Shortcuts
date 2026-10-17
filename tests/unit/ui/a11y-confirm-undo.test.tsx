@@ -6,7 +6,7 @@ import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Confirm, FormField, formFieldIds } from '@ui/shared/components';
 import { UndoBar } from '@ui/shared/undo-bar';
-import type { UndoSnapshot } from '@ui/shared/undo-bar';
+import type { UndoBarEntry } from '@ui/shared/undo-bar';
 
 describe('T17: Confirm — DOM order, initial focus, protection window (CT3-b)', () => {
   afterEach(() => { vi.useRealTimers(); });
@@ -49,18 +49,18 @@ describe('T17: Confirm — DOM order, initial focus, protection window (CT3-b)',
 });
 
 describe('T17: UndoBar — role is status, never alert+polite (CT3-g4)', () => {
+  const entry = (id: string): UndoBarEntry => ({ id, message: 'Cleared', expiresAt: Date.now() + 5000 });
+
   it('never stacks role="alert" with aria-live="polite"', () => {
-    const snapshot: UndoSnapshot = { writes: [], affectedTabIds: [] };
-    render(<UndoBar state={{ message: 'Cleared', snapshot, expiresAt: Date.now() + 5000 }} onUndo={vi.fn()} />);
+    render(<UndoBar entries={[entry('a')]} onUndo={vi.fn()} onExpire={vi.fn()} />);
     const root = screen.getByRole('status');
     expect(root.getAttribute('role')).toBe('status');
     expect(root.getAttribute('role')).not.toBe('alert');
   });
 
   it('takes focus and does not co-run with Confirm (serial, CT3-g2)', () => {
-    const snapshot: UndoSnapshot = { writes: [], affectedTabIds: [] };
     // UndoBar alone owns focus when it is present.
-    render(<UndoBar state={{ message: 'Cleared', snapshot, expiresAt: Date.now() + 5000 }} onUndo={vi.fn()} />);
+    render(<UndoBar entries={[entry('a')]} onUndo={vi.fn()} onExpire={vi.fn()} />);
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /undo/i }));
   });
 });

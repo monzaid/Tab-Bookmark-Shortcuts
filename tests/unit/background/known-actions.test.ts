@@ -50,6 +50,8 @@ describe('GAP-D: newly added actions pass the KNOWN_ACTIONS gate', () => {
     ['POSITION_CURRENT_PREV', { anchorTabId: 10 }],
     ['POSITION_CURRENT_NEXT', {}],
     ['RECOVERY_PREV_MATCH', { recoveryId: 'rec-x', autoBind: false }],
+    // T13: the slot drag-swap action must pass the gate (A3/G-D).
+    ['SWAP_SLOTS', { sourceSlotId: 1, targetSlotId: 2 }],
   ] as const;
 
   for (const [action, payload] of newActions) {

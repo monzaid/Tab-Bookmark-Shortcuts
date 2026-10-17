@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createMockAdapter } from '@adapters/mock-adapter';
 import { StorageRepository } from '@background/storage-repository';
-import { FieldDeliveryService, RETRY_DELAYS_MS } from '@background/field-delivery-service';
+import { FieldDeliveryService, RETRY_DELAYS_MS, FIELD_APPLY_TIMEOUT_MS } from '@background/field-delivery-service';
 import type { NormalizedTab, NormalizedWindow } from '@adapters/contract';
 import type { FieldApplyMessage } from '@shared/messages';
 
@@ -34,6 +34,58 @@ describe('T7: FieldDeliveryService', () => {
       .map((c) => c.args[1] as FieldApplyMessage)
       .filter((m) => m.type === 'FIELD_APPLY');
   }
+
+  /**
+   * A tab that ACCEPTS `FIELD_APPLY` and never answers must not wedge the per-tab
+   * state machine. Without a deadline that promise never settles, `inFlight` stays
+   * true, and every later delivery for that tab is folded into `pending` and
+   * dropped — silently, forever.
+   *
+   * `sendMessage` is restored in `finally`: it is an own property of the adapter and
+   * `adapter.reset()` does NOT undo a direct assignment, so leaving it in place
+   * would make every subsequent case in this file see an unreachable tab.
+   */
+  describe('unreachable content script (deadline)', () => {
+    it('gives up on a never-answering FIELD_APPLY and does not stay in flight', async () => {
+      adapter.setTabs([tab(1, 'https://a.com/x')]);
+      await repo.addRule({
+        id: 'r1',
+        urlMatch: { type: 'exact', value: 'https://a.com/x' },
+        priority: 0, tagIds: [],
+        title: 'Rule Title',
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+      });
+
+      // Bound: detaching a method from its object is what `unbound-method` warns
+      // about, and the restored function must keep working against the adapter.
+      const original = adapter.tabs.sendMessage.bind(adapter.tabs);
+      let attempts = 0;
+      adapter.tabs.sendMessage = () => { attempts += 1; return new Promise(() => {}); };
+      try {
+        // Compute the bounded wait from the shipped constant so this stays honest
+        // if the value is tuned.
+        await Promise.race([
+          delivery.recomputeAndRedeliver([1]),
+          new Promise((r) => { setTimeout(r, FIELD_APPLY_TIMEOUT_MS + 1500); }),
+        ]);
+
+        // It reached the tab and stopped waiting.
+        expect(attempts).toBeGreaterThan(0);
+
+        // THE POINT: the tab is not stuck in flight — a SECOND delivery is still
+        // attempted, so one unreachable round trip does not write the tab off.
+        const before = attempts;
+        await Promise.race([
+          delivery.recomputeAndRedeliver([1]),
+          new Promise((r) => { setTimeout(r, FIELD_APPLY_TIMEOUT_MS + 1500); }),
+        ]);
+        expect(attempts).toBeGreaterThan(before);
+      } finally {
+        adapter.tabs.sendMessage = original;
+      }
+    }, 20_000);
+  });
 
   describe('affected set (A3)', () => {
     it('computes rule hits across tabs', async () => {

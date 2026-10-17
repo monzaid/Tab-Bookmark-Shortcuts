@@ -102,11 +102,13 @@ describe('T14a: import/export protocol — three new actions', () => {
     // CREATE_TAG / DELETE_TAG / SET_RULE_TAGS / RESTORE_TAG plus
     // UPDATE_TAG (which replaced RENAME_TAG, hence the count is still 52), each
     // registered in the SAME change as its union member (R6).
-    expect(known.size).toBe(52);
+    // Slot drag-swap (T13/A3): 52 → 53 with `SWAP_SLOTS` (Z1: the swap's undo
+    // reuses `UNDO_SAVE`, so there is NO `UNDO_SWAP` — the count is 53, not 54).
+    expect(known.size).toBe(53);
     // Symmetric sentinel: the reverse difference below would also catch an empty
-    // `declared`, but this names the failure directly ("declared is not 52")
+    // `declared`, but this names the failure directly ("declared is not 53")
     // instead of leaving it to a filter diff.
-    expect(declared.size).toBe(52);
+    expect(declared.size).toBe(53);
     expect([...declared].filter((a) => !known.has(a)).sort()).toEqual([]); // in union, not whitelisted
     expect([...known].filter((a) => !declared.has(a)).sort()).toEqual([]); // whitelisted, not in union
   });

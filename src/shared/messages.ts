@@ -89,7 +89,33 @@ export interface UnbindSlotRequest extends RequestBase {
 
 export interface UndoSaveRequest extends RequestBase {
   action: 'UNDO_SAVE';
-  payload: { slotId: number };
+  /**
+   * U1: `captureId` names WHICH captured action to undo.
+   *
+   * With stacked undo bars each bar has its own Undo button, so the request must
+   * identify the entry rather than "pop the newest" — otherwise clicking the
+   * second bar would undo the latest action (self-contradictory with the stack).
+   * `slotId` is kept for the degraded path (no snapshot → delete that slot).
+   *
+   * Z1: a slot swap reuses this very message; the backend dispatches on the
+   * stored entry's `kind`, so no parallel `UNDO_SWAP` channel exists.
+   */
+  payload: { slotId: number; captureId: number };
+}
+
+/**
+ * D16: swap the CONTENT of two slots, keeping each number's config (D2).
+ *
+ * The payload carries only the two NUMBERS + the `RequestBase.configVersion`
+ * optimistic lock — never the content itself: the service re-reads both slots,
+ * so a stale UI copy can never overwrite a change made elsewhere (D16).
+ *
+ * Registered in `KNOWN_ACTIONS` in the SAME change as this union member (G-D).
+ * The swap's UNDO reuses `UNDO_SAVE` (Z1) — there is deliberately no `UNDO_SWAP`.
+ */
+export interface SwapSlotsRequest extends RequestBase {
+  action: 'SWAP_SLOTS';
+  payload: { sourceSlotId: number; targetSlotId: number };
 }
 
 // Rule operations
@@ -482,6 +508,7 @@ export type UiRequest =
   | PrevMatchSlotRequest
   | UnbindSlotRequest
   | UndoSaveRequest
+  | SwapSlotsRequest
   | CreateRuleRequest
   | UpdateRuleRequest
   | DeleteRuleRequest
@@ -536,12 +563,48 @@ export type AnyRequest = UiRequest | ContentRequest;
 
 export interface SaveSlotResponse {
   action: 'SAVE_SLOT';
-  result: { success: true; slot: SlotDefinition } | { success: false; errorCode: DomainErrorCode; message: string };
+  /**
+   * A10: the success branch also carries the `captureId` of the undo snapshot
+   * the overwrite captured (absent when an empty slot was saved — nothing to
+   * restore). The UI needs it to push a `replay:'background'` undo entry that
+   * names the exact capture; without it, "undo what I clicked" is impossible.
+   *
+   * This is a RESPONSE, so it does not touch the `_bidirectional` guard (which
+   * compares `AnyRequest['action']` against `KNOWN_ACTIONS`) nor the action
+   * count asserted by `messages-import-export-contract.test.ts`.
+   *
+   * R1 (F4 review): `expiresAt` is the WORKER's deadline for that snapshot. The
+   * UI must count down to it rather than deriving its own `now + 5s` from this
+   * response — that derivation lands a round-trip late, and in the gap the
+   * worker no longer honours the snapshot while the bar is still clickable
+   * (`restoreSlot` would then take its no-snapshot path and DELETE the slot).
+   */
+  result:
+    | { success: true; slot: SlotDefinition; captureId?: number; expiresAt?: number }
+    | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
 export interface SwitchSlotResponse {
   action: 'SWITCH_SLOT';
   result: { success: true; outcome: SwitchOutcome } | { success: false; errorCode: DomainErrorCode; message: string };
+}
+
+/**
+ * A10: swap response. The success branch mirrors `swapSlots`'s thin result
+ * (`changed` distinguishes "swapped" from the zero-write empty↔empty case,
+ * A1/A7) and carries the `captureId` of the swap's undo snapshot, so the UI can
+ * push a `replay:'background'` entry naming that exact capture — the SAME
+ * channel A10 opened for `SaveSlotResponse`.
+ *
+ * This is a RESPONSE: it does not touch the `_bidirectional` guard (which
+ * compares `AnyRequest['action']` against `KNOWN_ACTIONS`) nor the action count
+ * (its `'SWAP_SLOTS'` literal is already declared by `SwapSlotsRequest`).
+ */
+export interface SwapSlotsResponse {
+  action: 'SWAP_SLOTS';
+  result:
+    | { success: true; configVersion: number; changed: boolean; captureId?: number; expiresAt?: number }
+    | { success: false; errorCode: DomainErrorCode; message: string };
 }
 
 export interface NextMatchResponse {
