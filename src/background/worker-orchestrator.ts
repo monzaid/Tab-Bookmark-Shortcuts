@@ -68,6 +68,7 @@ const KNOWN_ACTIONS = [
   'CREATE_RULE',
   'UPDATE_RULE',
   'DELETE_RULE',
+  'RESTORE_RULE',
   'SET_TAB_OVERRIDE',
   'REMOVE_TAB_OVERRIDE',
   'SET_GLOBAL_STRATEGY',
@@ -630,7 +631,15 @@ export class WorkerOrchestrator {
             message: result.message,
           };
         }
-        return { success: true };
+        // The delete's undo identity rides on the response, the same way the swap's
+        // and the overwrite's do. Absent for an EMPTY slot (nothing was captured,
+        // so there is nothing to restore) — the UI uses that absence to decide
+        // whether to offer an undo at all.
+        return {
+          success: true,
+          ...(result.captureId !== undefined ? { captureId: result.captureId } : {}),
+          ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}),
+        };
       }
 
       case 'UNDO_SAVE': {
@@ -690,7 +699,21 @@ export class WorkerOrchestrator {
 
       case 'DELETE_RULE': {
         try {
-          return await this.ruleService.deleteRule(request.payload.ruleId);
+          const result = await this.ruleService.deleteRule(request.payload.ruleId);
+          // The snapshot rides BESIDE `result`, not inside it — the same
+          // side-channel `DELETE_TAG` uses. The response contract for a delete is
+          // `{ success }`, and folding the snapshot into it would make every
+          // existing consumer responsible for a field none of them reads.
+          return result.success ? { ...result, snapshot: result.snapshot } : result;
+        } catch (e) {
+          const failure: ResponseBase = { success: false, errorCode: 'INTERNAL_ERROR', message: String(e) };
+          return failure;
+        }
+      }
+
+      case 'RESTORE_RULE': {
+        try {
+          return await this.ruleService.restoreRule(request.payload.rule);
         } catch (e) {
           const failure: ResponseBase = { success: false, errorCode: 'INTERNAL_ERROR', message: String(e) };
           return failure;

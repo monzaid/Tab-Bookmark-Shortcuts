@@ -28,6 +28,7 @@ import {
   urlsMatch,
 } from '@shared/url-utils';
 import type { ConflictResult } from '@shared/url-utils';
+import type { RuleDeleteSnapshot } from '@shared/messages';
 
 // ─── Field Computation Result ────────────────────────────────────────────────
 
@@ -296,7 +297,8 @@ export class RuleService {
    * No version check — single-user local extension, direct write.
    */
   async deleteRule(ruleId: string): Promise<
-    { success: true } | { success: false; errorCode: string; message: string }
+    | { success: true; snapshot: RuleDeleteSnapshot }
+    | { success: false; errorCode: string; message: string }
   > {
     // Capture the rule's urlMatch BEFORE removal so we can re-trigger the tabs
     // that matched it. After removal their effective fields fall back to the
@@ -317,6 +319,45 @@ export class RuleService {
       await this.applyToMatchingTabs(target);
     }
 
+    // A10-style capture, taken from the pre-removal read: the WHOLE record, because
+    // `tagIds` live on it (there is no separate reference table to repair, unlike a
+    // tag deletion) and `createdAt` is not reproducible after the fact.
+    return { success: true, snapshot: { rule: structuredClone(target ?? { id: ruleId } as PageRule) } };
+  }
+
+  /**
+   * Undo a rule deletion (the replay for `DELETE_RULE`).
+   *
+   * Writes the snapshot's record back, ID INCLUDED, then re-runs the same delivery
+   * path a creation uses — a restored rule changes the fields of every tab it
+   * matches, so restoring the record without re-delivering would leave those tabs
+   * showing the fallback value the deletion produced.
+   *
+   * The duplicate case is reported rather than swallowed. `repo.addRule` refuses a
+   * rule whose `urlMatch` already exists (its duplicate check is by urlMatch, not
+   * by id), so if the user created a replacement for the deleted rule in the
+   * meantime the restore cannot land. Returning `ALREADY_EXISTS` lets the caller
+   * say so; silently returning success would claim a restore that never happened.
+   */
+  async restoreRule(rule: PageRule): Promise<
+    { success: true } | { success: false; errorCode: string; message: string }
+  > {
+    const existing = (await this.repo.getSyncState()).rules.find((r) => r.id === rule.id);
+    if (existing) {
+      // Already back (a second undo, or a concurrent restore) — idempotent success.
+      return { success: true };
+    }
+
+    const added = await this.repo.addRule(structuredClone(rule));
+    if (!added) {
+      return {
+        success: false,
+        errorCode: 'ALREADY_EXISTS',
+        message: `A rule for ${rule.urlMatch.value} already exists, so the deleted rule was not restored.`,
+      };
+    }
+
+    await this.applyToMatchingTabs(rule);
     return { success: true };
   }
 

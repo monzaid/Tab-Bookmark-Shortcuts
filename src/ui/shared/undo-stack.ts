@@ -125,6 +125,24 @@ export function createUndoReplay(
         case 'rule-tags':
           await send('SET_RULE_TAGS', { ruleId: write.ruleId, tagIds: write.previousTagIds });
           break;
+        case 'rule-enabled':
+          await send('UPDATE_RULE', { ruleId: write.ruleId, enabled: write.enabled });
+          break;
+        case 'rule-delete': {
+          // The response is INSPECTED, unlike the writes above. `addRule` refuses a
+          // rule whose `urlMatch` already exists (its duplicate check is by urlMatch,
+          // not by id), so a restore can legitimately fail — and a silent success
+          // would report a restore that never happened. `ALREADY_EXISTS` is turned
+          // into a throw so the host's catch surfaces the reason.
+          const res = (await send('RESTORE_RULE', { rule: write.rule })) as
+            | { success?: boolean; errorCode?: string; message?: string; result?: { success?: boolean; errorCode?: string; message?: string } }
+            | undefined;
+          const inner = res?.result ?? res;
+          if (inner?.success === false) {
+            throw new Error(inner.message ?? `Could not restore the rule (${inner.errorCode ?? 'unknown error'})`);
+          }
+          break;
+        }
       }
     }
   };

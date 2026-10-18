@@ -23,6 +23,7 @@ import type {
   SwitchOutcome,
 } from '@shared/types';
 import { DEFAULT_MATCH_SETTINGS } from '@shared/types';
+import type { DomainErrorCode } from '@shared/types';
 import { normalizeUrl } from '@shared/url-utils';
 import { resolveSwitch } from './switch/resolve-switch';
 import { findMatchCandidates, buildPositionRing } from './switch/primitives';
@@ -809,14 +810,43 @@ export class SlotService {
 
   // ─── Unbind Slot ───────────────────────────────────────────────────────
 
-  async unbindSlot(slotId: number): Promise<WriteResult> {
+  async unbindSlot(slotId: number): Promise<
+    | { success: true; configVersion: number; captureId?: number; expiresAt?: number }
+    | { success: false; errorCode: DomainErrorCode; message: string }
+  > {
+    // DR3 RECONSIDERED (this iteration): the delete is now undoable.
+    //
+    // The original ruling was that a delete could not be undone because no snapshot
+    // was captured and no "restore a slot" entry point existed. Neither is true any
+    // more: `captureUndoSnapshot` and `restoreSlot`'s `single` branch were built for
+    // the overwrite path and are already GENERAL slot restores (slot definition +
+    // binding), so this only has to capture before it deletes.
+    //
+    // Captured BEFORE the write: after it, the slot is gone and there is nothing to
+    // record. An empty slot yields no snapshot (nothing to restore), which is why
+    // the result's `captureId` stays optional.
+    const capture = await this.captureBeforeOverwrite(slotId);
+    const result = await this.removeSlotAndBinding(slotId);
+    if (!result.success) return result;
+    return capture ? { ...result, ...capture } : result;
+  }
+
+  /**
+   * Remove a slot's binding and definition, WITHOUT capturing a snapshot.
+   *
+   * Split out of `unbindSlot` so the two callers can differ on the one thing that
+   * matters: a user-initiated delete captures (so it can be undone), while
+   * `restoreSlot`'s "no snapshot for this capture" fallback must not — capturing
+   * there would arm a fresh undo entry from inside an undo, and the delete it
+   * performs is a degradation, not an action the user took.
+   */
+  private async removeSlotAndBinding(slotId: number): Promise<WriteResult> {
     // Remove local binding
     await this.repo.removeBinding(slotId);
     // Remove slot definition from sync storage (Problem 1: ✕ must fully reset)
     const version = this.repo.getConfigVersion();
-    const result = await this.repo.removeSlot(slotId, version);
     // B3: surface the write outcome — a failed sync removal must not be reported as success.
-    return result;
+    return this.repo.removeSlot(slotId, version);
   }
 
   // ─── Undo Snapshot (B2) ────────────────────────────────────────────────
@@ -911,8 +941,9 @@ export class SlotService {
 
     if (!pending) {
       // No (valid) entry for this capture — degrade to deletion; propagate any
-      // write failure.
-      return this.unbindSlot(slotId);
+      // write failure. Goes through the NON-capturing removal: an undo must not
+      // arm a new undo entry for a delete the user did not ask for.
+      return this.removeSlotAndBinding(slotId);
     }
 
     if (pending.kind === 'swap') {

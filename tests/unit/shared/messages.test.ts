@@ -42,6 +42,7 @@ function handleUiAction(request: UiRequest): string {
     case 'CREATE_RULE': return 'create-rule';
     case 'UPDATE_RULE': return 'update-rule';
     case 'DELETE_RULE': return 'delete-rule';
+    case 'RESTORE_RULE': return 'restore-rule';
     case 'SET_TAB_OVERRIDE': return 'set-override';
     case 'REMOVE_TAB_OVERRIDE': return 'remove-override';
     case 'SET_GLOBAL_STRATEGY': return 'set-strategy';

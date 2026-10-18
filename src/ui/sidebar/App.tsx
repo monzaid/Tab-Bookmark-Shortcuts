@@ -1489,6 +1489,7 @@ import type { FieldWord } from '@ui/shared/source-description';
 import { normalizeRuleDraft, validateRuleDraft } from '@ui/shared/rule-form-submit';
 import type { RuleDraftValue } from '@ui/shared/rule-form-submit';
 import { UndoBar as SharedUndoBar, UNDO_DEFAULT_MS } from '@ui/shared/undo-bar';
+import type { UndoLayerWrite } from '@ui/shared/undo-bar';
 import { useUndoStack, createUndoReplay } from '@ui/shared/undo-stack';
 import { useSwapPending } from '@ui/shared/use-swap-pending';
 import type { SwapHint } from '@ui/shared/use-swap-pending';
@@ -2170,6 +2171,63 @@ export function SidebarApp() {
     },
   });
 
+  // ─── Undo helper for the value-clearing writes ──────────────────────────
+
+  /**
+   * Snapshot ONE chain winner so a clear/reset can be undone.
+   *
+   * `owner` decides both the tier AND the write the replay must send: a tab
+   * override replays as `tab-override`, a slot marker as `slot-marker`.
+   *
+   * The icon is read through `iconSourceForOwner`, i.e. the RAW persisted
+   * `IconSource`, never the chain's materialized value string. A string cannot
+   * carry a recipe: replaying one forced `{type:'upload'}` and permanently
+   * flattened the recipe to a bitmap (FIX-A, the same trap the Dashboard
+   * documents). Titles have no such hazard.
+   */
+  const snapshotOfOwner = useCallback((owner: TierOwner, field: 'title' | 'icon'): UndoLayerWrite[] => {
+    // The owner names the RECORD but carries no VALUE, so the previous value is read
+    // from the store by that address. Reading it here (before the write) is the only
+    // faithful source: the chain's own value is the WINNER's, which may be a lower
+    // tier than the record being cleared.
+    const source = iconSourceForOwner(owner, {
+      slots: state.sync?.slots ?? [],
+      rules: state.sync?.rules ?? [],
+      tabOverrides: state.local?.tabOverrides ?? [],
+    });
+    if (owner.kind === 'override') {
+      const record = (state.local?.tabOverrides ?? []).find((o) => o.tabId === owner.tabId);
+      return [{
+        kind: 'tab-override',
+        tabId: owner.tabId,
+        ...(field === 'title' ? { title: record?.title } : { favicon: source }),
+      }];
+    }
+    if (owner.kind === 'slot') {
+      const record = state.sync?.slots?.find((s) => s.id === owner.slotId);
+      return [{
+        kind: 'slot-marker',
+        slotId: owner.slotId,
+        ...(field === 'title' ? { customTitle: record?.uiMarker.customTitle } : { icon: source }),
+      }];
+    }
+    // `rule` / `site` are not clearable per field from these surfaces (a rule holds
+    // both dimensions in one record; a site value is a captured snapshot), so there
+    // is nothing this helper could truthfully snapshot.
+    return [];
+  }, [state.sync, state.local]);
+
+  /** Push a `client` undo entry for a just-made clear, if it has anything to restore. */
+  const pushClearUndo = useCallback((message: string, writes: UndoLayerWrite[], affectedTabIds: number[] = []) => {
+    if (writes.length === 0) return;
+    undoStack.push({
+      replay: 'client',
+      message,
+      snapshot: { writes, affectedTabIds },
+      expiresAt: Date.now() + UNDO_DEFAULT_MS,
+    });
+  }, [undoStack]);
+
   // ─── Load commands ─────────────────────────────────────────────────────
 
   const loadCommands = useCallback(async () => {
@@ -2686,20 +2744,37 @@ export function SidebarApp() {
   }, [state.sync, state.currentTabUrl, state.currentTabTitle, state.currentTabFavicon, loadState, undoStack]);
 
   const handleUnbind = useCallback(async (slotId: number) => {
-    // Same in-flight guard as `handleSave`, and it matters MORE here: a delete is
-    // the one destructive action with no undo (DR3), and the confirmation dialog
-    // closes asynchronously — its `onConfirm` can fire twice before the dialog
-    // unmounts, sending two `UNBIND_SLOT`s for one confirmed click.
+    // Same in-flight guard as `handleSave`, and it matters MORE here: the
+    // confirmation dialog closes asynchronously, so its `onConfirm` can fire twice
+    // before the dialog unmounts, sending two `UNBIND_SLOT`s for one confirmed click.
     if (deleteInFlightRef.current.has(slotId)) return;
     deleteInFlightRef.current.add(slotId);
     try {
       // T26 (N3): a rejected write must not be reported as success.
       const result = (await sendMessage('UNBIND_SLOT', { slotId })) as
-        | { success?: boolean; result?: { success?: boolean } }
+        | {
+            success?: boolean;
+            captureId?: number;
+            expiresAt?: number;
+            result?: { success?: boolean; captureId?: number; expiresAt?: number };
+          }
         | undefined;
-      const ok = result?.result?.success ?? result?.success ?? false;
+      const inner = result?.result ?? result;
+      const ok = inner?.success ?? false;
       if (ok) {
         setToast({ variant: 'info', message: `Slot ${String(slotId)} deleted` });
+        // The delete IS undoable now (the worker captured the slot before removing
+        // it). Offered only when the worker actually captured — an EMPTY slot has
+        // nothing to restore, and an undo bar for it would be a dead control.
+        if (inner?.captureId !== undefined) {
+          undoStack.push({
+            replay: 'background',
+            slotId,
+            captureId: inner.captureId,
+            message: `Slot ${String(slotId)} deleted`,
+            expiresAt: Math.min(Date.now() + UNDO_DEFAULT_MS, inner.expiresAt ?? Number.POSITIVE_INFINITY),
+          });
+        }
         void loadState();
       } else {
         setToast({ variant: 'error', message: `Failed to delete slot ${String(slotId)}` });
@@ -2709,7 +2784,7 @@ export function SidebarApp() {
     } finally {
       deleteInFlightRef.current.delete(slotId);
     }
-  }, [loadState]);
+  }, [loadState, undoStack]);
 
   /**
    * U1: undo the bar the user CLICKED, not the newest one. `consume(id)` removes
@@ -2882,11 +2957,14 @@ export function SidebarApp() {
       // slot → rule → original (equivalent to the dashboard Title "—").
       await sendMessage('SET_TAB_OVERRIDE', { tabId: state.currentTabId, title: '' });
       setToast({ variant: 'success', message: 'Title reset' });
+      // The value is captured BEFORE the write (above), so undo restores exactly
+      // what this reset removed.
+      pushClearUndo('Title reset', snapshotOfOwner({ kind: 'override', tabId: state.currentTabId }, 'title'), [state.currentTabId]);
       void loadState();
     } catch {
       setToast({ variant: 'error', message: 'Failed to reset title' });
     }
-  }, [state.currentTabId, loadState]);
+  }, [state.currentTabId, loadState, pushClearUndo, snapshotOfOwner]);
 
   const handleTitleSave = useCallback(async () => {
     // Item 4: a commit that arrives from the button-induced blur must not undo
@@ -2953,13 +3031,16 @@ export function SidebarApp() {
       const favicon = iconDraftToIconSource(draft);
       await sendMessage('SET_TAB_OVERRIDE', { tabId: state.currentTabId, favicon });
       setToast({ variant: 'success', message: 'Icon updated' });
+      // B3: an icon OVERWRITE is undoable too — "I picked the wrong icon" is the
+      // same class of mistake as "I cleared the wrong icon".
+      pushClearUndo('Icon updated', snapshotOfOwner({ kind: 'override', tabId: state.currentTabId }, 'icon'), [state.currentTabId]);
       await loadState();
       setShowIconEditor(false);
     } catch {
       setToast({ variant: 'error', message: 'Failed to update icon' });
       setShowIconEditor(false);
     }
-  }, [state.currentTabId, loadState]);
+  }, [state.currentTabId, loadState, pushClearUndo, snapshotOfOwner]);
 
   const handleCurrentIconReset = useCallback(async () => {
     if (!state.currentTabId) return;
@@ -2969,11 +3050,12 @@ export function SidebarApp() {
       // (equivalent to the dashboard Icon "—").
       await sendMessage('SET_TAB_OVERRIDE', { tabId: state.currentTabId, favicon: null });
       setToast({ variant: 'success', message: 'Icon reset' });
+      pushClearUndo('Icon reset', snapshotOfOwner({ kind: 'override', tabId: state.currentTabId }, 'icon'), [state.currentTabId]);
       await loadState();
     } catch {
       setToast({ variant: 'error', message: 'Failed to reset icon' });
     }
-  }, [state.currentTabId, loadState]);
+  }, [state.currentTabId, loadState, pushClearUndo, snapshotOfOwner]);
 
   /**
    * G3/D-f: create a tag from the sidebar, through the SAME `CREATE_TAG` message
@@ -3099,11 +3181,14 @@ export function SidebarApp() {
         uiMarker: { icon: null },
       });
       setToast({ variant: 'success', message: `Slot ${slotId} icon cleared` });
+      // B4: `slotIconEditorId` is the slot this modal is editing, so the snapshot
+      // is taken against exactly the record the clear just wrote.
+      pushClearUndo(`Slot ${String(slotId)} icon cleared`, snapshotOfOwner({ kind: 'slot', slotId }, 'icon'));
       await loadState();
     } catch {
       setToast({ variant: 'error', message: `Failed to reset slot ${slotId} icon` });
     }
-  }, [slotIconEditorId, loadState]);
+  }, [slotIconEditorId, loadState, pushClearUndo, snapshotOfOwner]);
 
   /**
    * Items 2 / 6 / 8: "clear this layer" from a chain row — keyed by the RECORD.
@@ -3134,11 +3219,18 @@ export function SidebarApp() {
         return;
       }
       setToast({ variant: 'success', message: `${field === 'title' ? 'Title' : 'Icon'} layer cleared` });
+      // B6: the owner decides WHICH record and WHICH tier replays — the same
+      // single authority this handler already uses to address the write.
+      pushClearUndo(
+        `${field === 'title' ? 'Title' : 'Icon'} layer cleared`,
+        snapshotOfOwner(owner, field),
+        owner.kind === 'override' ? [owner.tabId] : [],
+      );
       await loadState();
     } catch {
       setToast({ variant: 'error', message: `Failed to clear the ${field} layer` });
     }
-  }, [loadState]);
+  }, [loadState, pushClearUndo, snapshotOfOwner]);
 
   const handleSlotEditTitle = useCallback(async (slotId: number, title: string) => {
     const next = title.trim();
@@ -3173,11 +3265,16 @@ export function SidebarApp() {
         variant: 'success',
         message: field === 'title' ? `Slot ${slotId} title cleared` : `Slot ${slotId} icon cleared`,
       });
+      // B5: the ⊘ button on the slot's own layer.
+      pushClearUndo(
+        field === 'title' ? `Slot ${String(slotId)} title cleared` : `Slot ${String(slotId)} icon cleared`,
+        snapshotOfOwner({ kind: 'slot', slotId }, field === 'title' ? 'title' : 'icon'),
+      );
       void loadState();
     } catch {
       setToast({ variant: 'error', message: `Failed to clear the slot ${field}` });
     }
-  }, [loadState]);
+  }, [loadState, pushClearUndo, snapshotOfOwner]);
 
   const handleSlotAddToGlobal = useCallback((slotId: number) => {
     const slot = state.sync?.slots.find((s) => s.id === slotId);

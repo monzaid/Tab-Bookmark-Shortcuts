@@ -22,6 +22,7 @@ import type {
   LocalState,
   DashboardRow,
   TagDefinition,
+  PageRule,
 } from './types';
 
 // ─── Base Message Envelope ───────────────────────────────────────────────────
@@ -147,6 +148,38 @@ export interface UpdateRuleRequest extends RequestBase {
 export interface DeleteRuleRequest extends RequestBase {
   action: 'DELETE_RULE';
   payload: { ruleId: string };
+}
+
+/**
+ * Replay a rule deletion's snapshot (the undo for `DELETE_RULE`).
+ *
+ * The whole `PageRule` travels, `id` included. That is the point: a restore must
+ * put the SAME id back, because `tagIds` live on the rule record itself and a new
+ * id would orphan every tag association the rule carried. `repo.addRule` persists
+ * whatever object it is handed without rewriting the id, so the caller's id is
+ * what survives.
+ *
+ * A SEPARATE action from `CREATE_RULE` for two reasons: `CREATE_RULE` generates its
+ * own id and takes a partial shape (no `enabled`, no `createdAt`), and it is a
+ * forward write whose semantics ("a user is making a rule") differ from a restore's
+ * ("put this exact record back"). Reusing it would mean widening its payload until
+ * the two callers disagreed about what the fields mean.
+ */
+export interface RestoreRuleRequest extends RequestBase {
+  action: 'RESTORE_RULE';
+  payload: { rule: PageRule };
+}
+
+/**
+ * The `DELETE_RULE` snapshot, carried as a SIDE-CHANNEL on the delete response.
+ *
+ * Deliberately outside `result`, mirroring `DELETE_TAG` (`worker-orchestrator.ts`):
+ * the response contract stays `{ success }`, and the UI reads the snapshot through
+ * one dedicated accessor. A snapshot inside `result` would make every existing
+ * consumer of a successful delete responsible for a field none of them use.
+ */
+export interface RuleDeleteSnapshot {
+  rule: PageRule;
 }
 
 // Tag operations (A1 — a SEPARATE message family).
@@ -512,6 +545,7 @@ export type UiRequest =
   | CreateRuleRequest
   | UpdateRuleRequest
   | DeleteRuleRequest
+| RestoreRuleRequest
   | SetTabOverrideRequest
   | RemoveTabOverrideRequest
   | SetGlobalStrategyRequest

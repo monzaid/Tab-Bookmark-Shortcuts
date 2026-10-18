@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react';
-import type { IconSource, TagDefinition } from '@shared/types';
+import type { IconSource, PageRule, TagDefinition } from '@shared/types';
 import { Button } from './components';
 
 // ─── Snapshot model ──────────────────────────────────────────────────────────
@@ -79,6 +79,32 @@ export type UndoLayerWrite =
       ruleId: string;
       /** The rule's `tagIds` before the change, i.e. what the undo restores. */
       previousTagIds: string[];
+    }
+  /**
+   * Undoing an enable/disable toggle.
+   *
+   * `enabled` is the value the undo WRITES BACK, i.e. the state before the toggle.
+   * Carrying the target value (rather than a "toggle" instruction) is deliberate:
+   * a toggle-based replay would invert whatever the rule says at UNDO time, so an
+   * edit made in between would be silently overwritten the wrong way. Writing an
+   * absolute value restores the state the user actually asked for.
+   */
+  | {
+      kind: 'rule-enabled';
+      ruleId: string;
+      enabled: boolean;
+    }
+  /**
+   * Undoing a rule deletion: the whole record, id included.
+   *
+   * The `id` is the point. `tagIds` live on the rule record, so restoring under a
+   * NEW id would orphan every tag association the rule had — the record would come
+   * back looking right and being unreferenced. `repo.addRule` persists whatever
+   * object it is given without rewriting the id, which is what makes that possible.
+   */
+  | {
+      kind: 'rule-delete';
+      rule: PageRule;
     };
 
 export interface UndoSnapshot {

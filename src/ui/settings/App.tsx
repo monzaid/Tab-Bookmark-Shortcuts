@@ -54,8 +54,8 @@ const JUMP_FIND_ATTEMPTS = 15;
 const JUMP_FIND_INTERVAL_MS = 40;
 import { canonicalIconSource, iconSourceForOwner, iconSourceToFieldSeed } from '@ui/shared/icon-source';
 import { UndoBar, UNDO_DEFAULT_MS } from '@ui/shared/undo-bar';
-import type { UndoSnapshot } from '@ui/shared/undo-bar';
-import { useUndoStack } from '@ui/shared/undo-stack';
+import type { UndoSnapshot, UndoLayerWrite } from '@ui/shared/undo-bar';
+import { useUndoStack, createUndoReplay } from '@ui/shared/undo-stack';
 import { countTagReferences, TAG_NAME_MAX, isTagColorValid, isTagNameValid } from '@shared/tags';
 import { iconSourceToIconConfig } from '@ui/shared/icon-source';
 import { getMessageClient } from '@ui/shared/message-client';
@@ -1972,6 +1972,46 @@ function InlineRuleEditor({ rule, onSave, onCancel, colSpan = 7, availableTags, 
 function RulesSection() {
   const [search, setSearch] = useState('');
   const [rules, setRules] = useState<PageRule[]>([]);
+  /**
+   * The rules domain's own undo stack (U4: one stack per surface).
+   *
+   * This section previously had NONE, which made rules the only domain with a full
+   * CRUD surface and no way back: tags could be undeleted, rules could not. Entries
+   * are `client` only — each write carries the record (or the value) needed to
+   * reverse it, so the replay needs no worker-side snapshot.
+   */
+  const undoStack = useUndoStack({
+    onReplay: (entry) => {
+      if (entry.replay === 'client') return handleRuleUndo(entry);
+      return undefined;
+    },
+  });
+  /** Assigned where `loadRules` is defined, so this section's undo can reload. */
+  const loadRulesRef = useRef<() => void>(() => undefined);
+  /** The rules table's own replay side effects: busy flag, toast, reload. */
+  const handleRuleUndo = useCallback(async (entry: { snapshot: UndoSnapshot }) => {
+    setBatchProcessing(true);
+    try {
+      await createUndoReplay(async (action, payload) => {
+        const res = (await sendMessage(action, payload)) as
+          | { success?: boolean; errorCode?: string; message?: string; result?: { success?: boolean; errorCode?: string; message?: string } }
+          | undefined;
+        return res;
+      })(entry as never);
+      setToast({ variant: 'success', message: 'Undo applied' });
+    } catch (e) {
+      // Reported, not swallowed: the one failure this can hit in practice is the
+      // duplicate-urlMatch case (`addRule` refuses an identical URL), and telling
+      // the user WHY is the difference between "the app is broken" and "there is
+      // already a rule for that URL".
+      setToast({ variant: 'error', message: e instanceof Error ? e.message : 'Undo failed' });
+    } finally {
+      setBatchProcessing(false);
+      // Through a ref: `loadRules` is declared AFTER this callback, and pulling it
+      // into the dependency array would only move the ordering problem around.
+      loadRulesRef.current();
+    }
+  }, []);
   const [showForm, setShowForm] = useState(false);
   /** Rule IDs currently expanded in inline editors — multiple can be open at once */
   const [expandedRuleIds, setExpandedRuleIds] = useState<Set<string>>(new Set());
@@ -2032,6 +2072,7 @@ function RulesSection() {
       setHasLoadedOnce(true);
     }
   }, []);
+  loadRulesRef.current = () => { void loadRules(); };
 
   useEffect(() => {
     void loadRules();
@@ -2246,11 +2287,23 @@ function RulesSection() {
   };
 
   const handleDeleteRule = async (ruleId: string) => {
+    // Capture the record BEFORE the delete: the worker also returns a snapshot, but
+    // reading it here means the undo works without threading a side-channel through
+    // the response, and the row is still on screen so its values are known.
+    const doomed = rules.find((r) => r.id === ruleId);
     try {
       const res = await sendMessage('DELETE_RULE', { ruleId });
       const result = extractResult(res);
       if (result?.success) {
         setToast({ variant: 'success', message: 'Rule deleted' });
+        if (doomed) {
+          undoStack.push({
+            replay: 'client',
+            message: `Rule deleted — ${doomed.title ?? doomed.urlMatch.value}`,
+            snapshot: { writes: [{ kind: 'rule-delete', rule: doomed }], affectedTabIds: [] },
+            expiresAt: Date.now() + UNDO_DEFAULT_MS,
+          });
+        }
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Failed to delete rule' });
       }
@@ -2262,13 +2315,23 @@ function RulesSection() {
 
   const handleToggleEnabled = async (rule: PageRule) => {
     setTogglingId(rule.id);
+    // `enabled === false` means the record is currently OFF, so the write turns it
+    // on. The undo writes the PREVIOUS state back as an absolute value rather than
+    // asking for another toggle — see `rule-enabled` in `undo-bar.tsx`.
+    const wasEnabled = rule.enabled !== false;
     try {
       const res = await sendMessage('UPDATE_RULE', {
         ruleId: rule.id,
-        enabled: rule.enabled === false,
+        enabled: !wasEnabled,
       });
       const result = extractResult(res);
       if (result?.success) {
+        undoStack.push({
+          replay: 'client',
+          message: wasEnabled ? 'Rule disabled' : 'Rule enabled',
+          snapshot: { writes: [{ kind: 'rule-enabled', ruleId: rule.id, enabled: wasEnabled }], affectedTabIds: [] },
+          expiresAt: Date.now() + UNDO_DEFAULT_MS,
+        });
         void loadRules();
       } else {
         setToast({ variant: 'error', message: (result?.message as string) || 'Failed to toggle rule' });
@@ -2286,18 +2349,35 @@ function RulesSection() {
     // D-12: report partial failures honestly instead of swallowing them.
     const ids = [...selectedIds];
     let failed = 0;
+    const failedIds = new Set<string>();
     for (const id of ids) {
       try {
         const res = await sendMessage('DELETE_RULE', { ruleId: id });
         const result = extractResult(res);
-        if (!result?.success) failed += 1;
+        if (!result?.success) {
+          failed += 1;
+          failedIds.add(id);
+        }
       } catch {
         failed += 1;
+        failedIds.add(id);
       }
     }
     setSelectedIds(new Set());
     setBatchProcessing(false);
     const deleted = ids.length - failed;
+    // ONE entry for the batch: the user pressed one button. Only the rules that
+    // actually went are captured — an entry per row would offer undos for deletes
+    // that failed.
+    const gone = rules.filter((r) => ids.includes(r.id) && !failedIds.has(r.id));
+    if (gone.length > 0) {
+      undoStack.push({
+        replay: 'client',
+        message: `${String(gone.length)} ${gone.length === 1 ? 'rule' : 'rules'} deleted`,
+        snapshot: { writes: gone.map((rule) => ({ kind: 'rule-delete' as const, rule })), affectedTabIds: [] },
+        expiresAt: Date.now() + UNDO_DEFAULT_MS,
+      });
+    }
     setToast(
       failed === 0
         ? { variant: 'success', message: `Deleted ${String(deleted)} ${deleted === 1 ? 'rule' : 'rules'}` }
@@ -2309,10 +2389,24 @@ function RulesSection() {
 
   const handleBatchSetEnabled = async (enabled: boolean) => {
     setBatchProcessing(true);
+    // The previous states, captured before the writes so the undo restores each
+    // rule to what it was rather than to a uniform value.
+    const previous = rules.filter((r) => selectedIds.has(r.id));
     for (const id of selectedIds) {
       try {
         await sendMessage('UPDATE_RULE', { ruleId: id, enabled });
       } catch { /* continue */ }
+    }
+    if (previous.length > 0) {
+      undoStack.push({
+        replay: 'client',
+        message: enabled ? `${String(previous.length)} rules enabled` : `${String(previous.length)} rules disabled`,
+        snapshot: {
+          writes: previous.map((r) => ({ kind: 'rule-enabled' as const, ruleId: r.id, enabled: r.enabled !== false })),
+          affectedTabIds: [],
+        },
+        expiresAt: Date.now() + UNDO_DEFAULT_MS,
+      });
     }
     setSelectedIds(new Set());
     setBatchProcessing(false);
@@ -2762,6 +2856,13 @@ function RulesSection() {
       {toast && (
         <Toast variant={toast.variant} message={toast.message} onDismiss={() => { setToast(null); }} />
       )}
+
+      {/* The rules table's own undo surface, on the SHARED stack (U4). */}
+      <UndoBar
+        entries={undoStack.entries}
+        onUndo={(id) => { undoStack.consume(id); }}
+        onExpire={(id) => { undoStack.expire(id); }}
+      />
     </section>
   );
 }
@@ -2923,6 +3024,40 @@ function DashboardSection() {
             ? iconSourceForOwner({ kind: 'rule', ruleId: entry.ruleId }, sourceCtxRef.current)
             : null;
     return source ? canonicalIconSource(source) : null;
+  };
+
+  /**
+   * The undo writes that restore this row's title/icon to what it holds NOW.
+   *
+   * Built from `entry.anchor` — the same OWNER the chain resolved — so the replay
+   * lands on the tier the row actually represents instead of a tier guessed from
+   * the row's `kind` (a `rule-hit` row's page-level value is an OVERRIDE, which is
+   * exactly the case `kind` alone gets wrong).
+   *
+   * ONLY the dimensions the caller passed are included, because the rows below
+   * differ in what they clear: the per-field Clear removes one dimension, the
+   * Reset removes both. Snapshotting both for a one-field clear would resurrect a
+   * value the user never touched.
+   */
+  const snapshotRow = (entry: DashboardEntry, fields: Array<'title' | 'icon'>): UndoLayerWrite[] => {
+    const anchor = entry.anchor;
+    const writes: UndoLayerWrite[] = [];
+    for (const field of fields) {
+      const value = field === 'title'
+        ? entry.chain.title.winner.value
+        : undefined;
+      const icon = field === 'icon' ? thisEntryIconSource(entry) : undefined;
+      if (anchor?.kind === 'override') {
+        writes.push({ kind: 'tab-override', tabId: anchor.tabId, ...(field === 'title' ? { title: value } : { favicon: icon }) });
+      } else if (anchor?.kind === 'slot') {
+        writes.push({ kind: 'slot-marker', slotId: anchor.slotId, ...(field === 'title' ? { customTitle: value } : { icon }) });
+      }
+      // A `rule` owner is not restorable through this union: a rule's title/icon
+      // live on the rule record, and the two kinds above are the whole vocabulary
+      // the replay implements. Leaving it out keeps the snapshot honest — the
+      // alternative is an entry that claims to undo something it cannot.
+    }
+    return writes;
   };
 
   const sortedEntries = useMemo(() => {
@@ -3155,6 +3290,9 @@ function DashboardSection() {
    */
   const resetEntry = async (entry: DashboardEntry) => {
     setBusy(true);
+    // Snapshot BEFORE the write: these read the row's current values, and after
+    // the write they would read what the write just produced.
+    const undoWrites = snapshotRow(entry, ['title', 'icon']);
     try {
       if (entry.kind === 'override' && entry.tabId != null) {
         // Q13/N10/DT11: clear via `null`, never the legacy `{type:'url',value:''}`.
@@ -3170,12 +3308,30 @@ function DashboardSection() {
         // the rule instead of pretending to blank a value that is not here.
         await sendMessage('UPDATE_RULE', { ruleId: entry.ruleId, enabled: false });
         setToast({ variant: 'success', message: `Rule disabled — ${entry.label} is no longer managed` });
+        // Undoing a disable re-enables; that is its own kind, not a layer write.
+        // `entry.ruleId` is non-null: the branch above already established it.
+        {
+          undoStack.push({
+            replay: 'client',
+            message: `Rule re-enabled — ${entry.label}`,
+            snapshot: { writes: [{ kind: 'rule-enabled', ruleId: entry.ruleId, enabled: true }], affectedTabIds: [] },
+            expiresAt: Date.now() + UNDO_DEFAULT_MS,
+          });
+        }
         void load();
         setBusy(false);
         setConfirmReset(null);
         return;
       }
       setToast({ variant: 'success', message: `${entry.label} cleared` });
+      if (undoWrites.length > 0) {
+        undoStack.push({
+          replay: 'client',
+          message: `${entry.label} cleared`,
+          snapshot: { writes: undoWrites, affectedTabIds: entry.tabId != null ? [entry.tabId] : [] },
+          expiresAt: Date.now() + UNDO_DEFAULT_MS,
+        });
+      }
       void load();
     } catch {
       setToast({ variant: 'error', message: `Failed to clear ${entry.label}` });
@@ -3196,6 +3352,10 @@ function DashboardSection() {
    */
   const clearShown = async () => {
     setBusy(true);
+    // ONE entry for the whole batch (not one per row): the user pressed one button
+    // and expects one undo. The writes are aggregated in row order, so replaying
+    // them restores each row independently.
+    const undoWrites = visibleEntries.flatMap((entry) => snapshotRow(entry, ['title', 'icon']));
     try {
       for (const entry of visibleEntries) {
         if (entry.kind === 'override' && entry.tabId != null) {
@@ -3208,6 +3368,14 @@ function DashboardSection() {
         }
       }
       setToast({ variant: 'success', message: 'Shown items cleared' });
+      if (undoWrites.length > 0) {
+        undoStack.push({
+          replay: 'client',
+          message: `Cleared ${String(visibleEntries.length)} shown ${visibleEntries.length === 1 ? 'item' : 'items'}`,
+          snapshot: { writes: undoWrites, affectedTabIds: [] },
+          expiresAt: Date.now() + UNDO_DEFAULT_MS,
+        });
+      }
       setSelected(new Set());
       void load();
     } catch {
@@ -3220,6 +3388,8 @@ function DashboardSection() {
 
   const resetSelected = async () => {
     setBusy(true);
+    const targets = visibleEntries.filter((entry) => selected.has(entry.id));
+    const undoWrites = targets.flatMap((entry) => snapshotRow(entry, ['title', 'icon']));
     try {
       // Also scoped to the visible rows: the selection is pruned to that set, so
       // this is normally the same thing — but reading the same list here means a
@@ -3236,6 +3406,14 @@ function DashboardSection() {
         }
       }
       setToast({ variant: 'success', message: 'Selected items cleared' });
+      if (undoWrites.length > 0) {
+        undoStack.push({
+          replay: 'client',
+          message: `Cleared ${String(targets.length)} selected ${targets.length === 1 ? 'item' : 'items'}`,
+          snapshot: { writes: undoWrites, affectedTabIds: [] },
+          expiresAt: Date.now() + UNDO_DEFAULT_MS,
+        });
+      }
       setSelected(new Set());
       void load();
     } catch {

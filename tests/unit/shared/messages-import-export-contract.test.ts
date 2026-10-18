@@ -104,11 +104,14 @@ describe('T14a: import/export protocol — three new actions', () => {
     // registered in the SAME change as its union member (R6).
     // Slot drag-swap (T13/A3): 52 → 53 with `SWAP_SLOTS` (Z1: the swap's undo
     // reuses `UNDO_SAVE`, so there is NO `UNDO_SWAP` — the count is 53, not 54).
-    expect(known.size).toBe(53);
+    // Undoable deletes/resets: 53 → 54 with `RESTORE_RULE` (the undo for
+    // `DELETE_RULE`). A slot delete's undo needs no new action — it reuses
+    // `UNDO_SAVE`, which already restores a general slot snapshot (Z1 again).
+    expect(known.size).toBe(54);
     // Symmetric sentinel: the reverse difference below would also catch an empty
-    // `declared`, but this names the failure directly ("declared is not 53")
+    // `declared`, but this names the failure directly ("declared is not 54")
     // instead of leaving it to a filter diff.
-    expect(declared.size).toBe(53);
+    expect(declared.size).toBe(54);
     expect([...declared].filter((a) => !known.has(a)).sort()).toEqual([]); // in union, not whitelisted
     expect([...known].filter((a) => !declared.has(a)).sort()).toEqual([]); // whitelisted, not in union
   });
