@@ -1287,7 +1287,13 @@ export class WorkerOrchestrator {
       });
     }
 
-    // 2. Slots whose title/icon was explicitly set.
+    // 2. Slots that set a title/icon of their OWN (a `uiMarker`).
+    //
+    // "Sets a value" is decided ONCE, here, by the same rule the chain uses: only
+    // the user's marker counts, never the save-time snapshot. The two used to
+    // disagree — the row was built from the marker while the CHAIN's value came from
+    // `customTitle || titleSnapshot` — so a saved slot produced a row whose chain
+    // showed a value the row did not claim to own.
     for (const slot of sync.slots) {
       const hasData = Boolean(slot.uiMarker.customTitle?.trim() || slot.uiMarker.icon?.value);
       if (!hasData) continue;
@@ -1316,9 +1322,20 @@ export class WorkerOrchestrator {
     // not already covered above (an explicit override or a slot-bound tab owns
     // that row). The winning rule is reported as the anchor so the dashboard can
     // jump to it.
+    //
+    // A binding covers its tab only when the slot actually SETS something. Every
+    // binding used to be counted as coverage, so a saved slot (which sets no marker
+    // but carries a snapshot) hid its tab from this loop — the rule that matched the
+    // tab was never reported, which is the "dashboard shows nothing for my new rule"
+    // half of the report. The test is the same `hasData` the row above uses, so a
+    // slot can no longer own a row it does not populate.
+    const slotSetsValue = (slotId: number): boolean => {
+      const slot = sync.slots.find((s) => s.id === slotId);
+      return slot !== undefined && Boolean(slot.uiMarker.customTitle?.trim() || slot.uiMarker.icon?.value);
+    };
     const coveredTabIds = new Set<number>([
       ...local.tabOverrides.map((o) => o.tabId),
-      ...local.bindings.map((b) => b.tabId),
+      ...local.bindings.filter((b) => slotSetsValue(b.slotId)).map((b) => b.tabId),
     ]);
     for (const tab of allTabs) {
       if (coveredTabIds.has(tab.id)) continue;

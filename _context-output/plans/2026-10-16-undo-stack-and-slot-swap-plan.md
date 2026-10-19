@@ -1219,6 +1219,86 @@ R1 让 UI 使用**后台的** `expiresAt`。后台在 **capture 时**打时间�
 
 **⚠️ R10 的诊断过程里我犯了一个方法论错误并已修正**：那条"慢响应仍给足 5 秒"的测试，mock **硬编码了 `workerTtl = 5000`**（已作废的配置），所以它模拟的是一个**不再存在的世界**，在正确实现下反而变红。改为**引用真实常量**，让它随配置演进。
 
+### R23（用户裁决）—— **save 不污染链上的 slot 节点**，只有显式修改才赋值（已实现）
+
+用户原话：「save 到槽位，不能污染图标/标题 override > slot > rule > site 链的 slot 节点，因为图标/标题用户并没有修改，**只有通过图标/标题修改操作后才能在 slot 节点赋值**」。
+
+**实现**：`resolveSlotTier` 的槽位值**只来自 `uiMarker`**；save 时的 `titleSnapshot` / `faviconSnapshot` **不再作为槽位值**（它们是"保存那一刻页面显示了什么"的记录，不是用户的定制）。保留一处退让：**marker 存在但协议不可用**时回退快照 —— 那是对"用户设了个坏值"的兜底，marker 缺失时**不会**触发。
+
+**关键：受影响的既有测试是"装置"问题，不是"意图"问题。**
+
+9 条测试红，它们**测的都是"槽位优先于规则"这个仍然成立的意图**，只是用**快照当载体**。我**保留其意图、更换其装置**（改用 `uiMarker` 承载），逐一处理：
+
+| 测试 | 处理 |
+|---|---|
+| `rule-service.test.ts` ×3（favicon 协议白名单） | `seedSlot` 改把值放进 `uiMarker.icon` —— 否则槽位为空，协议校验会**空洞通过** |
+| `rule-apply-persistence.test.ts` ×3 | `seedSlotBinding` 改走 marker |
+| `rule-delivery-robust.test.ts` ×1 | 同上 |
+| `sidebar-slot-tier-display.test.tsx` ×2 | fixture 的 `BOUND_SLOT` 改走 marker |
+
+**假验证（这一轮最关键，因为改装置最易造成假绿）**：把槽位层的 title 强制为 `null`（等于禁用该层），**7 条精确变红** —— 证明换过装置的测试**仍在真实测量槽位层**，没有退化成"其实在测规则"。
+
+**我此前两次判断错误，均已纠正**：先误判快照回退为"污染"并删掉测试（R22）；在用户明确语义后，才找到**正确的做法是更换装置而非删除测试**。
+
+### R22（验收缺陷）—— `Add to Global Rules` 对已绑定槽位无效 / Dashboard 不展示受 rule 影响的 tab（**诊断完成**）
+
+用户报告两点，且**第 2 点明确指出"链上有记录但 Dashboard 不展示"**，我据此做了完整取证。
+
+**被既有测试保护的设计（关键，我先搞错了）**
+
+`tests/integration/rule-apply-persistence.test.ts:157` 的测试组名是 **"Slot priority tier (current page beats rule)"**，用 `uiMarker: {}` + `titleSnapshot`（即**只有 save 时的快照、没有自定义 marker**）播种，并断言：
+
+```ts
+// Slot value wins over the rule value.
+expect(payloads.some((p) => p.title === 'Slot Custom Title')).toBe(true);
+expect(payloads.some((p) => p.title === 'Rule Low Priority')).toBe(false);
+```
+
+即：**快照本身就让槽位层赋值并压过规则，这是刻意设计**。`rule-service.test.ts` 的三条 favicon 用例（`https:` / `http:` / `data:image/png` 通过 `faviconSnapshot` 播种，断言被允许）同理。
+
+**我走错的方向（已回退，如实记录）**
+
+我最初判定 `resolveSlotTier` 用 `customTitle || titleSnapshot` 是"污染"，改为"只有 marker 才算值"。**这让 9 条既有测试变红**（3 条 `rule-service`、1 条 `rule-apply-persistence`、1 条 `rule-delivery-robust`、2 条 `sidebar-slot-tier-display`、2 条 `rule-apply-persistence`），其中 `rule-service` 的 3 条**看起来与我的改动无关**——正是它们让我去查证，才发现设计意图。**链已完全回退到原状。**
+
+我另外删掉了自己刚写的 `field-chain-snapshot.test.ts` —— 它编码了**我的错误假设**（"快照不该压过规则"），而不是事实。**测试不该为我的判断背书。**
+
+**保留的改动（Dashboard，既有测试零回归）**
+
+`buildDashboard` 的**覆盖判定与行判定不一致**：行只在有 `uiMarker` 时生成，但 `coveredTabIds` 把**所有 binding** 都算作已覆盖。后果是**一个 tab 既没有槽位行、又被排除在 rule-hit 之外 → Dashboard 上完全没有它**。这与你第 2 点描述的现象一致，且与"快照压过规则"是**两个独立问题**。
+
+改动：覆盖集只含**真正设置值**（有 `uiMarker`）的槽位绑定，与行判定使用同一谓词。
+
+**仍需你裁决的部分**
+
+第 1 点（rule 对已绑定槽位无效果）**不是 bug，而是刻意设计**——"save 到槽位 = 这个页面显示这个"。若你希望**规则能覆盖已有槽位快照**，那是**产品语义变更**，需要同时改 `resolveSlotTier` 与那 5 条保护该行为的测试，并明确：**用户显式保存到槽位后，规则是否应当改写它？**
+
+### R21（用户要求）—— **删除与重置类操作接入撤销**（三档全部实现，A7/A8 不做）
+
+用户裁决：维持 5 秒窗口、保留「确认 + 撤销」双保险、去重冲突提示「已存在同 URL 规则，未恢复」、**三档全做**。
+
+**档0（12 处，零后台改动）** —— 复用 `tab-override` / `slot-marker`：
+当前页标题/图标重置、图标覆盖（sidebar）；槽位图标重置、层级清除、Clear this layer；Dashboard 单条重置、Clear Shown、Clear Selected（**批量为一次 push**，用户按的是一个按钮）。
+
+新增 `snapshotOfOwner` / `snapshotRow`，**写前从 store 读原始值**。图标必须走 `iconSourceForOwner` 取**原始 `IconSource`** —— 用链上物化值会把配方**永久压平为位图**（FIX-A）。
+
+**档1（`rule-enabled`）** —— 重放写**绝对值**而非取反：取反会反转撤销那一刻的状态，把中间的编辑反向覆盖。`RulesSection` 此前**无 `undoStack`**（规则是唯一「全 CRUD 却零撤销」的域），现已建立并渲染 `UndoBar`。
+
+**档2（两个删除）**：
+- **`UNBIND_SLOT`**：删除前 `captureBeforeOverwrite`，`captureId` 回传，**复用 `UNDO_SAVE`** —— `restoreSlot` 的 `single` 分支本就是泛化槽恢复，故 **DR3「删除需净新增后台 action」的前提不再成立**。
+- **`DELETE_RULE`**：`RuleDeleteSnapshot` 走响应**侧信道**（与 `DELETE_TAG` 同形），新增 **`RESTORE_RULE`**，**id 原样写回**（`addRule` 不重写 id；`tagIds` 挂在规则上，换 id 会孤立全部标签关联）。
+
+**顺手修掉一个我引入的隐患**：`restoreSlot` 无快照时降级删除，而 `unbindSlot` 现在会捕获 —— 那会**在撤销内部再 arm 一条撤销**。抽出 `removeSlotAndBinding`（不捕获）供回退路径使用。
+
+**去重冲突**：`addRule` 按 **urlMatch** 去重（非 id），所以用户重建同 URL 规则后撤销会失败。`restoreRule` 返回 `ALREADY_EXISTS`，重放把它**转成抛错**，host 的 catch 显示「已存在同 URL 规则，未恢复」——**而非静默报告成功**。
+
+**两道契约守卫按设计触发并被更新**：`messages.test.ts` 的穷举 switch、`messages-import-export-contract.test.ts` 的 `KNOWN_ACTIONS ↔ declared` 双向计数（53 → 54）。
+
+**假验证**（各自精确变红）：禁掉 `pushClearUndo` → 档0 两条红；破坏 id 复用 → 档2 的 id 相关两条红。
+
+**lint**：本轮我引入的 **7 处**新增行 lint **全部定位并修完**（未推给"既有基线"），回到 664。
+
+**提交**：`5399b46`，已推送至 `origin/main`（`rev-list` 核实 `0 0`）。
+
 ### R20（用户裁决 **B**）—— 编辑状态**随数据迁移**（已实现）
 
 用户选 B：编辑状态应随数据一起移动到目标槽。

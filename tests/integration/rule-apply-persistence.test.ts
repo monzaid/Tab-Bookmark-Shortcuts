@@ -155,14 +155,23 @@ describe('T25: Rule apply-to-all, refresh persistence, slot priority chain', () 
   });
 
   describe('Slot priority tier (current page beats rule)', () => {
+    /**
+     * Seed a slot whose title/icon the user SET, via `uiMarker`.
+     *
+     * The tier's meaning is unchanged — "the bound slot outranks the rule" — but the
+     * vehicle is the marker. A save-time snapshot no longer carries a slot value
+     * (saving is a placement action, not a customization), so seeding the snapshot
+     * would leave this slot setting nothing and the assertions below would be
+     * measuring the rule instead of the slot.
+     */
     function seedSlotBinding(tabId: number, slotId = 1, title = 'Slot Custom Title', favicon = 'https://slot.com/icon.png') {
       return worker.repo.saveSlot({
         id: slotId,
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
         strategy: 'inherit',
-        uiMarker: {},
-        titleSnapshot: title,
-        faviconSnapshot: favicon,
+        uiMarker: { customTitle: title, icon: { type: 'url', value: favicon } },
+        titleSnapshot: '',
+        faviconSnapshot: '',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       }, 0).then(() =>

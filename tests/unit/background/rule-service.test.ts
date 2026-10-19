@@ -233,6 +233,14 @@ describe('T10: Page rules, field override computation, manual apply', () => {
     const slotId = 1;
     const tabId = 7;
 
+    /**
+     * Seed a slot whose ICON the user SET — via `uiMarker.icon`, not the snapshot.
+     *
+     * The value has to travel the marker: a save-time `faviconSnapshot` is no longer
+     * a slot value (it only records what the page showed), so seeding it would make
+     * every case below assert against an empty slot and pass for the wrong reason.
+     * With the marker set, the protocol allowlist is exercised on the real path.
+     */
     async function seedSlot(favicon: string): Promise<void> {
       adapter.setTabs([
         { id: tabId, windowId: 1, index: 0, url: 'https://example.com/page', title: 'Example', favIconUrl: '', active: true, incognito: false, status: 'complete' },
@@ -243,9 +251,9 @@ describe('T10: Page rules, field override computation, manual apply', () => {
           id: slotId,
           urlMatch: { type: 'exact', value: 'https://example.com/page' },
           strategy: 'inherit',
-          uiMarker: {},
+          uiMarker: { icon: { type: 'url', value: favicon } },
           titleSnapshot: 'Example',
-          faviconSnapshot: favicon,
+          faviconSnapshot: '',
           createdAt: '2026-01-01T00:00:00Z',
           updatedAt: '2026-01-01T00:00:00Z',
         },

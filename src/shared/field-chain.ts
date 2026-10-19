@@ -161,16 +161,34 @@ function resolveSlotTier(
     const slot: SlotDefinition | undefined = sync.slots.find((s) => s.id === slotId);
     if (!slot) continue;
 
-    const customTitle = slot.uiMarker.customTitle?.trim();
-    const title = customTitle || slot.titleSnapshot.trim() || null;
+    // The slot tier carries a value ONLY where the user SET one (`uiMarker`).
+    //
+    // The save-time snapshot is not a customization. `saveSlot` records the live
+    // page title/favicon into `titleSnapshot` / `faviconSnapshot` as a RECORD OF WHAT
+    // WAS THERE, and treating that as the slot's value meant "save this page to slot
+    // N" silently pinned the slot tier with a copy of the page's own title — so a
+    // rule matching that tab could never contribute, and the user could not tell why.
+    // Saving is a placement action; setting a title or icon is a customization, and
+    // only the latter may outrank the rule.
+    //
+    // Same predicate as `buildDashboard`'s "does this slot own a row", so the chain
+    // and the dashboard cannot disagree about whether a slot says anything.
+    const customTitle = slot.uiMarker.customTitle?.trim() ?? '';
+    const title = customTitle !== '' ? customTitle : null;
 
+    // The icon follows the same rule, with ONE degradation kept: a marker the user
+    // DID set but whose protocol is unusable falls back to the captured favicon.
+    // That covers a broken value the user asked for; it is not a value of its own,
+    // and it can never fire when the marker is absent (the reported case).
     let favicon: string | null = null;
-    const iconValue = slot.uiMarker.icon?.value.trim();
-    if (iconValue && isSafeFaviconProtocol(iconValue)) {
-      favicon = iconValue;
-    } else {
-      const snapshot = slot.faviconSnapshot.trim();
-      if (snapshot && isSafeFaviconProtocol(snapshot)) favicon = snapshot;
+    const iconValue = slot.uiMarker.icon?.value.trim() ?? '';
+    if (iconValue !== '') {
+      if (isSafeFaviconProtocol(iconValue)) {
+        favicon = iconValue;
+      } else {
+        const snapshot = slot.faviconSnapshot.trim();
+        if (snapshot !== '' && isSafeFaviconProtocol(snapshot)) favicon = snapshot;
+      }
     }
 
     records.push({ slotId: slot.id, title, favicon });

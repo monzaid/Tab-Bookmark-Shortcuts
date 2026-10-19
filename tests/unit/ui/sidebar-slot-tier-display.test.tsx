@@ -9,13 +9,20 @@ import { SidebarApp } from '@ui/sidebar/App';
  * slot's value that the real tab actually shows was NOT reflected in the sidebar.
  */
 
+/**
+ * The slot customizes the title and icon through its MARKER.
+ *
+ * That is what "the user set a value" means — the save-time snapshots only record
+ * what the page showed, so they no longer carry the tier. The behaviour under test
+ * (the sidebar shows the bound slot's value, beating the rule) is unchanged.
+ */
 const BOUND_SLOT = {
   id: 1,
   urlMatch: { type: 'exact' as const, value: 'https://example.com/page' },
   strategy: 'inherit' as const,
-  uiMarker: {},
-  titleSnapshot: 'Slot Bound Title',
-  faviconSnapshot: 'https://slot.com/icon.png',
+  uiMarker: { customTitle: 'Slot Bound Title', icon: { type: 'url' as const, value: 'https://slot.com/icon.png' } },
+  titleSnapshot: '',
+  faviconSnapshot: '',
   createdAt: '2026-01-01T00:00:00Z',
   updatedAt: '2026-01-01T00:00:00Z',
 };

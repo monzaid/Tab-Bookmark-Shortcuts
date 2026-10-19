@@ -170,14 +170,19 @@ describe('Rule delivery — content script primary, executeScript degraded fallb
   });
 
   describe('Slot priority tier (bound tab beats rule, other matching tabs get rule)', () => {
+    /**
+     * The slot's title/icon travel the `uiMarker`, which is what "the user set a
+     * value" now means. The tier's behaviour (the bound tab beats the rule, other
+     * matching tabs still get the rule) is exactly what this suite asserts.
+     */
     function seedSlotBinding(tabId: number, slotId = 1, title = 'Slot Custom Title', favicon = 'https://slot.com/icon.png') {
       return worker.repo.saveSlot({
         id: slotId,
         urlMatch: { type: 'exact', value: 'https://example.com/page' },
         strategy: 'inherit',
-        uiMarker: {},
-        titleSnapshot: title,
-        faviconSnapshot: favicon,
+        uiMarker: { customTitle: title, icon: { type: 'url', value: favicon } },
+        titleSnapshot: '',
+        faviconSnapshot: '',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       }, 0).then(() =>
